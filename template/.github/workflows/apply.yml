@@ -1,0 +1,36 @@
+# Application du manifeste a la demande, en plan seul par defaut. Une fusion du
+# manifeste est appliquee par la reconciliation, pas par ce workflow.
+name: appliquer le manifeste
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Plan seulement, aucune ecriture
+        type: boolean
+        default: true
+      app:
+        description: Restreindre a une application (fragment de nom)
+        type: string
+        default: ""
+      force:
+        description: Redeployer meme si l'app est deja conforme (exige une app ciblee)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  apply:
+    uses: incubateur-ademe/scalingo-watcher/.github/workflows/apply.yml@v1.0.0
+    with:
+      environment: production
+      dry_run: ${{ inputs.dry_run }}
+      app: ${{ inputs.app }}
+      force: ${{ inputs.force }}
+      # Notification Matrix (Tchap compris), facultative. Le jeton du compte bot
+      # va dans le secret MATRIX_ACCESS_TOKEN de l'environment.
+      # matrix-homeserver: https://matrix.agent.<domaine>.tchap.gouv.fr
+      # matrix-room-id: "!xxxxxxxx:agent.<domaine>.tchap.gouv.fr"

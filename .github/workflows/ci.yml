@@ -1,0 +1,45 @@
+# Integration continue de l'outil lui-meme, sans aucun secret.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/setup
+        with:
+          tool-path: .
+
+      # Node execute le TypeScript en retirant les annotations sans les
+      # verifier : sans cette etape, une lecture de champ inexistant n'apparait
+      # qu'a l'execution, et seulement sur le chemin qui l'emprunte. Un rapport
+      # d'incident a ainsi lu pendant des mois un champ qui n'a jamais existe.
+      - run: pnpm typecheck
+
+      - run: pnpm test
+
+      # Le plan parcourt tout le moteur sans rien ecrire : il prend le parc de
+      # test quand il existe, et a defaut le manifeste a la racine.
+      - name: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          dir=.
+          if [ -f test/fixtures/manifest.yaml ]; then dir=test/fixtures; fi
+          out="$RUNNER_TEMP/scalingo-watcher"
+          mkdir -p "$out"
+          set -o pipefail
+          node src/apply.ts --dry-run \
+            --manifest "$dir/manifest.yaml" --lock "$dir/lock.json" --fgp "$dir/fgp.json" --out-dir "$out" \
+            2>&1 | tee "$out/plan.log"

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Mises a jour de scalingo-watcher chez un consommateur : workflows appelants epingles par sha et presets epingles par tag, avances ensemble dans une seule PR.",
+  "extends": [
+    "helpers:pinGitHubActionDigests"
+  ],
+  "packageRules": [
+    {
+      "description": "Une version de l'outil s'execute avec les secrets d'acces a Scalingo : une semaine de decantation, puis une PR unique fusionnee apres lecture du CHANGELOG, jamais automatiquement.",
+      "matchManagers": [
+        "github-actions",
+        "renovate-config"
+      ],
+      "matchPackageNames": [
+        "incubateur-ademe/scalingo-watcher"
+      ],
+      "groupName": "scalingo-watcher",
+      "minimumReleaseAge": "7 days",
+      "automerge": false
+    }
+  ]
+}

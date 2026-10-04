@@ -1,0 +1,4 @@
+node_modules/
+inventory.json
+
+__pycache__/

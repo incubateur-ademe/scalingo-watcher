@@ -1,0 +1,64 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Veille du manifeste scalingo-watcher : version de l'outil et commit du depot applicatif de chaque app, lus dans les annotations # renovate: du manifeste.",
+    "Le fuseau, le planning et les textes du tableau de bord restent dans la configuration du depot consommateur."
+  ],
+  "minimumReleaseAge": "5 days",
+  "internalChecksFilter": "strict",
+  "prConcurrentLimit": 0,
+  "osvVulnerabilityAlerts": true,
+  "customManagers": [
+    {
+      "description": "Depot applicatif deploye par chaque app. Le nom de l'app sert de depName pour que le tableau de bord et les PR disent de quelle instance il s'agit, le depot n'etant lui qu'un detail de provenance partage par presque toutes.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)manifest\\.yaml$/"
+      ],
+      "matchStrings": [
+        "- app: (?<depName>\\S+)[\\s\\S]*?branch:\\s*[\"']?(?<currentValue>[^\"'\\s]+)[\"']?\\s*\\n\\s*# renovate: datasource=(?<datasource>\\S+) depName=(?<repo>\\S+)\\s*\\n\\s*sha:\\s*(?<currentDigest>[0-9a-f]{40})"
+      ],
+      "packageNameTemplate": "https://github.com/{{{repo}}}",
+      "depTypeTemplate": "source"
+    },
+    {
+      "description": "Version de l'outil installe par le buildpack, portee par la variable d'environnement de l'app.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)manifest\\.yaml$/"
+      ],
+      "matchStrings": [
+        "- app: (?<depName>\\S+)[\\s\\S]*?# renovate: datasource=(?<datasource>\\S+) depName=(?<packageName>\\S+)\\s*\\n\\s*version:\\s*[\"']?(?<currentValue>[^\"'\\s]+)[\"']?"
+      ],
+      "depTypeTemplate": "outil"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Un bump de SHA n'a ni semver ni changelog, donc rien a classifier. Toujours en PR, quel que soit le contenu du diff.",
+      "matchDatasources": [
+        "git-refs"
+      ],
+      "automerge": false,
+      "minimumReleaseAge": null,
+      "groupName": "depots applicatifs",
+      "commitMessageTopic": "le depot applicatif {{depName}}, branche {{currentValue}},",
+      "commitMessageExtra": "en {{newDigestShort}}"
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "description": "Une faille connue passe devant le delai de quarantaine des nouvelles releases. Pas d'automerge ici. Renovate impose ce bloc a toutes les dependances, y compris scalingo-watcher lui-meme chez un consommateur, par-dessus les packageRules. Les correctifs du manifeste restent fusionnes seuls par le preset de l'outil.",
+    "minimumReleaseAge": null,
+    "labels": [
+      "securite"
+    ]
+  },
+  "automergeStrategy": "squash",
+  "commitMessageAction": "monter",
+  "commitMessageExtra": "en {{newValue}}",
+  "commitMessageLowerCase": "never",
+  "prBodyNotes": [
+    "La verification `valider le manifeste` de cette PR execute le plan : son journal liste, application par application, ce qui sera deploye si elle est fusionnee.",
+    "La fusion ne deploie rien par elle-meme. La convergence a lieu a la reconciliation suivante, ou en declenchant `appliquer le manifeste` a la main."
+  ]
+}

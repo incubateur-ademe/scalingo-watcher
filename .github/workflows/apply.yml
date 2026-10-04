@@ -1,0 +1,153 @@
+# Application du manifeste a la demande, en plan seul par defaut.
+#
+# Workflow reutilisable : le declencheur et les permissions sont declares par
+# le workflow appelant.
+name: appliquer le manifeste
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Environment GitHub qui porte FGP_KEY ou SCALINGO_API_TOKEN
+        type: string
+        required: true
+      manifest-path:
+        type: string
+        default: manifest.yaml
+      lock-path:
+        type: string
+        default: lock.json
+      fgp-path:
+        type: string
+        default: fgp.json
+      dry_run:
+        description: Plan seulement, aucune ecriture
+        type: boolean
+        default: true
+      app:
+        description: Restreindre a une application (fragment de nom)
+        type: string
+        default: ""
+      force:
+        description: Redeployer meme si l'app est deja conforme (exige une app ciblee)
+        type: boolean
+        default: false
+      dashboard-label:
+        type: string
+        default: etat-parc
+      dashboard-title:
+        type: string
+        default: "Parc Scalingo : etat de la convergence"
+      matrix-homeserver:
+        description: Serveur Matrix du compte bot qui notifie (Tchap ou autre)
+        type: string
+        default: ""
+      matrix-room-id:
+        description: Salon Matrix a prevenir aux changements d'etat
+        type: string
+        default: ""
+      lock-commit-message:
+        type: string
+        default: "chore(lock): etat du parc apres deploiement"
+    secrets:
+      SCALINGO_API_TOKEN:
+        required: false
+      FGP_KEY:
+        required: false
+      TEAMS_WEBHOOK:
+        required: false
+      SLACK_WEBHOOK:
+        required: false
+      MATRIX_ACCESS_TOKEN:
+        required: false
+      PUSH_TOKEN:
+        required: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    # Les secrets d'acces vivent dans cet environment et non dans le depot :
+    # seuls les jobs qui le declarent peuvent les lire. Un secret de
+    # l'environment l'emporte sur celui que l'appelant aurait mappe.
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: write
+      issues: write
+    # Meme verrou que la reconciliation : jamais deux convergences en parallele.
+    concurrency:
+      group: scalingo-apply
+      cancel-in-progress: false
+    env:
+      MANIFEST_PATH: ${{ inputs.manifest-path }}
+      LOCK_PATH: ${{ inputs.lock-path }}
+      FGP_PATH: ${{ inputs.fgp-path }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.PUSH_TOKEN || github.token }}
+
+      - name: recuperer l'outil
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .scalingo-watcher
+          persist-credentials: false
+
+      - uses: ./.scalingo-watcher/actions/setup
+
+      - name: appliquer
+        env:
+          SCALINGO_API_TOKEN: ${{ secrets.SCALINGO_API_TOKEN }}
+          FGP_KEY: ${{ secrets.FGP_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          APP: ${{ inputs.app }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          out="$RUNNER_TEMP/scalingo-watcher"
+          mkdir -p "$out"
+          # Pas de `cond && cmd` ici : les runners executent avec bash -e, donc
+          # une condition fausse en fin de ligne ferait echouer l'etape.
+          args=(--manifest "$MANIFEST_PATH" --lock "$LOCK_PATH" --fgp "$FGP_PATH" --out-dir "$out")
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ -n "$APP" ]; then args+=(--app "$APP"); fi
+          if [ "$FORCE" = "true" ]; then args+=(--force); fi
+          set -o pipefail
+          node .scalingo-watcher/src/apply.ts "${args[@]}" | tee "$out/apply.log"
+
+      # Le lock reflete ce qui a ete reellement deploye : il doit revenir dans le
+      # depot meme quand une partie des applications a echoue, sinon la prochaine
+      # execution repart d'un etat perime et redeploie ce qui est deja en place.
+      - name: consigner le lock
+        if: ${{ always() && !inputs.dry_run }}
+        uses: ./.scalingo-watcher/actions/commit-lock
+        with:
+          lock-path: ${{ inputs.lock-path }}
+          message: ${{ inputs.lock-commit-message }}
+
+      # Le moteur n'ecrit pas de rapport en plan, il n'y a donc rien a publier.
+      - name: signaler
+        if: ${{ always() && !inputs.dry_run }}
+        uses: ./.scalingo-watcher/actions/signaler
+        with:
+          token: ${{ github.token }}
+          teams-webhook: ${{ secrets.TEAMS_WEBHOOK }}
+          slack-webhook: ${{ secrets.SLACK_WEBHOOK }}
+          matrix-homeserver: ${{ inputs.matrix-homeserver }}
+          matrix-room-id: ${{ inputs.matrix-room-id }}
+          matrix-token: ${{ secrets.MATRIX_ACCESS_TOKEN }}
+          report-path: ${{ runner.temp }}/scalingo-watcher/incident.md
+          label: ${{ inputs.dashboard-label }}
+          title: ${{ inputs.dashboard-title }}
+
+      - name: resume
+        if: always()
+        run: |
+          {
+            echo "### Application"
+            echo
+            echo '```'
+            tail -40 "$RUNNER_TEMP/scalingo-watcher/apply.log" 2>/dev/null || echo "aucune sortie"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

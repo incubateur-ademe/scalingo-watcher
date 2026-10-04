@@ -1,0 +1,65 @@
+# Parc fictif des tests du moteur : apps, depots et sha n'existent pas.
+# Il couvre une base pilotee par region, une app en pause et une app sans base.
+
+defaults:
+  policy:
+    minor: auto
+    major: pr
+  backup: required
+
+apps:
+  - app: alpha-metabase
+    region: osc-fr1
+    database:
+      version: 16.15.0-1
+    source:
+      repo: exemple/metabase-scalingo
+      branch: main
+      # renovate: datasource=git-refs depName=exemple/metabase-scalingo
+      sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    tool:
+      env: METABASE_VERSION
+      # renovate: datasource=github-releases depName=metabase/metabase
+      version: v0.63.18
+
+  - app: beta-metabase
+    region: osc-fr1
+    paused: true
+    database:
+      version: 16.9.0-1
+    source:
+      repo: exemple/metabase-scalingo
+      branch: main
+      # renovate: datasource=git-refs depName=exemple/metabase-scalingo
+      sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    tool:
+      env: METABASE_VERSION
+      # renovate: datasource=github-releases depName=metabase/metabase
+      version: v0.63.18
+
+  - app: gamma-metabase
+    region: osc-secnum-fr1
+    database:
+      version: 17.11.0-1
+    source:
+      repo: exemple/metabase-scalingo
+      branch: oauth2
+      # renovate: datasource=git-refs depName=exemple/metabase-scalingo
+      sha: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    tool:
+      env: METABASE_VERSION
+      # renovate: datasource=github-releases depName=metabase/metabase
+      version: v0.63.18
+
+  - app: delta-metabase
+    region: osc-secnum-fr1
+    backup: not-available
+    source:
+      repo: exemple/metabase-scalingo
+      branch: main
+      # renovate: datasource=git-refs depName=exemple/metabase-scalingo
+      sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    tool:
+      env: METABASE_VERSION
+      # renovate: datasource=github-releases depName=metabase/metabase
+      version: v0.63.18

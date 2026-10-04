@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Versioning de Metabase et fusion de ses versions dans le manifeste : correctifs fusionnes seuls, montees fonctionnelles en PR.",
+  "packageRules": [
+    {
+      "description": "Metabase publie 0.x pour l'OSS et 1.x pour l'EE : ce sont deux lignes distinctes, jamais comparables entre elles. Le groupe compatibility les isole. Consequence sur les updateTypes : major = 2e chiffre (0.63 -> 0.64, montee fonctionnelle), minor = 3e chiffre (0.63.15 -> 0.63.16, correctif).",
+      "matchPackageNames": [
+        "metabase/metabase"
+      ],
+      "versioning": "regex:^v?(?<compatibility>\\d+)\\.(?<major>\\d+)\\.(?<minor>\\d+)(?:\\.(?<patch>\\d+))?$",
+      "commitMessageTopic": "Metabase"
+    },
+    {
+      "description": "Correctifs de Metabase : automerge, le job d'apply deroule ensuite dans l'ordre du manifeste. Restreint au manifeste : une mise a jour de scalingo-watcher ne doit jamais etre fusionnee seule. Restreint a Metabase, seul outil dont le versioning fait de minor un correctif.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "metabase/metabase"
+      ],
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "automerge": true,
+      "groupName": "correctifs outils"
+    },
+    {
+      "description": "Montees fonctionnelles de Metabase : PR, jamais d'automerge",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "metabase/metabase"
+      ],
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "automerge": false,
+      "groupName": "montee fonctionnelle des outils"
+    }
+  ]
+}

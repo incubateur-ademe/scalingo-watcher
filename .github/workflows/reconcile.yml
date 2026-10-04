@@ -1,0 +1,149 @@
+# Renovate fusionne le manifeste puis s'arrete. Il ne repasse jamais sur une app
+# restee en arriere apres un echec ou une interruption, et il ne sait rien de ce
+# qui tourne reellement. Cette execution periodique ferme la boucle : elle releve
+# l'etat du parc, signale ce qui a bouge hors du watcher, puis converge.
+#
+# Workflow reutilisable : les declencheurs (cron, push sur le manifeste,
+# lancement manuel) et les permissions sont declares par le workflow appelant.
+name: reconcilier le parc
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Environment GitHub qui porte FGP_KEY ou SCALINGO_API_TOKEN
+        type: string
+        required: true
+      manifest-path:
+        type: string
+        default: manifest.yaml
+      lock-path:
+        type: string
+        default: lock.json
+      fgp-path:
+        type: string
+        default: fgp.json
+      dry_run:
+        description: Relever et comparer sans rien deployer
+        type: boolean
+        default: false
+      dashboard-label:
+        type: string
+        default: etat-parc
+      dashboard-title:
+        type: string
+        default: "Parc Scalingo : etat de la convergence"
+      matrix-homeserver:
+        description: Serveur Matrix du compte bot qui notifie (Tchap ou autre)
+        type: string
+        default: ""
+      matrix-room-id:
+        description: Salon Matrix a prevenir aux changements d'etat
+        type: string
+        default: ""
+      lock-commit-message:
+        type: string
+        default: "chore(lock): etat du parc apres reconciliation"
+    secrets:
+      SCALINGO_API_TOKEN:
+        required: false
+      FGP_KEY:
+        required: false
+      TEAMS_WEBHOOK:
+        required: false
+      SLACK_WEBHOOK:
+        required: false
+      MATRIX_ACCESS_TOKEN:
+        required: false
+      PUSH_TOKEN:
+        required: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    # Les secrets d'acces vivent dans cet environment et non dans le depot :
+    # seuls les jobs qui le declarent peuvent les lire. Un secret de
+    # l'environment l'emporte sur celui que l'appelant aurait mappe.
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: write
+      issues: write
+    # Jamais deux convergences en parallele, et jamais annuler celle en cours :
+    # elle peut etre au milieu d'une sauvegarde ou d'un deploiement. Le groupe
+    # est pose ici et pas chez l'appelant : le meme groupe aux deux niveaux
+    # fait annuler le run par GitHub pour interblocage. Son nom est celui des
+    # versions precedentes : renomme, il laisserait un passage lance par
+    # l'ancienne definition tourner en meme temps que le premier de la nouvelle.
+    concurrency:
+      group: scalingo-apply
+      cancel-in-progress: false
+    env:
+      MANIFEST_PATH: ${{ inputs.manifest-path }}
+      LOCK_PATH: ${{ inputs.lock-path }}
+      FGP_PATH: ${{ inputs.fgp-path }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.PUSH_TOKEN || github.token }}
+
+      - name: recuperer l'outil
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .scalingo-watcher
+          persist-credentials: false
+
+      - uses: ./.scalingo-watcher/actions/setup
+
+      - name: reconcilier
+        env:
+          SCALINGO_API_TOKEN: ${{ secrets.SCALINGO_API_TOKEN }}
+          FGP_KEY: ${{ secrets.FGP_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          out="$RUNNER_TEMP/scalingo-watcher"
+          mkdir -p "$out"
+          args=(--reconcile --manifest "$MANIFEST_PATH" --lock "$LOCK_PATH" --fgp "$FGP_PATH" --out-dir "$out")
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          # Sans pipefail, le code retenu serait celui de tee : une convergence
+          # en echec ressortait en vert.
+          set -o pipefail
+          node .scalingo-watcher/src/apply.ts "${args[@]}" | tee "$out/reconcile.log"
+
+      # Le lock reflete ce qui a ete reellement deploye : il doit revenir dans le
+      # depot meme quand une partie des applications a echoue, sinon la prochaine
+      # execution repart d'un etat perime et redeploie ce qui est deja en place.
+      - name: consigner le lock
+        if: ${{ always() && !inputs.dry_run }}
+        uses: ./.scalingo-watcher/actions/commit-lock
+        with:
+          lock-path: ${{ inputs.lock-path }}
+          message: ${{ inputs.lock-commit-message }}
+
+      # Le moteur n'ecrit pas de rapport en plan, il n'y a donc rien a publier.
+      - name: signaler
+        if: ${{ always() && !inputs.dry_run }}
+        uses: ./.scalingo-watcher/actions/signaler
+        with:
+          token: ${{ github.token }}
+          teams-webhook: ${{ secrets.TEAMS_WEBHOOK }}
+          slack-webhook: ${{ secrets.SLACK_WEBHOOK }}
+          matrix-homeserver: ${{ inputs.matrix-homeserver }}
+          matrix-room-id: ${{ inputs.matrix-room-id }}
+          matrix-token: ${{ secrets.MATRIX_ACCESS_TOKEN }}
+          report-path: ${{ runner.temp }}/scalingo-watcher/incident.md
+          label: ${{ inputs.dashboard-label }}
+          title: ${{ inputs.dashboard-title }}
+
+      - name: resume
+        if: always()
+        run: |
+          {
+            echo "### Reconciliation"
+            echo
+            echo '```'
+            tail -30 "$RUNNER_TEMP/scalingo-watcher/reconcile.log" 2>/dev/null || echo "aucune sortie"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

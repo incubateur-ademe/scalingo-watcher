@@ -1,0 +1,16 @@
+# Validation du manifeste et plan publie en commentaire de pull request. Aucun
+# secret : ce workflow tourne sur les pull requests.
+name: valider le manifeste
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate:
+    uses: incubateur-ademe/scalingo-watcher/.github/workflows/validate.yml@v1.0.0

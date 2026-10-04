@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "generatedAt": "2026-09-20T10:10:00.000Z",
+  "apps": {
+    "osc-fr1/alpha-metabase": {
+      "source": {
+        "repo": "exemple/metabase-scalingo",
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "tool": {
+        "env": "METABASE_VERSION",
+        "version": "v0.63.18"
+      },
+      "buildpacks": [
+        {
+          "repo": "Scalingo/metabase-buildpack",
+          "ref": null
+        }
+      ],
+      "deployment": {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "status": "success",
+        "at": "2026-09-20T10:00:00.000Z"
+      },
+      "backup": null,
+      "quarantine": null
+    },
+    "osc-fr1/beta-metabase": {
+      "source": {
+        "repo": "exemple/metabase-scalingo",
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "tool": {
+        "env": "METABASE_VERSION",
+        "version": "v0.63.18"
+      },
+      "buildpacks": [
+        {
+          "repo": "Scalingo/metabase-buildpack",
+          "ref": null
+        }
+      ],
+      "deployment": {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "status": "success",
+        "at": "2026-09-03T10:00:00.000Z"
+      },
+      "backup": null,
+      "quarantine": null
+    },
+    "osc-secnum-fr1/gamma-metabase": {
+      "source": {
+        "repo": "exemple/metabase-scalingo",
+        "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "tool": {
+        "env": "METABASE_VERSION",
+        "version": "v0.63.18"
+      },
+      "buildpacks": [
+        {
+          "repo": "Scalingo/metabase-buildpack",
+          "ref": null
+        }
+      ],
+      "deployment": {
+        "id": "00000000-0000-4000-8000-000000000003",
+        "status": "success",
+        "at": "2026-09-20T10:05:00.000Z"
+      },
+      "backup": null,
+      "quarantine": null
+    },
+    "osc-secnum-fr1/delta-metabase": {
+      "source": {
+        "repo": "exemple/metabase-scalingo",
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "tool": {
+        "env": "METABASE_VERSION",
+        "version": "v0.63.18"
+      },
+      "buildpacks": [
+        {
+          "repo": "Scalingo/metabase-buildpack",
+          "ref": null
+        }
+      ],
+      "deployment": {
+        "id": "00000000-0000-4000-8000-000000000004",
+        "status": "success",
+        "at": "2026-09-20T10:10:00.000Z"
+      },
+      "backup": null,
+      "quarantine": null
+    }
+  }
+}

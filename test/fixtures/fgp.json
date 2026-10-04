@@ -1,0 +1,12 @@
+{
+  "url": "https://fgp.exemple.test",
+  "api": {
+    "osc-fr1": "blob-api-osc-fr1",
+    "osc-secnum-fr1": "blob-api-osc-secnum-fr1"
+  },
+  "backup": {
+    "osc-fr1/alpha-metabase": "blob-alpha",
+    "osc-fr1/beta-metabase": "blob-beta",
+    "osc-secnum-fr1/gamma-metabase": "blob-gamma"
+  }
+}

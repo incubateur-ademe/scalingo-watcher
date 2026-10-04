@@ -1,0 +1,20 @@
+{
+    "extends": "@tsconfig/node26/tsconfig.json",
+    "include": ["src/**/*.ts", "test/**/*.ts"],
+    // Node 26 execute le TypeScript en retirant les annotations sans jamais les
+    // verifier : sans cette passe, une lecture de champ inexistant ne se
+    // manifeste qu'a l'execution, et seulement sur le chemin qui l'emprunte.
+    // @tsconfig/node26 ne pose pas strict ; le code le tenait deja.
+    "compilerOptions": {
+        "strict": true,
+        "noEmit": true,
+        // Un parametre qu'aucun corps ne lit se lit quand meme a l'appel, et
+        // laisse croire que ce qu'il porte circule. Un jeton d'authentification
+        // a ainsi traverse toute la chaine du releve sans etre utilise nulle
+        // part, pendant que l'amorcage partait sans entete.
+        "noUnusedParameters": true,
+        // test/test.ts importe "../src/apply.ts" a l'extension pres, comme Node
+        // l'exige pour executer du TypeScript directement.
+        "allowImportingTsExtensions": true
+    }
+}

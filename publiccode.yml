@@ -1,0 +1,86 @@
+# Metadonnees pour les catalogues de logiciels publics.
+# Standard : https://publiccodeyml.github.io/v0/
+publiccodeYmlVersion: "0"
+
+name: scalingo-watcher
+url: "https://github.com/incubateur-ademe/scalingo-watcher"
+landingURL: "https://github.com/incubateur-ademe/scalingo-watcher"
+
+platforms:
+  - linux
+  - mac
+
+categories:
+  - cloud-management
+  - it-management
+
+developmentStatus: stable
+softwareType: "standalone/other"
+
+organisation:
+  uri: "https://github.com/incubateur-ademe"
+  name: "Incubateur de l'ADEME"
+
+description:
+  fr:
+    shortDescription: >-
+      Fait converger un parc d'applications Scalingo vers un manifeste
+      versionné, tenu à jour par Renovate et appliqué par GitHub Actions.
+    longDescription: >
+      scalingo-watcher maintient à jour des applications Scalingo déployées à
+      partir d'un buildpack outil, comme Metabase, sans intervention manuelle
+      sur chaque instance.
+
+
+      Le parc est décrit dans un manifeste versionné dans un dépôt Git. Renovate
+      surveille les nouvelles versions de l'outil et des dépôts sources, et
+      propose les mises à jour du manifeste en pull request. Une réconciliation
+      périodique, lancée par GitHub Actions, relève l'état réel du parc, signale
+      ce qui a bougé hors du manifeste, puis fait converger chaque application.
+      Quand le manifeste l'exige, chaque déploiement est précédé d'une
+      sauvegarde des bases de l'application, dont l'échec annule l'opération.
+      Ce qui a réellement été déployé est consigné dans un fichier de lock
+      commité dans le dépôt.
+
+
+      L'outil est distribué sous forme de workflows GitHub réutilisables,
+      d'actions composites et de presets Renovate, versionnés par release. Un
+      dépôt consommateur ne contient que ses données : manifeste, lock et
+      configuration Renovate. Un dépôt modèle en fournit le squelette, et une
+      commande d'amorçage écrit le premier manifeste depuis l'état réel du
+      parc. L'accès à Scalingo passe soit par un jeton d'API, soit par un proxy
+      qui borne les droits accordés.
+    documentation: "https://github.com/incubateur-ademe/scalingo-watcher#readme"
+    features:
+      - Manifeste déclaratif du parc, validé par un schéma JSON
+      - Réconciliation périodique entre le manifeste et l'état réel des applications
+      - Sauvegarde des bases avant déploiement, dont l'échec annule l'opération
+      - Déploiement progressif, une application éclaireuse puis les suivantes
+      - Proposition des montées de version de base en pull request
+      - Plan de ce qu'une fusion entraînera, publié en commentaire de pull request
+      - Tableau de bord tenu dans une issue unique, notification Teams, Slack, Mattermost ou Tchap aux changements d'état
+      - Mises à jour de l'outil et du parc suivies par Renovate
+
+legal:
+  license: MIT
+  mainCopyrightOwner: ADEME
+
+maintenance:
+  type: internal
+  contacts:
+    - name: Lilian Saget-Lethias
+      affiliation: "Incubateur de l'ADEME"
+
+localisation:
+  localisationReady: false
+  availableLanguages:
+    - fr
+
+dependsOn:
+  open:
+    - name: Node.js
+      versionMin: "26"
+    - name: Renovate
+  proprietary:
+    - name: Scalingo
+    - name: GitHub Actions

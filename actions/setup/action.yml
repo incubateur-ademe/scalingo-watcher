@@ -1,0 +1,28 @@
+name: preparer scalingo-watcher
+description: >
+  Installe pnpm et Node aux versions fixees par l'outil, puis ses dependances.
+  Les versions sont lues dans l'outil et non dans le depot appelant, qui n'a ni
+  package.json ni .nvmrc.
+
+inputs:
+  tool-path:
+    description: Dossier ou l'outil a ete recupere, relatif a la racine du depot
+    required: false
+    default: .scalingo-watcher
+
+runs:
+  using: composite
+  steps:
+    - uses: pnpm/action-setup@v6
+      with:
+        package_json_file: ${{ inputs.tool-path }}/package.json
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version-file: ${{ inputs.tool-path }}/.nvmrc
+        cache: pnpm
+        cache-dependency-path: ${{ inputs.tool-path }}/pnpm-lock.yaml
+
+    - shell: bash
+      working-directory: ${{ inputs.tool-path }}
+      run: pnpm install --frozen-lockfile

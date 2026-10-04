@@ -1,0 +1,4 @@
+# Clone local de l'outil, au meme emplacement que dans les workflows.
+.scalingo-watcher/
+# Sortie de `audit.ts --json`.
+inventory.json

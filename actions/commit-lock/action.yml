@@ -1,0 +1,60 @@
+name: consigner le lock
+description: >
+  Commite le lock s'il a change et le pousse sur la branche executee, en
+  rejouant le commit par-dessus ce qui a ete pousse entre-temps.
+
+inputs:
+  lock-path:
+    description: Chemin du lock, relatif a la racine du depot
+    required: false
+    default: lock.json
+  message:
+    description: Message du commit
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        LOCK_PATH: ${{ inputs.lock-path }}
+        MESSAGE: ${{ inputs.message }}
+      run: |
+        set -euo pipefail
+        # git diff ignore un fichier non suivi : un lock cree par ce passage
+        # serait annonce inchange, jamais commite, et le passage suivant
+        # repartirait d'un lock vide pour redeployer tout le parc.
+        if [ -z "$(git status --porcelain -- "$LOCK_PATH")" ]; then
+          echo "lock inchange"
+          exit 0
+        fi
+
+        if [ "$GITHUB_REF_TYPE" != "branch" ]; then
+          echo "::error::execution sur le $GITHUB_REF_TYPE $GITHUB_REF_NAME : le lock ne peut etre pousse que sur une branche"
+          exit 1
+        fi
+
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add -- "$LOCK_PATH"
+        git commit -m "$MESSAGE"
+
+        # Une convergence dure parfois des dizaines de minutes : une fusion
+        # arrivee entre-temps fait refuser le push. Le commit est rejoue
+        # par-dessus, et un lock qui ne revient pas fait echouer le job, sinon
+        # la prochaine execution repartirait d'un etat perime sans que personne
+        # ne le voie.
+        for attempt in 1 2 3; do
+          if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then
+            echo "lock pousse (tentative $attempt)"
+            exit 0
+          fi
+          git rebase --abort 2>/dev/null || true
+          if [ "$attempt" -lt 3 ]; then
+            echo "push refuse, nouvelle tentative dans $((attempt * 15)) s"
+            sleep $((attempt * 15))
+          fi
+        done
+
+        echo "::error::le lock n'a pas pu etre pousse apres 3 tentatives"
+        exit 1

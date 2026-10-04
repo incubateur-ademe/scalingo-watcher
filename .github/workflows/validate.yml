@@ -1,0 +1,98 @@
+# Workflow reutilisable : les declencheurs et les permissions sont declares par
+# le workflow appelant. Aucun environment et aucun secret Scalingo : ce
+# workflow tourne sur les pull requests.
+name: valider le manifeste
+
+on:
+  workflow_call:
+    inputs:
+      manifest-path:
+        type: string
+        default: manifest.yaml
+      lock-path:
+        type: string
+        default: lock.json
+      fgp-path:
+        type: string
+        default: fgp.json
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      MANIFEST_PATH: ${{ inputs.manifest-path }}
+      LOCK_PATH: ${{ inputs.lock-path }}
+      FGP_PATH: ${{ inputs.fgp-path }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: recuperer l'outil
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .scalingo-watcher
+          persist-credentials: false
+
+      - uses: ./.scalingo-watcher/actions/setup
+
+      - name: valider
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          out="$RUNNER_TEMP/scalingo-watcher"
+          mkdir -p "$out"
+          node .scalingo-watcher/src/apply.ts --validate \
+            --manifest "$MANIFEST_PATH" --lock "$LOCK_PATH" --fgp "$FGP_PATH" --out-dir "$out"
+
+      # Le plan tourne sans jeton Scalingo, volontairement : une pull request ne
+      # doit pas avoir acces a un secret qui deploie. Il compare le lock au
+      # manifeste et controle que chaque commit epingle appartient bien a la
+      # branche declaree, ce qui suffit a montrer ce que la fusion entrainera.
+      - name: plan
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          out="$RUNNER_TEMP/scalingo-watcher"
+          mkdir -p "$out"
+          set -o pipefail
+          node .scalingo-watcher/src/apply.ts --dry-run \
+            --manifest "$MANIFEST_PATH" --lock "$LOCK_PATH" --fgp "$FGP_PATH" --out-dir "$out" \
+            2>&1 | tee "$out/plan.log"
+
+      - name: publier le plan
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          FROM_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        run: |
+          out="$RUNNER_TEMP/scalingo-watcher"
+          {
+            echo "## Ce que cette fusion entrainera"
+            echo
+            echo "Etat du parc selon \`$LOCK_PATH\`, compare a \`$MANIFEST_PATH\` tel qu'il sera apres fusion."
+            echo
+            echo '```'
+            cat "$out/plan.log" 2>/dev/null || echo "le plan n'a pas produit de sortie"
+            echo '```'
+            echo
+            echo "_Rien n'est deploye par la fusion. La convergence a lieu a la reconciliation suivante._"
+          } > "$out/comment.md"
+
+          cat "$out/comment.md" >> "$GITHUB_STEP_SUMMARY"
+          # Le jeton d'une pull request venue d'un fork est en lecture seule :
+          # le commentaire serait refuse et le check passerait au rouge sans
+          # rien dire du manifeste. Le plan reste dans le resume du job.
+          if [ "$FROM_FORK" = "true" ]; then
+            echo "pull request venue d'un fork : plan publie dans le resume du job"
+            exit 0
+          fi
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body-file "$out/comment.md" --edit-last --create-if-none

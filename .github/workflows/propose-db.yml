@@ -1,0 +1,137 @@
+# Renovate ne peut pas suivre les versions de bases : ce n'est pas une
+# dependance publiee quelque part mais un etat de la plateforme, et aucune
+# datasource ne l'expose. Le watcher tient donc ce role lui-meme, en ouvrant la
+# pull request qui porte la decision.
+#
+# Workflow reutilisable : le cron et les permissions sont declares par le
+# workflow appelant.
+name: proposer les montees de base
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Environment GitHub qui porte FGP_KEY ou SCALINGO_API_TOKEN
+        type: string
+        required: true
+      manifest-path:
+        type: string
+        default: manifest.yaml
+      lock-path:
+        type: string
+        default: lock.json
+      fgp-path:
+        type: string
+        default: fgp.json
+      branch:
+        description: Branche reutilisee d'un passage a l'autre pour porter la proposition
+        type: string
+        default: montee-base
+      commit-message:
+        type: string
+        default: "chore(base): proposer la montee de version des bases"
+    secrets:
+      SCALINGO_API_TOKEN:
+        required: false
+      FGP_KEY:
+        required: false
+      PUSH_TOKEN:
+        required: false
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: write
+      pull-requests: write
+    # Pas le verrou de la convergence : --propose-db sort avant toute
+    # convergence et ne touche ni le parc ni le lock, l'attente derriere une
+    # reconciliation longue ne protegerait rien. Deux propositions en parallele
+    # se disputeraient la meme branche, poussee en force.
+    concurrency:
+      group: scalingo-watcher-propose-db
+      cancel-in-progress: false
+    env:
+      MANIFEST_PATH: ${{ inputs.manifest-path }}
+      LOCK_PATH: ${{ inputs.lock-path }}
+      FGP_PATH: ${{ inputs.fgp-path }}
+    steps:
+      # Une pull request ouverte avec le GITHUB_TOKEN ne declenche pas la
+      # validation : PUSH_TOKEN, quand il existe, pousse la branche et ouvre la
+      # pull request.
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.PUSH_TOKEN || github.token }}
+
+      - name: recuperer l'outil
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .scalingo-watcher
+          persist-credentials: false
+
+      - uses: ./.scalingo-watcher/actions/setup
+
+      - name: proposer
+        env:
+          SCALINGO_API_TOKEN: ${{ secrets.SCALINGO_API_TOKEN }}
+          FGP_KEY: ${{ secrets.FGP_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          out="$RUNNER_TEMP/scalingo-watcher"
+          mkdir -p "$out"
+          set -o pipefail
+          node .scalingo-watcher/src/apply.ts --propose-db \
+            --manifest "$MANIFEST_PATH" --lock "$LOCK_PATH" --fgp "$FGP_PATH" --out-dir "$out" \
+            | tee "$out/propose.log"
+
+      # Ce workflow ne tient pas le verrou de la convergence et ne commite que
+      # le manifeste. Un lock modifie trahirait une convergence menee ici.
+      - name: verifier que le parc n'a pas ete touche
+        run: git diff --exit-code -- "$LOCK_PATH"
+
+      - name: ouvrir la pull request
+        env:
+          GH_TOKEN: ${{ secrets.PUSH_TOKEN || github.token }}
+          BRANCH: ${{ inputs.branch }}
+          COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/scalingo-watcher"
+          if git diff --quiet -- "$MANIFEST_PATH"; then
+            echo "aucune montee a proposer"
+            exit 0
+          fi
+
+          for f in pr-title.txt pr-body.md; do
+            if [ ! -s "$out/$f" ]; then
+              echo "::error::le manifeste a change mais le moteur n'a pas produit $out/$f"
+              exit 1
+            fi
+          done
+
+          # La pull request vise la branche executee : main pour le cron.
+          base="$GITHUB_REF_NAME"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add -- "$MANIFEST_PATH"
+          git commit -m "$COMMIT_MESSAGE"
+          git push -f origin "$BRANCH"
+
+          # Le titre et le corps sont reecrits a chaque passage : la branche
+          # etant reutilisee, une pull request deja relue peut porter autre
+          # chose, et son libelle doit dire ce qu'elle contient maintenant.
+          title=$(cat "$out/pr-title.txt")
+          pr_number=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr_number" ]; then
+            gh pr create --head "$BRANCH" --base "$base" \
+              --title "$title" --body-file "$out/pr-body.md"
+          else
+            gh pr edit "$pr_number" \
+              --title "$title" --body-file "$out/pr-body.md"
+            echo "pull request #$pr_number mise a jour"
+          fi
+

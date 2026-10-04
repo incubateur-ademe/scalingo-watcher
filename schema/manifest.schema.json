@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:scalingo-watcher:manifest",
+  "title": "Manifest scalingo-watcher",
+  "description": "Declare l'intention : quelle version de quel outil doit tourner sur quelle app Scalingo, depuis quel depot applicatif. Ce fichier est la seule source editee a la main (par un humain ou par Renovate). L'etat reellement deploye vit dans lock.json et n'est jamais edite manuellement.\n\nDeux mecaniques dependent de details de forme et cassent en silence si on les ignore :\n1. Les commentaires d'annotation `# renovate: datasource=... depName=...` doivent preceder immediatement la ligne `sha:` ou `version:` qu'ils decrivent. Renovate les lit via les customManagers du preset base de scalingo-watcher (renovate/base.json). Les deplacer ou les supprimer coupe la veille sans aucune erreur visible.\n2. L'ordre du tableau `apps` est significatif : c'est l'ordre de deploiement, du moins critique au plus critique. Reordonner le tableau change le comportement en production.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "defaults",
+    "apps"
+  ],
+  "properties": {
+    "defaults": {
+      "$ref": "#/$defs/settings",
+      "description": "Reglages appliques a toute app qui ne les surcharge pas.",
+      "examples": [
+        {
+          "policy": {
+            "minor": "auto",
+            "major": "pr"
+          },
+          "backup": "required"
+        }
+      ]
+    },
+    "apps": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Les apps surveillees, dans leur ordre de deploiement.\n\nL'ordre n'est pas cosmetique. La premiere entree sert d'eclaireur : elle est deployee seule, et si son deploiement echoue la vague s'arrete, les suivantes ne sont pas tentees. On part du principe qu'un echec sur l'eclaireur signale une cible mauvaise (release cassee) plutot qu'un probleme local. Range donc les apps du moins critique au plus critique.\n\nUn echec sur une app qui n'est pas l'eclaireur est traite comme un probleme local : l'app part en quarantaine et le deroulement continue.",
+      "items": {
+        "$ref": "#/$defs/app"
+      }
+    }
+  },
+  "$defs": {
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Ce qui declenche un deploiement automatique et ce qui attend une relecture humaine. Les cles suivent la semantique Renovate APRES application du versioning custom, qui ne coincide pas avec la numerotation affichee par l'outil. Pour Metabase, versionne `0.63.15`, le premier chiffre est la ligne d'edition (0 = OSS, 1 = Enterprise), pas une version : `major` designe donc le passage de 0.63 a 0.64 (montee fonctionnelle) et `minor` celui de 0.63.15 a 0.63.16 (correctif). Verifie ce mapping pour chaque nouvel outil ajoute, il depend du versioning declare par le preset de l'outil (renovate/metabase.json pour Metabase). Cette politique est globale : Renovate raisonne par dependance et non par application, donc une exception pour une seule instance se declare dans les packageRules de renovate.json, pas ici.",
+          "properties": {
+            "minor": {
+              "$ref": "#/$defs/policyValue",
+              "description": "Correctifs. `auto` est le reglage attendu : c'est la raison d'etre du watcher."
+            },
+            "major": {
+              "$ref": "#/$defs/policyValue",
+              "description": "Montees fonctionnelles. Elles embarquent des migrations de schema irreversibles, `pr` est fortement recommande."
+            }
+          }
+        },
+        "backup": {
+          "$ref": "#/$defs/backupValue"
+        }
+      }
+    },
+    "policyValue": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "pr"
+      ],
+      "description": "`auto` : Renovate fusionne seul la mise a jour du manifest, puis le job d'apply deploie. `pr` : la pull request reste ouverte et se met a jour toute seule jusqu'a ce qu'un humain la fusionne, le deploiement suit la fusion. Il n'y a pas de troisieme valeur : refuser une montee, c'est ne pas fusionner la PR."
+    },
+    "backupValue": {
+      "type": "string",
+      "enum": [
+        "required",
+        "not-available"
+      ],
+      "default": "required",
+      "description": "`required` : le job declenche une sauvegarde de la base et attend qu'elle soit disponible avant de deployer. Si elle echoue, il ne deploie pas. C'est le seul filet reel, parce qu'une montee de version migre le schema de la base applicative et qu'un retour arriere ne se fait pas en redeployant l'ancienne version : il faut restaurer.\n\n`not-available` : l'app n'a pas d'addon sauvegardable, ou sa sauvegarde n'est pas pilotable par l'API. Le deploiement se fait sans filet. Cette valeur se pose consciemment au moment d'ajouter l'app, apres verification, jamais par defaut."
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "app",
+        "region",
+        "source",
+        "tool"
+      ],
+      "properties": {
+        "app": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{1,62}$",
+          "description": "Nom exact de l'application sur Scalingo, tel qu'affiche par `scalingo apps`.",
+          "examples": [
+            "alpha-metabase",
+            "beta-metabase"
+          ]
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$",
+          "description": "Region Scalingo, telle qu'elle apparait dans l'hote d'API `api.<region>.scalingo.com`. Determine l'hote interroge, et il n'y a pas de valeur par defaut volontairement : une erreur de region donne un 404 peu parlant.",
+          "examples": [
+            "osc-fr1",
+            "osc-secnum-fr1"
+          ]
+        },
+        "backup": {
+          "$ref": "#/$defs/backupValue"
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repo",
+            "branch",
+            "sha"
+          ],
+          "description": "Le depot applicatif deploye. Attention au vocabulaire : ce n'est PAS un buildpack. C'est le depot qui contient `Procfile`, `system.properties` (version de Java) et surtout `.buildpacks`, le fichier qui liste les vrais buildpacks.\n\nConsequence a connaitre : epingler ce SHA ne fige pas les buildpacks. Les lignes de `.buildpacks` n'ont pas de `#ref`, donc chaque build reclone le HEAD de chaque buildpack. Deux deploiements du meme SHA a plusieurs mois d'ecart peuvent produire des builds differents. Les SHA de buildpacks reellement utilises sont releves dans lock.json a titre d'observation. Pour les figer, il faut un depot applicatif dont le `.buildpacks` porte des `#ref` : c'est un choix de depot, pas une option du watcher.",
+          "properties": {
+            "repo": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+              "description": "Depot GitHub au format `owner/name`. Il doit etre public : Scalingo telecharge lui-meme l'archive depuis `https://github.com/<repo>/archive/<sha>.tar.gz`. Pour un depot prive, le job doit resoudre au prealable une URL signee via l'API GitHub.",
+              "examples": [
+                "exemple/metabase-scalingo",
+                "Scalingo/metabase-scalingo"
+              ]
+            },
+            "branch": {
+              "type": "string",
+              "description": "Branche suivie. Renovate resout son HEAD et propose le nouveau SHA quand elle avance. Sert de `currentValue` a la datasource git-refs, le champ `sha` servant de `currentDigest`.",
+              "examples": [
+                "master",
+                "main"
+              ]
+            },
+            "sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$",
+              "description": "Commit reellement deploye, en SHA complet sur 40 caracteres. C'est ce que le job passe en `source_url` et en `git_ref`. Maintenu par Renovate, et c'est aussi le levier de retour arriere : figer une valeur anterieure ici redeploie l'ancien depot applicatif. Attention, cela ne defait pas une migration de base deja appliquee.",
+              "examples": [
+                "0123456789abcdef0123456789abcdef01234567"
+              ]
+            }
+          }
+        },
+        "tool": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "env",
+            "version"
+          ],
+          "description": "L'outil installe par le buildpack, et la version qu'on veut voir tourner.",
+          "properties": {
+            "env": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]*_VERSION$",
+              "description": "Variable d'environnement lue par le buildpack pour choisir la version a telecharger. Son nom se derive du depot buildpack : `<nom>-buildpack` donne `<NOM>_VERSION`, tirets convertis en underscores.\n\nTous les buildpacks n'en exposent pas. Ceux qui installent un binaire tiers oui (metabase, grafana, nginx, clamav, logstash, geoserver, opensearch-dashboards). Ceux de langage non : nodejs lit `engines.node`, python lit `.python-version`, et le `APT_VERSION` d'apt-buildpack est une variable interne au script, pas une entree de configuration. Pour lever le doute sur un buildpack donne, chercher l'expansion `${<NOM>_VERSION:-` dans son `bin/compile`.",
+              "examples": [
+                "METABASE_VERSION",
+                "NGINX_VERSION",
+                "GRAFANA_VERSION"
+              ]
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Version exacte a deployer, dans la forme attendue par le buildpack. Pour Metabase le prefixe `v` fait partie de la valeur, parce que le buildpack la concatene telle quelle dans l'URL de telechargement.\n\nNe jamais mettre `*` ni `latest` : le buildpack irait resoudre la derniere version au moment du build, ce qui rend le deploiement non reproductible et le fait echouer quand l'API GitHub limite le debit. Epingler une version, c'est precisement ce que le watcher apporte.",
+              "examples": [
+                "v0.63.15",
+                "1.27.4"
+              ]
+            },
+            "upstream": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "repo"
+              ],
+              "description": "Depot amont qui publie les versions de l'outil. Le moteur en connait deja une table, indexee par `env` : ce champ ne sert qu'a la completer pour un outil qu'elle ne connait pas, ou a la surcharger. Il alimente le rapport (version disponible, liens de release) et l'audit. Inutile pour Metabase.",
+              "properties": {
+                "repo": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+                  "description": "Depot GitHub dont les releases portent les versions de l'outil, au format `owner/name`.",
+                  "examples": [
+                    "grafana/grafana"
+                  ]
+                },
+                "line": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 1,
+                  "description": "Nombre de composants de tete qui forment une ligne de versions publiee a part. Une version n'est comparee qu'aux releases de sa ligne. `1` pour la plupart des outils, ou la ligne est la majeure. Chez Metabase, `1` aussi, mais le premier chiffre y designe l'edition (0 pour l'OSS, 1 pour l'Enterprise) et non une version."
+                }
+              }
+            }
+          }
+        },
+        "paused": {
+          "type": "boolean",
+          "default": false,
+          "description": "Sort temporairement l'application du perimetre sans la retirer du manifeste, ce qui conserverait sa configuration et eviterait que son entree de lock devienne orpheline.\n\nA distinguer de l'etat `stopped` que le watcher lit sur Scalingo : celui-ci est constate, la pause est decidee. Une application peut tourner et etre en pause parce qu'on ne veut pas la toucher pour l'instant, ou etre arretee sans etre en pause, auquel cas elle repartira d'elle-meme des qu'elle sera rallumee."
+        },
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version"
+          ],
+          "description": "Version de base attendue, telle que Scalingo la nomme (`readable_version`, par exemple `16.13.0-2`). Sa presence rend la base pilotee : un ecart avec le reel declenche une montee, precedee d'une sauvegarde. Son absence laisse la base simplement surveillee, un signalement etant emis quand une version plus recente existe.\n\nL'API ne sait monter que vers la version immediatement suivante : ce champ ne peut donc pas designer une cible lointaine. Un retard de plusieurs versions se rattrape en autant de montees, donc en autant de pull requests. Le watcher refuse une cible qui n'est pas la suivante plutot que d'enchainer des montees sans qu'on l'ait decide.",
+          "properties": {
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Version attendue, copiee telle quelle depuis `readable_version`. C'est la pull request de montee qui la fait avancer d'un cran."
+            },
+            "major": {
+              "enum": [
+                "hold",
+                "allowed"
+              ],
+              "default": "hold",
+              "description": "Franchissement d'une majeure du moteur, par exemple PostgreSQL 16 vers 17.\n\n`hold`, la valeur par defaut : ni propose ni applique. Une majeure ne se retourne pas, prend bien plus longtemps qu'un correctif et peut demander des ajustements applicatifs. Rien n'oblige a la franchir tot, les majeures PostgreSQL restant supportees cinq ans.\n\n`allowed` : le franchissement redevient une montee ordinaire, proposee par pull request comme les autres. A poser le temps de l'operation, puis a retirer."
+            }
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "defaults": {
+        "policy": {
+          "minor": "auto",
+          "major": "pr"
+        },
+        "backup": "required"
+      },
+      "apps": [
+        {
+          "app": "alpha-metabase",
+          "region": "osc-fr1",
+          "source": {
+            "repo": "exemple/metabase-scalingo",
+            "branch": "master",
+            "sha": "0123456789abcdef0123456789abcdef01234567"
+          },
+          "tool": {
+            "env": "METABASE_VERSION",
+            "version": "v0.63.15"
+          }
+        },
+        {
+          "app": "beta-metabase",
+          "region": "osc-secnum-fr1",
+          "backup": "not-available",
+          "source": {
+            "repo": "exemple/metabase-scalingo",
+            "branch": "master",
+            "sha": "0123456789abcdef0123456789abcdef01234567"
+          },
+          "tool": {
+            "env": "METABASE_VERSION",
+            "version": "v0.63.15"
+          }
+        }
+      ]
+    }
+  ]
+}

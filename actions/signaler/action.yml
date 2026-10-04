@@ -1,0 +1,148 @@
+name: tenir le tableau de bord
+description: >
+  Tient a jour une issue unique et permanente decrivant l'etat de la
+  convergence, et previent les canaux configures (Teams, webhook au format
+  Slack, Matrix/Tchap) aux seuls changements d'etat.
+
+inputs:
+  token:
+    description: Jeton disposant du droit d'ecriture sur les issues
+    required: true
+  teams-webhook:
+    description: URL de webhook Teams, format Workflows Power Automate. Facultative.
+    required: false
+    default: ""
+  slack-webhook:
+    description: >
+      URL de webhook entrant au format Slack : Slack, Mattermost, Rocket.Chat,
+      ou Tchap via une passerelle comme betagouv/slack2tchap. Facultative.
+    required: false
+    default: ""
+  matrix-homeserver:
+    description: URL du serveur Matrix du compte bot (pour Tchap, celui de son domaine). Facultative.
+    required: false
+    default: ""
+  matrix-room-id:
+    description: Identifiant du salon Matrix, de la forme !xxxx:serveur. Facultatif.
+    required: false
+    default: ""
+  matrix-token:
+    description: Jeton d'acces du compte bot Matrix, membre du salon. Facultatif.
+    required: false
+    default: ""
+  report-path:
+    description: >
+      Chemin du rapport incident.md produit par le moteur dans son --out-dir.
+      Absent (plan, filtre sans app, echec avant la fin du passage), le
+      tableau de bord est laisse en l'etat.
+    required: true
+  label:
+    description: Label qui identifie l'issue du tableau de bord
+    required: false
+    default: etat-parc
+  title:
+    description: Titre de l'issue du tableau de bord, a sa creation
+    required: false
+    default: "Parc Scalingo : etat de la convergence"
+
+runs:
+  using: composite
+  steps:
+    - id: issue
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        REPORT: ${{ inputs.report-path }}
+        LABEL: ${{ inputs.label }}
+        TITLE: ${{ inputs.title }}
+      run: |
+        set -euo pipefail
+
+        # Le moteur ecrit ce rapport, marqueur d'etat compris, a chaque passage
+        # complet. Son absence ne dit rien du parc. La publier comme saine
+        # effacait un incident ouvert et annoncait sa resolution.
+        if [ ! -f "$REPORT" ]; then
+          echo "aucun rapport produit par ce passage, tableau de bord laisse en l'etat"
+          echo "state=skipped" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Une issue permanente plutot qu'une par episode. Ouvrir et refermer en
+        # avait produit sept en dix jours, sans historique commun et sans
+        # endroit stable a mettre en favori.
+        issue_number=$(gh issue list --label "$LABEL" --state all --limit 1 \
+                   --json number --jq '.[0].number // empty')
+
+        now=$(date -u '+%Y-%m-%d %H:%M UTC')
+
+        # Deux dates et non une : avec le seul horodatage du dernier changement,
+        # un parc calme et un watcher arrete affichaient exactement le meme
+        # tableau, et rien ne permettait de distinguer les deux.
+        body() {
+          cat "$REPORT"
+          printf '\n---\nDernier changement : %s\nDernier passage : %s, [execution](%s).\n' \
+            "$1" "$now" "$RUN_URL"
+        }
+
+        strip_footer() { sed '/^Dernier changement : /d;/^Dernier passage : /d'; }
+
+        emit() { echo "state=$1" >> "$GITHUB_OUTPUT"; echo "issue=${2:-}" >> "$GITHUB_OUTPUT"; }
+
+        if [ -z "$issue_number" ]; then
+          gh label create "$LABEL" --color 1D76DB \
+            --description "Etat de la convergence du parc, tenu par le watcher" 2>/dev/null || true
+          issue_number=$(gh issue create --title "$TITLE" --label "$LABEL" \
+                     --body "$(body "$now")" | grep -oE '[0-9]+$')
+          echo "tableau de bord ouvert en #$issue_number"
+          emit opened "$issue_number"
+          exit 0
+        fi
+
+        # Le pied change a chaque passage : la comparaison porte sur le reste,
+        # sinon tout passage deviendrait un changement d'etat.
+        published=$(gh issue view "$issue_number" --json body --jq .body)
+        before=$(printf '%s' "$published" | strip_footer)
+        after=$(cat "$REPORT"; printf '\n---\n')
+        state_before=$(printf '%s' "$published" | grep -o '<!-- etat: [a-z]* -->' | head -1 || true)
+        state_after=$(grep -o '<!-- etat: [a-z]* -->' "$REPORT" | head -1 || true)
+
+        if [ "$before" = "$after" ]; then
+          # Le tableau n'ayant pas bouge, la date de changement deja publiee est
+          # la seule trace de quand le parc a change pour la derniere fois.
+          changed_at=$(printf '%s' "$published" | sed -n 's/^Dernier changement : //p' | head -1) || true
+          gh issue edit "$issue_number" --body "$(body "${changed_at:-$now}")"
+          echo "tableau de bord #$issue_number inchange, passage consigne"
+          emit unchanged "$issue_number"
+        elif [ "$state_before" = "$state_after" ]; then
+          gh issue edit "$issue_number" --body "$(body "$now")"
+          echo "tableau de bord #$issue_number mis a jour, etat inchange"
+          emit unchanged "$issue_number"
+        else
+          gh issue edit "$issue_number" --body "$(body "$now")"
+          echo "tableau de bord #$issue_number mis a jour, changement d'etat"
+          # Le marqueur pose par le watcher dit l'etat, pas le texte rendu : le
+          # tableau bouge des qu'une version parait en amont, ce qui ne doit pas
+          # faire sonner l'equipe.
+          if grep -q '<!-- etat: sain -->' "$REPORT"; then
+            emit resolved "$issue_number"
+          else
+            emit changed "$issue_number"
+          fi
+        fi
+
+    # Sans canal configure, le script le dit et sort : l'issue suffit.
+    - if: ${{ steps.issue.outputs.state == 'opened' || steps.issue.outputs.state == 'changed' || steps.issue.outputs.state == 'resolved' }}
+      shell: bash
+      env:
+        STATE: ${{ steps.issue.outputs.state }}
+        ISSUE: ${{ steps.issue.outputs.issue }}
+        REPORT: ${{ inputs.report-path }}
+        REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        TEAMS_WEBHOOK: ${{ inputs.teams-webhook }}
+        SLACK_WEBHOOK: ${{ inputs.slack-webhook }}
+        MATRIX_HOMESERVER: ${{ inputs.matrix-homeserver }}
+        MATRIX_ROOM_ID: ${{ inputs.matrix-room-id }}
+        MATRIX_ACCESS_TOKEN: ${{ inputs.matrix-token }}
+      run: python3 "$GITHUB_ACTION_PATH/notify.py"
