@@ -6,7 +6,7 @@
   ],
   "packageRules": [
     {
-      "description": "Une version de l'outil s'execute avec les secrets d'acces a Scalingo : une semaine de decantation, puis une PR unique fusionnee apres lecture du CHANGELOG, jamais automatiquement.",
+      "description": "Une version de l'outil s'execute avec les secrets d'acces a Scalingo : un jour de decantation, puis une PR unique fusionnee apres lecture du CHANGELOG, jamais automatiquement.",
       "matchManagers": [
         "github-actions",
         "renovate-config"
@@ -15,7 +15,7 @@
         "incubateur-ademe/scalingo-watcher"
       ],
       "groupName": "scalingo-watcher",
-      "minimumReleaseAge": "7 days",
+      "minimumReleaseAge": "1 day",
       "automerge": false
     }
   ]

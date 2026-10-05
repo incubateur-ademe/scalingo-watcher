@@ -13,7 +13,7 @@ updates:
     schedule:
       interval: weekly
     cooldown:
-      default-days: 7
+      default-days: 1
     commit-message:
       prefix: fix(deps)
     groups:
@@ -25,7 +25,7 @@ updates:
     schedule:
       interval: weekly
     cooldown:
-      default-days: 7
+      default-days: 1
     commit-message:
       prefix: fix(deps)
       prefix-development: chore(deps)
