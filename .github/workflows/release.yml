@@ -19,7 +19,7 @@ jobs:
       # Une pull request ouverte avec le GITHUB_TOKEN ne declenche pas la CI :
       # RELEASE_TOKEN, quand il existe, ouvre la pull request de release.
       - id: release
-        uses: googleapis/release-please-action@v5
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
           config-file: release-please-config.json
