@@ -62,8 +62,10 @@ jobs:
   reconcile:
     runs-on: ubuntu-latest
     # Les secrets d'acces vivent dans cet environment et non dans le depot :
-    # seuls les jobs qui le declarent peuvent les lire. Un secret de
-    # l'environment l'emporte sur celui que l'appelant aurait mappe.
+    # seuls les jobs qui le declarent peuvent les lire. Le job n'y lit pourtant
+    # que les secrets que l'appelant lui passe : un secret non mappe arrive
+    # vide, meme range dans l'environment. Mappe, c'est la valeur de
+    # l'environment qui l'emporte.
     environment: ${{ inputs.environment }}
     permissions:
       contents: write
