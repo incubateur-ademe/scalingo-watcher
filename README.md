@@ -206,7 +206,7 @@ Les quatre appelants complets sont dans [`template/.github/workflows/`](template
 |---|---|
 | [`renovate/base`](renovate/base.json) | Lecture du manifeste par deux customManagers (commit du dépôt applicatif, version de l'outil), délai de cinq jours, dépôts applicatifs toujours en PR, alertes de vulnérabilité, messages de commit |
 | [`renovate/metabase`](renovate/metabase.json) | Versioning Metabase (lignes OSS et Enterprise séparées), correctifs fusionnés seuls, montées fonctionnelles en PR |
-| [`renovate/watcher`](renovate/watcher.json) | Mises à jour de l'outil : workflows épinglés par sha, une PR groupée, sept jours de délai, jamais fusionnée seule |
+| [`renovate/watcher`](renovate/watcher.json) | Mises à jour de l'outil : workflows épinglés par sha, une PR groupée, un jour de délai, jamais fusionnée seule |
 
 Le consommateur les étend, épinglés par tag, et active les managers qui les
 lisent :

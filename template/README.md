@@ -212,7 +212,7 @@ node .scalingo-watcher/src/apply.ts --prune     # retire du lock les apps sortie
 ## Mises à jour de l'outil
 
 Une release de scalingo-watcher arrive dans une seule pull request Renovate,
-7 jours après sa publication : elle avance le sha des workflows appelants et le
+1 jour après sa publication : elle avance le sha des workflows appelants et le
 tag des presets de `renovate.json`. La validation y tourne avec la nouvelle
 version. Elle n'est jamais fusionnée automatiquement : la fusionner après
 lecture du CHANGELOG de l'outil.
