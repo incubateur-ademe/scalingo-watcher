@@ -313,53 +313,52 @@ console.log("\nConsignation du lock");
   rmSync(dir, { recursive: true, force: true });
 }
 
-console.log("\nVersions du template");
-
-// template/ ne cite aucune version de l'outil : la synchronisation vers le
-// starter remplace le repere par le tag de la release. Une version ecrite en dur
-// resterait figee dans chaque nouveau parc.
-{
-  const ROOT_DIR = join(import.meta.dirname, "..");
-  const TAG = "__SCALINGO_WATCHER_TAG__";
-  const files = globSync(["template/**", "template/.github/**"], { cwd: ROOT_DIR }).filter((f) => statSync(join(ROOT_DIR, f)).isFile());
-  const toolLines = files.flatMap((f) =>
-    readFileSync(join(ROOT_DIR, f), "utf8")
-      .split("\n")
-      .flatMap((line, i) => (line.includes("scalingo-watcher") ? [{ where: `${f}:${i + 1}`, line }] : [])),
-  );
-  check("aucune version de l'outil n'est ecrite en dur dans le template", toolLines.filter((l) => /v\d+\.\d+\.\d+/.test(l.line)).map((l) => l.where), []);
-  check("le repere de version figure a chaque reference versionnee", toolLines.filter((l) => l.line.includes(TAG)).length, 10);
-  const withTag = (f: string) => readFileSync(join(ROOT_DIR, f), "utf8").replaceAll(TAG, "v9.9.9");
-  check(
-    "une fois le repere remplace, renovate.json et les appelants restent valides",
-    [
-      (JSON.parse(withTag("template/renovate.json")) as { extends: string[] }).extends.filter((e) => e.endsWith("#v9.9.9")).length,
-      files.filter((f) => f.endsWith(".yml")).map((f) => /@v9\.9\.9$/m.test(withTag(f)) && Boolean(parse(withTag(f)))),
-    ],
-    [3, [true, true, true, true]],
-  );
-}
-
-console.log("\nSecrets des appelants du template");
+console.log("\nSecrets des appelants du starter");
 
 // Le job appele ne lit la valeur d'un secret de l'environment que si
 // l'appelant lui passe ce secret : non mappe, FGP_KEY arrivait vide et le parc
-// tournait sans acces, en vert.
+// tournait sans acces, en vert. Le starter vit dans son propre depot, tenu a
+// jour par Renovate : la CI le recupere dans STARTER_DIR. Chaque appelant est
+// confronte au workflow de la version qu'il epingle. Les secrets que la version
+// en cours ajoute ne sont qu'annonces : le starter ne pourra les mapper qu'une
+// fois cette version publiee.
 {
   const ROOT_DIR = join(import.meta.dirname, "..");
+  const starter = process.env.STARTER_DIR ?? join(ROOT_DIR, ".starter");
+  const callersDir = join(starter, ".github", "workflows");
   type Workflow = { on?: { workflow_call?: { secrets?: Record<string, unknown> } }; jobs: Record<string, { uses?: string; secrets?: unknown }> };
-  const readWorkflow = (file: string) => parse(readFileSync(file, "utf8")) as Workflow;
-  const gaps = readdirSync(join(ROOT_DIR, "template", ".github", "workflows")).flatMap((name) => {
-    const caller = readWorkflow(join(ROOT_DIR, "template", ".github", "workflows", name));
-    return Object.values(caller.jobs).flatMap((job) => {
-      const called = /\/\.github\/workflows\/([^@]+)@/.exec(job.uses ?? "")?.[1];
-      if (!called) return [];
-      const declared = Object.keys(readWorkflow(join(ROOT_DIR, ".github", "workflows", called)).on?.workflow_call?.secrets ?? {});
-      const mapped = job.secrets && typeof job.secrets === "object" ? Object.keys(job.secrets) : [];
-      return declared.filter((secret) => !mapped.includes(secret)).map((secret) => `${name} : ${secret}`);
-    });
-  });
-  check("chaque appelant du template mappe tous les secrets du workflow appele", gaps, []);
+  const declaredAt = (ref: string, name: string) => {
+    const src = execFileSync("git", ["show", `${ref}:.github/workflows/${name}`], { cwd: ROOT_DIR, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return Object.keys((parse(src) as Workflow).on?.workflow_call?.secrets ?? {});
+  };
+  if (!existsSync(callersDir)) {
+    if (process.env.CI) check("le starter est recupere pour controler ses appelants", callersDir, "present");
+    else console.log(`  (starter absent de ${callersDir} : cloner incubateur-ademe/scalingo-parc-template dans .starter pour ce controle)`);
+  } else {
+    const gaps: string[] = [];
+    const upcoming: string[] = [];
+    let callers = 0;
+    for (const file of readdirSync(callersDir).filter((f) => f.endsWith(".yml"))) {
+      const caller = parse(readFileSync(join(callersDir, file), "utf8")) as Workflow;
+      for (const job of Object.values(caller.jobs)) {
+        const m = /^incubateur-ademe\/scalingo-watcher\/\.github\/workflows\/([^@]+)@(\S+)$/.exec(job.uses ?? "");
+        if (!m) continue;
+        callers++;
+        const [, name, ref] = m;
+        const mapped = job.secrets === "inherit" ? null : job.secrets && typeof job.secrets === "object" ? Object.keys(job.secrets) : [];
+        const missing = (secrets: string[]) => (mapped === null ? [] : secrets.filter((x) => !mapped.includes(x)));
+        try {
+          gaps.push(...missing(declaredAt(ref, name)).map((x) => `${file} (${ref.slice(0, 12)}) : ${x}`));
+        } catch {
+          gaps.push(`${file} : ${ref} introuvable dans ce depot, faire git fetch --tags`);
+        }
+        upcoming.push(...missing(declaredAt("HEAD", name)).map((x) => `${file} : ${x}`));
+      }
+    }
+    check("le starter appelle les workflows de l'outil", callers, 4);
+    check("chaque appelant du starter mappe les secrets du workflow qu'il epingle", gaps, []);
+    for (const u of upcoming) console.log(`::warning::secret a mapper dans le starter a la prochaine release : ${u}`);
+  }
 }
 
 console.log("\nAmont declare par l'audit");
@@ -414,8 +413,6 @@ const TOOL_FILES = [
   "test/**",
   "actions/**",
   "renovate/**",
-  "template/**",
-  "template/.github/workflows/*.yml",
   ".github/workflows/*.yml",
 ];
 const leaks = globSync(TOOL_FILES, { cwd: ROOT })

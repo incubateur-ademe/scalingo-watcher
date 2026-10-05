@@ -777,8 +777,11 @@ la commande `gh secret set` pour le dépôt courant.
 **[fait]** Presets Renovate versionnés avec l'outil : `base`, `metabase` et
 `watcher`, étendus par tag par le consommateur.
 
-**[fait]** Dossier `template/`, contenu du dépôt starter : manifeste d'exemple
-fictif, `renovate.json`, workflows appelants, et checklist d'installation.
+**[fait]** Dépôt starter `incubateur-ademe/scalingo-parc-template` : manifeste
+d'exemple fictif, `renovate.json`, workflows appelants, et checklist
+d'installation. Seule source de son contenu, tenu à jour par Renovate comme un
+parc. La CI de l'outil vérifie que ses appelants mappent les secrets du workflow
+qu'ils épinglent.
 
 **[fait]** Releases par release-please sur les commits conventionnels : pull
 request de release tenue à jour, tag `vX.Y.Z` et release GitHub à la fusion,
@@ -790,12 +793,15 @@ publics.
 **[fait]** Identifiants de code en anglais, messages affichés, commentaires et
 documentation en français.
 
-**[à faire]** Publication : dépôt public de l'outil, ruleset de tags, première
-release `v1.0.0`, dépôt starter créé depuis `template/`.
+**[fait]** Publication : dépôt public de l'outil, ruleset qui rend les tags
+`vX.Y.Z` immuables, releases depuis `v1.0.0`, dépôt starter.
 
-**[à faire]** Valider, au premier consommateur hors de l'organisation de
-l'outil, qu'un job appelé qui déclare `environment:` lit bien les secrets de cet
-environment dans le dépôt appelant.
+**[fait]** Un job appelé qui déclare `environment:` lit la valeur d'un secret de
+cet environment à condition que l'appelant mappe ce secret ; non mappé, il
+arrive vide. Vérifié en production sur le premier parc.
+
+**[à faire]** Confirmer ce comportement pour un consommateur hors de
+l'organisation de l'outil.
 
 **[à faire]** Outils autres que Metabase de bout en bout. Le moteur les prend en
 charge, mais seul Metabase a un preset de versioning, et la table d'amonts se

@@ -13,8 +13,18 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
+      # Historique complet : le controle du starter relit les workflows a la
+      # version que chaque appelant epingle.
       - uses: actions/checkout@v7
         with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: recuperer le starter
+        uses: actions/checkout@v7
+        with:
+          repository: incubateur-ademe/scalingo-parc-template
+          path: .starter
           persist-credentials: false
 
       - uses: ./actions/setup
