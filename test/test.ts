@@ -25,7 +25,7 @@ import {
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { Ajv2020 } from "ajv/dist/2020.js";
@@ -382,6 +382,15 @@ check(
   [true, []],
 );
 
+const branchOk = template();
+(branchOk.apps[0].source as { branch: string }).branch = "feature/oauth2-proxy_v2";
+check("une branche a slash, tiret, point et souligne est acceptee", validate(branchOk), true);
+for (const bad of ["../../user", "a..b", "x?y=1", "x#y", "/x", "x/"]) {
+  const badBranch = template();
+  (badBranch.apps[0].source as { branch: string }).branch = bad;
+  check(`la branche ${JSON.stringify(bad)}, qui sortirait du chemin d'API, est refusee`, validate(badBranch), false);
+}
+
 const otherRegion = template();
 otherRegion.apps[0].region = "osc-th1";
 check("une region hors des deux connues est acceptee", validate(otherRegion), true);
@@ -534,7 +543,7 @@ check("par defaut, le parc se lit dans le repertoire courant", resolvePaths([], 
   manifest: "/parc/manifest.yaml",
   lock: "/parc/lock.json",
   fgp: "/parc/fgp.json",
-  outDir: join(tmpdir(), "scalingo-watcher"),
+  outDir: "",
 });
 check(
   "en CI, les sorties vont sous RUNNER_TEMP",
@@ -570,6 +579,20 @@ try {
   check("le repertoire de sortie est cree au besoin", [file, existsSync(deep)], [join(deep, "incident.md"), true]);
 } finally {
   rmSync(outSandbox, { recursive: true, force: true });
+}
+{
+  // Un nom fixe sous /tmp laissait un autre compte de la machine y poser un lien
+  // et detourner les ecritures.
+  const paths = resolvePaths([], {}, "/parc");
+  const first = outFile(paths, "incident.md");
+  const second = outFile(paths, "pr-body.md");
+  const dir = paths.outDir;
+  check(
+    "sans --out-dir ni RUNNER_TEMP, les sorties vont dans un repertoire prive cree une fois",
+    [dir.startsWith(join(tmpdir(), "scalingo-watcher-")), dir !== join(tmpdir(), "scalingo-watcher"), statSync(dir).mode & 0o077, [first, second].map((f) => join(dir, basename(f)) === f)],
+    [true, true, 0, [true, true]],
+  );
+  rmSync(dir, { recursive: true, force: true });
 }
 
 console.log("\nVersion du lock");

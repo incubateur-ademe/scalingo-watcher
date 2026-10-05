@@ -321,7 +321,14 @@ async function main() {
     fail(`\nManifeste genere incoherent, ${shown(paths.manifest)} n'est pas ecrit :`, problems.map((p) => `  ${p}`));
   }
   mkdirSync(dirname(paths.manifest), { recursive: true });
-  writeFileSync(paths.manifest, source);
+  // Le controle du debut evite les appels inutiles ; celui-ci ferme la fenetre
+  // ou un manifeste serait apparu entre-temps.
+  try {
+    writeFileSync(paths.manifest, source, { flag: argv.includes("--force") ? "w" : "wx" });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    fail(`${shown(paths.manifest)} est apparu pendant le releve : init ne l'ecrase qu'avec --force.`);
+  }
 
   log(`\n${shown(paths.manifest)} ecrit : ${found.length} app(s), rangees par region puis par nom.`);
   log("Relire leur ordre, qui est celui du deploiement, puis amorcer le lock depuis l'etat reel, sans rien deployer :");

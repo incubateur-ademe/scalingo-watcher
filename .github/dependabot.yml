@@ -1,0 +1,36 @@
+# Mises a jour de l'outil lui-meme. Les depots de parc, eux, suivent l'outil par
+# Renovate et ses presets.
+#
+# Les actions et les dependances de production tournent chez les consommateurs,
+# avec leurs secrets d'acces a Scalingo : leurs mises a jour sont des `fix`, qui
+# declenchent une release. Les dependances de developpement restent des `chore`.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /actions/*
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: fix(deps)
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: fix(deps)
+      prefix-development: chore(deps)
+    groups:
+      production:
+        dependency-type: production
+      development:
+        dependency-type: development
