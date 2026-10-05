@@ -42,6 +42,7 @@ import {
 } from "../src/apply.ts";
 import { upstreamKey, upstreamsDeclared } from "../src/audit.ts";
 import { renderManifest } from "../src/init.ts";
+import { compose, matrixPayload, slackPayload, teamsPayload } from "../src/notify.ts";
 import { DEFAULT_FGP_URL, flagValue, flagValues, outFile, resolvePaths } from "../src/options.ts";
 import { compareLines, toolName, upstreamOf } from "../src/upstream.ts";
 
@@ -240,9 +241,9 @@ console.log("\nNotification des changements d'etat");
     ["## Metabase", "", "| App | Version |", "| --- | --- |", ...Array.from({ length: 80 }, (_, i) => `| app-${i} | v0.63.18 |`), "",
       "<!-- etat: intervention -->", "", "## Ce qui demande une intervention", "", "- **osc-fr1/app-7** : deploiement en echec", ""].join("\n"),
   );
-  const notify = join(import.meta.dirname, "..", "actions", "signaler", "notify.py");
+  const notify = join(SRC, "notify.ts");
   await new Promise<void>((done, fail) =>
-    execFile("python3", [notify], {
+    execFile(process.execPath, [notify], {
       env: { ...process.env, STATE: "changed", ISSUE: "3", REPORT: report, REPO_URL: "https://github.com/o/r", RUN_URL: "https://github.com/o/r/actions/runs/1", SLACK_WEBHOOK: `http://127.0.0.1:${port}/` },
     }, (e) => (e ? fail(e) : done())),
   );
@@ -254,6 +255,26 @@ console.log("\nNotification des changements d'etat");
     [received.length, text.includes("osc-fr1/app-7 : deploiement en echec") || text.includes("**osc-fr1/app-7** : deploiement en echec"), text.includes("| app-0 |"), text.includes("<!--")],
     [1, true, false, false],
   );
+}
+
+{
+  const read = (text: string) => () => text;
+  const env = { REPO_URL: "https://github.com/o/r", RUN_URL: "https://github.com/o/r/actions/runs/1", ISSUE: "4" };
+  check(
+    "un suivi ouvert sur un parc sain le dit",
+    compose({ ...env, STATE: "opened", REPORT: "x" }, read("## Metabase\n\n<!-- etat: sain -->\n")).detail,
+    "Rien a signaler sur le parc.",
+  );
+  check(
+    "un retour a la normale le dit sans lire le rapport",
+    compose({ ...env, STATE: "resolved" }, () => { throw new Error("rapport lu"); }).detail,
+    "Plus rien a signaler sur le parc.",
+  );
+  check("sans numero d'issue, seul le lien d'execution reste", compose({ ...env, ISSUE: "", STATE: "resolved" }, read("")).links.map((l) => l.label), ["Execution"]);
+  const m = compose({ ...env, STATE: "changed", REPORT: "x" }, read("<!-- etat: intervention -->\n- **a** : <b>echec</b> & \"x\""));
+  check("la carte Teams est une carte adaptative avec ses liens", [teamsPayload(m).attachments[0].contentType, teamsPayload(m).attachments[0].content.actions.length], ["application/vnd.microsoft.card.adaptive", 2]);
+  check("le message Matrix echappe le HTML du rapport", matrixPayload(m).formatted_body.includes("&lt;b&gt;echec&lt;/b&gt; &amp; &quot;x&quot;"), true);
+  check("le message Slack porte le titre et les URL nues", slackPayload(m).text.split("\n").filter((l) => l.startsWith("*") || l.includes(" : https://")).length, 3);
 }
 
 console.log("\nConsignation du lock");
