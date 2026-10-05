@@ -1330,7 +1330,8 @@ async function proposeDatabaseUpgrades(targets: AppEntry[], token: string): Prom
   if (proposals.length === 0) {
     log(`\nAucune montee de base a proposer.`);
     if (OPT.dryRun) return;
-    for (const name of [PROPOSAL_FILE, PR_TITLE_FILE, PR_BODY_FILE]) {
+    // Un repertoire de sortie encore a creer ne contient rien de perime.
+    for (const name of paths.outDir ? [PROPOSAL_FILE, PR_TITLE_FILE, PR_BODY_FILE] : []) {
       const stale = join(paths.outDir, name);
       if (existsSync(stale)) unlinkSync(stale);
     }

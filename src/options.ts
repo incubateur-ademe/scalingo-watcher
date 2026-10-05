@@ -10,12 +10,18 @@
  * Les chemins relatifs partent du repertoire courant, c'est-a-dire de la racine
  * du depot qui porte le parc. Les sorties vont par defaut hors de ce depot : un
  * fichier produit a cote du lock finit tot ou tard commite avec lui.
+ *
+ * Sans --out-dir ni RUNNER_TEMP, elles vont dans un repertoire temporaire prive,
+ * cree au premier fichier ecrit. Un nom fixe sous /tmp, partage entre les
+ * utilisateurs de la machine, laisserait un autre compte y poser un lien et
+ * detourner les ecritures, ou lire fgp.json.bak.
  */
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
+/** outDir vide : repertoire temporaire prive, cree par outFile(). */
 export type Paths = { manifest: string; lock: string; fgp: string; outDir: string };
 
 export const DEFAULT_FGP_URL = "https://fgp.incubateur.ademe.fr";
@@ -61,17 +67,19 @@ export function resolvePaths(
   cwd: string = process.cwd(),
 ): Paths {
   const at = (flag: string, fallback: string) => resolve(cwd, flagValue(argv, flag) ?? fallback);
+  const outDir = flagValue(argv, "--out-dir");
   return {
     manifest: at("--manifest", "manifest.yaml"),
     lock: at("--lock", "lock.json"),
     fgp: at("--fgp", "fgp.json"),
-    outDir: at("--out-dir", join(env.RUNNER_TEMP || tmpdir(), "scalingo-watcher")),
+    outDir: outDir ? resolve(cwd, outDir) : env.RUNNER_TEMP ? join(env.RUNNER_TEMP, "scalingo-watcher") : "",
   };
 }
 
 /** Chemin d'une sortie, repertoire cree au besoin. */
 export function outFile(paths: Paths, name: string): string {
-  mkdirSync(paths.outDir, { recursive: true });
+  if (paths.outDir) mkdirSync(paths.outDir, { recursive: true });
+  else paths.outDir = mkdtempSync(join(tmpdir(), "scalingo-watcher-"));
   return join(paths.outDir, name);
 }
 

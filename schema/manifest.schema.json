@@ -130,7 +130,8 @@
               "examples": [
                 "master",
                 "main"
-              ]
+              ],
+              "pattern": "^(?!.*\\.\\.)(?!/)(?!.*/$)[A-Za-z0-9._/-]+$"
             },
             "sha": {
               "type": "string",

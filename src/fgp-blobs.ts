@@ -20,7 +20,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { readManifest } from "./apply.ts";
 import { DEFAULT_FGP_URL, flagValue, outFile, readFgpFile, resolvePaths, shown } from "./options.ts";
@@ -210,9 +210,15 @@ async function main() {
     console.log("\n--dry-run : rien n'a ete genere ni ecrit.");
     return;
   }
-  if (existsSync(paths.fgp)) {
+  let previous: Buffer | null = null;
+  try {
+    previous = readFileSync(paths.fgp);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+  if (previous) {
     const backup = outFile(paths, `${basename(paths.fgp)}.bak`);
-    writeFileSync(backup, readFileSync(paths.fgp));
+    writeFileSync(backup, previous, { mode: 0o600 });
     console.log(`\n${shown(paths.fgp)} precedent sauvegarde en ${shown(backup)}`);
   }
   writeFileSync(paths.fgp, JSON.stringify(out, null, 2) + "\n");
