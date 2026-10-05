@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.4](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.0.3...v1.0.4) (2026-10-05)
+
+
+### Corrections
+
+* **signaler:** notification en TypeScript, message clair pour un parc sain ([#13](https://github.com/incubateur-ademe/scalingo-watcher/issues/13)) ([d8aaac9](https://github.com/incubateur-ademe/scalingo-watcher/commit/d8aaac9e364e1c01aa88f9b37b8e8aef13d74cab))
+
 ## [1.0.3](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.0.2...v1.0.3) (2026-10-05)
 
 
