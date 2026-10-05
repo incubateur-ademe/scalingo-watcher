@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.0.2...v1.0.3) (2026-10-05)
+
+
+### Corrections
+
+* ramener a un jour la quarantaine des mises a jour de l'outil ([#9](https://github.com/incubateur-ademe/scalingo-watcher/issues/9)) ([2b3f921](https://github.com/incubateur-ademe/scalingo-watcher/commit/2b3f9217bcaa8539f25ecd2c3d21090aa4c102eb))
+
 ## [1.0.2](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.0.1...v1.0.2) (2026-10-05)
 
 
