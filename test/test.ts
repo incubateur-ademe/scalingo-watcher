@@ -315,32 +315,28 @@ console.log("\nConsignation du lock");
 
 console.log("\nVersions du template");
 
-// Le template suit chaque release : release-please y remplace la version sur
-// les lignes marquees, dans les fichiers declares. Une version non marquee, ou
-// un fichier non declare, resterait en arriere sans que rien ne le signale.
+// template/ ne cite aucune version de l'outil : la synchronisation vers le
+// starter remplace le repere par le tag de la release. Une version ecrite en dur
+// resterait figee dans chaque nouveau parc.
 {
   const ROOT_DIR = join(import.meta.dirname, "..");
-  const version = (JSON.parse(readFileSync(join(ROOT_DIR, "package.json"), "utf8")) as { version: string }).version;
-  const config = JSON.parse(readFileSync(join(ROOT_DIR, "release-please-config.json"), "utf8")) as {
-    packages: Record<string, { "extra-files"?: Array<{ path: string }> }>;
-  };
-  const declared = new Set((config.packages["."]["extra-files"] ?? []).map((f) => f.path));
-  const lines = globSync(["template/**", "template/.github/**"], { cwd: ROOT_DIR })
-    .filter((f) => statSync(join(ROOT_DIR, f)).isFile())
-    .flatMap((f) =>
-      readFileSync(join(ROOT_DIR, f), "utf8")
-        .split("\n")
-        .flatMap((line, i) =>
-          line.includes("scalingo-watcher")
-            ? [...line.matchAll(/v(\d+\.\d+\.\d+)\b/g)].map((m) => ({ where: `${f}:${i + 1}`, file: f, line, v: m[1] }))
-            : [],
-        ),
-    );
-  check("le template cite des versions de l'outil", lines.length, 10);
+  const TAG = "__SCALINGO_WATCHER_TAG__";
+  const files = globSync(["template/**", "template/.github/**"], { cwd: ROOT_DIR }).filter((f) => statSync(join(ROOT_DIR, f)).isFile());
+  const toolLines = files.flatMap((f) =>
+    readFileSync(join(ROOT_DIR, f), "utf8")
+      .split("\n")
+      .flatMap((line, i) => (line.includes("scalingo-watcher") ? [{ where: `${f}:${i + 1}`, line }] : [])),
+  );
+  check("aucune version de l'outil n'est ecrite en dur dans le template", toolLines.filter((l) => /v\d+\.\d+\.\d+/.test(l.line)).map((l) => l.where), []);
+  check("le repere de version figure a chaque reference versionnee", toolLines.filter((l) => l.line.includes(TAG)).length, 10);
+  const withTag = (f: string) => readFileSync(join(ROOT_DIR, f), "utf8").replaceAll(TAG, "v9.9.9");
   check(
-    "chaque version du template est celle du package, marquee, dans un fichier declare a release-please",
-    lines.filter((l) => l.v !== version || !l.line.includes("x-release-please-version") || !declared.has(l.file)).map((l) => l.where),
-    [],
+    "une fois le repere remplace, renovate.json et les appelants restent valides",
+    [
+      (JSON.parse(withTag("template/renovate.json")) as { extends: string[] }).extends.filter((e) => e.endsWith("#v9.9.9")).length,
+      files.filter((f) => f.endsWith(".yml")).map((f) => /@v9\.9\.9$/m.test(withTag(f)) && Boolean(parse(withTag(f)))),
+    ],
+    [3, [true, true, true, true]],
   );
 }
 

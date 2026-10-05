@@ -1,0 +1,15 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "github>incubateur-ademe/scalingo-watcher//renovate/base#__SCALINGO_WATCHER_TAG__",
+    "github>incubateur-ademe/scalingo-watcher//renovate/metabase#__SCALINGO_WATCHER_TAG__",
+    "github>incubateur-ademe/scalingo-watcher//renovate/watcher#__SCALINGO_WATCHER_TAG__"
+  ],
+  "enabledManagers": [
+    "custom.regex",
+    "github-actions",
+    "renovate-config"
+  ],
+  "timezone": "Europe/Paris"
+}

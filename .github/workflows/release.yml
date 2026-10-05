@@ -1,8 +1,7 @@
 # Chaque push sur main tient a jour la pull request de release. Sa fusion cree
 # le tag vX.Y.Z et la release, puis le tag majeur vX est deplace sur le meme
 # commit pour ceux qui suivent la ligne majeure, et template/ est recopie dans le
-# depot starter. La pull request de release monte deja les versions du template
-# (extra-files de release-please-config.json).
+# depot starter avec la version de la release.
 name: release
 
 on:
@@ -86,12 +85,19 @@ jobs:
           token: ${{ secrets.TEMPLATE_SYNC_TOKEN }}
           path: starter
 
+      # template/ ne porte aucune version de l'outil, seulement un repere : la
+      # recopie le remplace par le tag de la release.
       - name: recopier template/
         if: ${{ steps.token.outputs.present == 'true' }}
         working-directory: starter
         run: |
           set -euo pipefail
           rsync -a --delete --exclude .git ../tool/template/ ./
+          find . -path ./.git -prune -o -type f -exec perl -pi -e "s/__SCALINGO_WATCHER_TAG__/$TAG/g" {} +
+          if grep -rq --exclude-dir=.git __SCALINGO_WATCHER_TAG__ .; then
+            echo "::error::repere de version encore present apres remplacement"
+            exit 1
+          fi
           if [ -z "$(git status --porcelain)" ]; then
             echo "$TEMPLATE_REPOSITORY deja a jour"
             exit 0

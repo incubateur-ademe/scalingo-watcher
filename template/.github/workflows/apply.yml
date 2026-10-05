@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   apply:
-    uses: incubateur-ademe/scalingo-watcher/.github/workflows/apply.yml@v1.0.4 # x-release-please-version
+    uses: incubateur-ademe/scalingo-watcher/.github/workflows/apply.yml@__SCALINGO_WATCHER_TAG__
     with:
       environment: production
       dry_run: ${{ inputs.dry_run }}
