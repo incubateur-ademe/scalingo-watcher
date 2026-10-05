@@ -1,3 +1,5 @@
 node_modules/
+# Starter recupere pour les tests : depot incubateur-ademe/scalingo-parc-template.
+.starter/
 inventory.json
 

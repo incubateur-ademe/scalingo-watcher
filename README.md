@@ -22,7 +22,7 @@ La liste complète des comportements est dans [FEATURES.md](FEATURES.md).
 | Dépôt | Contenu |
 |---|---|
 | `incubateur-ademe/scalingo-watcher` (ce dépôt) | Moteur, workflows réutilisables, actions composites, presets Renovate, schéma du manifeste |
-| `incubateur-ademe/scalingo-parc-template` | Squelette d'un dépôt consommateur, issu du dossier [`template/`](template/) |
+| [`incubateur-ademe/scalingo-parc-template`](https://github.com/incubateur-ademe/scalingo-parc-template) | Squelette d'un dépôt consommateur, tenu à jour par Renovate comme un parc |
 | Dépôt consommateur | `manifest.yaml`, `lock.json`, `fgp.json`, `renovate.json` et les workflows appelants |
 
 Un dépôt consommateur ne contient que les données de son parc. Ses workflows
@@ -31,8 +31,8 @@ avancer cette version.
 
 ## Démarrer un parc
 
-Créer un dépôt depuis le template et suivre la checklist de son
-[README](template/README.md) : choix de l'accès à Scalingo, génération du
+Créer un dépôt depuis le [template](https://github.com/incubateur-ademe/scalingo-parc-template) et suivre la checklist de son
+[README](https://github.com/incubateur-ademe/scalingo-parc-template#readme) : choix de l'accès à Scalingo, génération du
 manifeste depuis l'état réel, amorçage du lock, environment et secrets, Renovate,
 premier plan, activation du cron.
 
@@ -184,7 +184,7 @@ jobs:
       PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
 ```
 
-Les quatre appelants complets sont dans [`template/.github/workflows/`](template/.github/workflows/).
+Les quatre appelants complets sont dans le [template](https://github.com/incubateur-ademe/scalingo-parc-template/tree/main/.github/workflows).
 
 ## Actions composites
 
@@ -289,14 +289,13 @@ GitHub, puis déplace le tag majeur `vX` sur le même commit. Le secret
 facultatif `RELEASE_TOKEN` ouvre cette pull request avec un jeton qui déclenche
 la CI.
 
-Le template suit chaque release sans intervention. `template/` ne cite aucune
-version de l'outil, seulement le repère `__SCALINGO_WATCHER_TAG__`. À la release,
-`release.yml` recopie `template/` dans `incubateur-ademe/scalingo-parc-template`
-en remplaçant ce repère par le tag de la release. Le secret `TEMPLATE_SYNC_TOKEN`
-est un PAT fine-grained limité à ce dépôt, droits Contents et Workflows en
-écriture. Sans lui, la release passe et la synchronisation est signalée en
-avertissement. Un test vérifie qu'aucune version n'est écrite en dur dans
-`template/`.
+Le template est un dépôt à part, seule source de son contenu. Renovate le
+tient à jour comme un parc : une pull request par release, un jour après sa
+publication, dont la validation tourne avec la nouvelle version. La CI de
+l'outil récupère le template et vérifie que chacun de ses appelants mappe les
+secrets du workflow à la version qu'il épingle. Les secrets qu'une version en
+cours ajoute sont signalés en avertissement, à mapper dans le template une fois
+la release publiée.
 
 ## Licence
 
