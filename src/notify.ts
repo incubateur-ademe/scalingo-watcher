@@ -48,10 +48,11 @@ export function compose(env: Env, readReport: (path: string) => string): Message
     { label: "Tableau de bord", url: issue ? `${env.REPO_URL}/issues/${issue}` : "" },
     { label: "Execution", url: env.RUN_URL ?? "" },
   ].filter((l) => l.url);
+  // Un parc sain a l'ouverture du suivi n'a rien apres son marqueur.
   const detail =
     state === "resolved"
       ? "Plus rien a signaler sur le parc."
-      : actionPart(readReport(env.REPORT ?? "")) || "Aucun detail.";
+      : actionPart(readReport(env.REPORT ?? "")) || "Rien a signaler sur le parc.";
   return { state, title: TITLES[state] ?? "Etat du parc", detail, links };
 }
 

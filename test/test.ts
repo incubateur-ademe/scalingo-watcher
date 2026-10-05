@@ -261,6 +261,11 @@ console.log("\nNotification des changements d'etat");
   const read = (text: string) => () => text;
   const env = { REPO_URL: "https://github.com/o/r", RUN_URL: "https://github.com/o/r/actions/runs/1", ISSUE: "4" };
   check(
+    "un suivi ouvert sur un parc sain le dit",
+    compose({ ...env, STATE: "opened", REPORT: "x" }, read("## Metabase\n\n<!-- etat: sain -->\n")).detail,
+    "Rien a signaler sur le parc.",
+  );
+  check(
     "un retour a la normale le dit sans lire le rapport",
     compose({ ...env, STATE: "resolved" }, () => { throw new Error("rapport lu"); }).detail,
     "Plus rien a signaler sur le parc.",
