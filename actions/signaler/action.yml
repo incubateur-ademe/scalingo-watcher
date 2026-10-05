@@ -2,7 +2,9 @@ name: tenir le tableau de bord
 description: >
   Tient a jour une issue unique et permanente decrivant l'etat de la
   convergence, et previent les canaux configures (Teams, webhook au format
-  Slack, Matrix/Tchap) aux seuls changements d'etat.
+  Slack, Matrix/Tchap) aux seuls changements d'etat. Suppose actions/setup
+  deja passee : la notification est un script TypeScript de l'outil, execute
+  par le Node qu'elle installe.
 
 inputs:
   token:
@@ -145,4 +147,4 @@ runs:
         MATRIX_HOMESERVER: ${{ inputs.matrix-homeserver }}
         MATRIX_ROOM_ID: ${{ inputs.matrix-room-id }}
         MATRIX_ACCESS_TOKEN: ${{ inputs.matrix-token }}
-      run: python3 "$GITHUB_ACTION_PATH/notify.py"
+      run: node "$GITHUB_ACTION_PATH/../../src/notify.ts"
