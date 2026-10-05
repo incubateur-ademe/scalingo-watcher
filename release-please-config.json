@@ -62,37 +62,7 @@
   ],
   "packages": {
     ".": {
-      "initial-version": "1.0.0",
-      "extra-files": [
-        {
-          "type": "generic",
-          "path": "template/.github/workflows/apply.yml"
-        },
-        {
-          "type": "generic",
-          "path": "template/.github/workflows/propose-db.yml"
-        },
-        {
-          "type": "generic",
-          "path": "template/.github/workflows/reconcile.yml"
-        },
-        {
-          "type": "generic",
-          "path": "template/.github/workflows/validate.yml"
-        },
-        {
-          "type": "generic",
-          "path": "template/manifest.yaml"
-        },
-        {
-          "type": "generic",
-          "path": "template/renovate.json5"
-        },
-        {
-          "type": "generic",
-          "path": "template/README.md"
-        }
-      ]
+      "initial-version": "1.0.0"
     }
   }
 }

@@ -32,7 +32,7 @@ permissions:
 
 jobs:
   reconcile:
-    uses: incubateur-ademe/scalingo-watcher/.github/workflows/reconcile.yml@v1.0.4 # x-release-please-version
+    uses: incubateur-ademe/scalingo-watcher/.github/workflows/reconcile.yml@__SCALINGO_WATCHER_TAG__
     with:
       environment: production
       # Le cron et le push n'ont pas d'inputs : la comparaison ramene leur

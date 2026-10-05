@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   propose:
-    uses: incubateur-ademe/scalingo-watcher/.github/workflows/propose-db.yml@v1.0.4 # x-release-please-version
+    uses: incubateur-ademe/scalingo-watcher/.github/workflows/propose-db.yml@__SCALINGO_WATCHER_TAG__
     with:
       environment: production
     # Chaque secret est mappe, meme range dans l'environment : le job appele ne
