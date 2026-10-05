@@ -79,7 +79,7 @@ for region in osc-fr1 osc-secnum-fr1; do
       \"POST:/v1/apps/*/variables\",
       \"PATCH:/v1/apps/*/variables/*\"
     ]
-  }" | python3 -c "import json,sys; print('$region', json.load(sys.stdin)['blob'])"
+  }" | node -e "process.stdin.on('data', (d) => console.log('$region', JSON.parse(d).blob))"
 done
 ```
 
@@ -106,7 +106,7 @@ curl -sX POST "$FGP/api/generate" -H 'Content-Type: application/json' -d "{
     \"GET:/api/database_type_versions/*\",
     \"GET:/api/operations/*\"
   ]
-}" | python3 -c "import json,sys; print(json.load(sys.stdin)['blob'])"
+}" | node -e "process.stdin.on('data', (d) => console.log(JSON.parse(d).blob))"
 ```
 
 L'identifiant d'addon se lit avec `scalingo --region <region> --app <app> addons`.
@@ -138,8 +138,8 @@ L'interface web est à `<url du proxy>/logs`. En ligne de commande, un flux par
 blob :
 
 ```bash
-FGP=$(python3 -c "import json;print(json.load(open('fgp.json')).get('url','https://fgp.incubateur.ademe.fr'))")
-BLOB=$(python3 -c "import json;print(json.load(open('fgp.json'))['api']['osc-fr1'])")
+FGP=$(node -p "require('./fgp.json').url ?? 'https://fgp.incubateur.ademe.fr'")
+BLOB=$(node -p "require('./fgp.json').api['osc-fr1']")
 curl -N -H "X-FGP-Key: $FGP_KEY" -H "X-FGP-Blob: $BLOB" "$FGP/logs/stream"
 ```
 

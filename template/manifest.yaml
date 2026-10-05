@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/incubateur-ademe/scalingo-watcher/v1.0.0/schema/manifest.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/incubateur-ademe/scalingo-watcher/v1.0.4/schema/manifest.schema.json x-release-please-version
 # Manifeste d'exemple : apps, depot applicatif et sha sont fictifs. Il est
 # remplace par celui que genere init depuis l'etat reel du parc (README.md).
 #
