@@ -118,8 +118,12 @@ gh secret set FGP_KEY --env production              # ou SCALINGO_API_TOKEN en a
 Sans politique de branches, toute branche du dépôt peut déclarer l'environment
 et lire ses secrets.
 
+Les appelants de `.github/workflows/` mappent déjà chaque secret : le job appelé
+ne lit la valeur de l'environment que pour un secret qu'on lui passe. Un secret
+ajouté plus tard à l'environment doit aussi figurer dans leur bloc `secrets:`.
+
 Notifications aux changements d'état, facultatives et cumulables. Les secrets
-vont dans l'environment `production`, d'où le job appelé les lit sans mapping.
+vont dans l'environment `production`.
 
 | Canal | Configuration |
 |---|---|

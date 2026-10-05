@@ -292,6 +292,28 @@ console.log("\nConsignation du lock");
   rmSync(dir, { recursive: true, force: true });
 }
 
+console.log("\nSecrets des appelants du template");
+
+// Le job appele ne lit la valeur d'un secret de l'environment que si
+// l'appelant lui passe ce secret : non mappe, FGP_KEY arrivait vide et le parc
+// tournait sans acces, en vert.
+{
+  const ROOT_DIR = join(import.meta.dirname, "..");
+  type Workflow = { on?: { workflow_call?: { secrets?: Record<string, unknown> } }; jobs: Record<string, { uses?: string; secrets?: unknown }> };
+  const readWorkflow = (file: string) => parse(readFileSync(file, "utf8")) as Workflow;
+  const gaps = readdirSync(join(ROOT_DIR, "template", ".github", "workflows")).flatMap((name) => {
+    const caller = readWorkflow(join(ROOT_DIR, "template", ".github", "workflows", name));
+    return Object.values(caller.jobs).flatMap((job) => {
+      const called = /\/\.github\/workflows\/([^@]+)@/.exec(job.uses ?? "")?.[1];
+      if (!called) return [];
+      const declared = Object.keys(readWorkflow(join(ROOT_DIR, ".github", "workflows", called)).on?.workflow_call?.secrets ?? {});
+      const mapped = job.secrets && typeof job.secrets === "object" ? Object.keys(job.secrets) : [];
+      return declared.filter((secret) => !mapped.includes(secret)).map((secret) => `${name} : ${secret}`);
+    });
+  });
+  check("chaque appelant du template mappe tous les secrets du workflow appele", gaps, []);
+}
+
 console.log("\nAmont declare par l'audit");
 
 // Indexe par variable seule, l'amont de la derniere app ecrasait celui des

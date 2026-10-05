@@ -143,11 +143,14 @@ Inputs :
 Secrets, tous facultatifs : `SCALINGO_API_TOKEN` ou `FGP_KEY` pour l'accès,
 `TEAMS_WEBHOOK`, `SLACK_WEBHOOK` et `MATRIX_ACCESS_TOKEN` pour les
 notifications, `PUSH_TOKEN` pour pousser le lock
-et ouvrir les pull requests sur une branche protégée. `secrets: inherit` ne
-fonctionne pas entre organisations : l'appelant mappe ses secrets de dépôt. Les
-secrets de l'environment passé en input sont lus directement par le job appelé,
-et l'emportent sur un secret mappé. Les secrets d'accès et `PUSH_TOKEN` ont leur
-place dans l'environment, réservé à `main` par sa politique de branches.
+et ouvrir les pull requests sur une branche protégée. Les secrets d'accès et
+`PUSH_TOKEN` ont leur place dans l'environment, réservé à `main` par sa
+politique de branches.
+
+L'appelant mappe chaque secret, même rangé dans l'environment : le job appelé ne
+lit la valeur de l'environment que pour un secret qu'on lui passe, et un secret
+non mappé arrive vide. `secrets: inherit` aurait le même effet, mais ne
+fonctionne qu'au sein d'une même organisation.
 
 `reconcile` et `apply` partagent le groupe de concurrence
 `scalingo-apply` et n'annulent jamais un passage en cours. `propose-db`
@@ -172,6 +175,13 @@ jobs:
     uses: incubateur-ademe/scalingo-watcher/.github/workflows/reconcile.yml@<sha> # v1.0.0
     with:
       environment: production
+    secrets:
+      FGP_KEY: ${{ secrets.FGP_KEY }}
+      SCALINGO_API_TOKEN: ${{ secrets.SCALINGO_API_TOKEN }}
+      TEAMS_WEBHOOK: ${{ secrets.TEAMS_WEBHOOK }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      MATRIX_ACCESS_TOKEN: ${{ secrets.MATRIX_ACCESS_TOKEN }}
+      PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
 ```
 
 Les quatre appelants complets sont dans [`template/.github/workflows/`](template/.github/workflows/).
