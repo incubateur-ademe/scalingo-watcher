@@ -1,6 +1,8 @@
 # Chaque push sur main tient a jour la pull request de release. Sa fusion cree
 # le tag vX.Y.Z et la release, puis le tag majeur vX est deplace sur le meme
-# commit pour ceux qui suivent la ligne majeure.
+# commit pour ceux qui suivent la ligne majeure, et template/ est recopie dans le
+# depot starter. La pull request de release monte deja les versions du template
+# (extra-files de release-please-config.json).
 name: release
 
 on:
@@ -15,6 +17,10 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      sha: ${{ steps.release.outputs.sha }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       # Une pull request ouverte avec le GITHUB_TOKEN ne declenche pas la CI :
       # RELEASE_TOKEN, quand il existe, ouvre la pull request de release.
@@ -39,3 +45,59 @@ jobs:
           set -euo pipefail
           git tag -f "v$MAJOR" "$SHA"
           git push -f origin "refs/tags/v$MAJOR"
+
+  # Le starter est un depot a part : un depot cree depuis lui en copie tous les
+  # fichiers, un workflow de synchronisation y vivrait donc aussi chez chaque
+  # consommateur. La copie part d'ici. Le GITHUB_TOKEN ne peut pas ecrire dans
+  # un autre depot ni y modifier des workflows : TEMPLATE_SYNC_TOKEN est un PAT
+  # fine-grained limite au starter, droits Contents et Workflows en ecriture.
+  sync-template:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TEMPLATE_REPOSITORY: incubateur-ademe/scalingo-parc-template
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - id: token
+        env:
+          TOKEN: ${{ secrets.TEMPLATE_SYNC_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::TEMPLATE_SYNC_TOKEN absent : $TEMPLATE_REPOSITORY n'est pas synchronise avec $TAG"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: ${{ steps.token.outputs.present == 'true' }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.sha }}
+          path: tool
+          persist-credentials: false
+
+      - if: ${{ steps.token.outputs.present == 'true' }}
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.TEMPLATE_REPOSITORY }}
+          token: ${{ secrets.TEMPLATE_SYNC_TOKEN }}
+          path: starter
+
+      - name: recopier template/
+        if: ${{ steps.token.outputs.present == 'true' }}
+        working-directory: starter
+        run: |
+          set -euo pipefail
+          rsync -a --delete --exclude .git ../tool/template/ ./
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "$TEMPLATE_REPOSITORY deja a jour"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: synchroniser avec scalingo-watcher $TAG"
+          git push

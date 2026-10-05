@@ -289,6 +289,18 @@ GitHub, puis déplace le tag majeur `vX` sur le même commit. Le secret
 facultatif `RELEASE_TOKEN` ouvre cette pull request avec un jeton qui déclenche
 la CI.
 
+Le template suit chaque release sans intervention :
+
+- la pull request de release monte les versions de `template/`, sur les lignes
+  marquées `x-release-please-version` des fichiers déclarés en `extra-files`
+  dans `release-please-config.json`. Un test vérifie que chaque version du
+  template est marquée, déclarée et égale à celle du `package.json` ;
+- à la release, `release.yml` recopie `template/` dans
+  `incubateur-ademe/scalingo-parc-template`. Le secret `TEMPLATE_SYNC_TOKEN` est
+  un PAT fine-grained limité à ce dépôt, droits Contents et Workflows en
+  écriture. Sans lui, la release passe et la synchronisation est signalée en
+  avertissement.
+
 ## Licence
 
 [MIT](LICENSE).

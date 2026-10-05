@@ -313,6 +313,37 @@ console.log("\nConsignation du lock");
   rmSync(dir, { recursive: true, force: true });
 }
 
+console.log("\nVersions du template");
+
+// Le template suit chaque release : release-please y remplace la version sur
+// les lignes marquees, dans les fichiers declares. Une version non marquee, ou
+// un fichier non declare, resterait en arriere sans que rien ne le signale.
+{
+  const ROOT_DIR = join(import.meta.dirname, "..");
+  const version = (JSON.parse(readFileSync(join(ROOT_DIR, "package.json"), "utf8")) as { version: string }).version;
+  const config = JSON.parse(readFileSync(join(ROOT_DIR, "release-please-config.json"), "utf8")) as {
+    packages: Record<string, { "extra-files"?: Array<{ path: string }> }>;
+  };
+  const declared = new Set((config.packages["."]["extra-files"] ?? []).map((f) => f.path));
+  const lines = globSync(["template/**", "template/.github/**"], { cwd: ROOT_DIR })
+    .filter((f) => statSync(join(ROOT_DIR, f)).isFile())
+    .flatMap((f) =>
+      readFileSync(join(ROOT_DIR, f), "utf8")
+        .split("\n")
+        .flatMap((line, i) =>
+          line.includes("scalingo-watcher")
+            ? [...line.matchAll(/v(\d+\.\d+\.\d+)\b/g)].map((m) => ({ where: `${f}:${i + 1}`, file: f, line, v: m[1] }))
+            : [],
+        ),
+    );
+  check("le template cite des versions de l'outil", lines.length, 10);
+  check(
+    "chaque version du template est celle du package, marquee, dans un fichier declare a release-please",
+    lines.filter((l) => l.v !== version || !l.line.includes("x-release-please-version") || !declared.has(l.file)).map((l) => l.where),
+    [],
+  );
+}
+
 console.log("\nSecrets des appelants du template");
 
 // Le job appele ne lit la valeur d'un secret de l'environment que si

@@ -10,7 +10,7 @@ viennent de l'outil, à une version épinglée.
 | `manifest.yaml` | Ce qui doit tourner sur chaque app. Édité à la main ou par Renovate. |
 | `lock.json` | Ce qui tourne réellement. Écrit par le moteur, jamais à la main. |
 | `fgp.json` | Blobs du proxy FGP, en accès par proxy uniquement. |
-| `renovate.json` | Veille des versions du parc et des mises à jour de l'outil. |
+| `renovate.json5` | Veille des versions du parc et des mises à jour de l'outil. |
 | `.github/workflows/` | Appelants des workflows réutilisables de l'outil. |
 
 Le manifeste livré avec ce template est fictif. L'installation le remplace par
@@ -38,7 +38,7 @@ Dans le dépôt, au même emplacement que dans les workflows. Le dossier est
 ignoré par git.
 
 ```bash
-git clone --depth 1 --branch v1.0.0 https://github.com/incubateur-ademe/scalingo-watcher .scalingo-watcher
+git clone --depth 1 --branch v1.0.4 https://github.com/incubateur-ademe/scalingo-watcher .scalingo-watcher # x-release-please-version
 pnpm --dir .scalingo-watcher install --frozen-lockfile
 ```
 
@@ -72,7 +72,7 @@ Deux modes, au choix :
   compte. Rien à générer.
 - **Proxy FGP** : le secret `FGP_KEY` et le fichier `fgp.json`, versionné. Chaque
   blob borne ce que la clé autorise à une méthode et un chemin. Le détail est
-  dans [fgp.md](https://github.com/incubateur-ademe/scalingo-watcher/blob/v1.0.0/fgp.md).
+  dans [fgp.md](https://github.com/incubateur-ademe/scalingo-watcher/blob/v1.0.4/fgp.md). <!-- x-release-please-version -->
 
 Pour le proxy, générer `fgp.json` depuis le manifeste :
 
@@ -165,9 +165,9 @@ branche.
 ### 8. Installer Renovate
 
 Installer l'[app Renovate](https://github.com/apps/renovate) sur le dépôt. Il
-contient déjà `renovate.json`, donc Renovate n'ouvre pas de pull request
+contient déjà `renovate.json5`, donc Renovate n'ouvre pas de pull request
 d'accueil. Il ouvre directement celle qui épingle les workflows appelants par
-sha (`@<sha> # v1.0.0`) : la fusionner.
+sha (`@<sha> # vX.Y.Z`) : la fusionner.
 
 ### 9. Premier plan en CI
 
@@ -213,7 +213,7 @@ node .scalingo-watcher/src/apply.ts --prune     # retire du lock les apps sortie
 
 Une release de scalingo-watcher arrive dans une seule pull request Renovate,
 1 jour après sa publication : elle avance le sha des workflows appelants et le
-tag des presets de `renovate.json`. La validation y tourne avec la nouvelle
+tag des presets de `renovate.json5`. La validation y tourne avec la nouvelle
 version. Elle n'est jamais fusionnée automatiquement : la fusionner après
 lecture du CHANGELOG de l'outil.
 
