@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.5](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.0.4...v1.0.5) (2026-10-21)
+
+
+### Corrections
+
+* policy automerge, starter release link ([#19](https://github.com/incubateur-ademe/scalingo-watcher/issues/19)) ([57fcc7e](https://github.com/incubateur-ademe/scalingo-watcher/commit/57fcc7e59e06726db2f137975d96b0d7e6705b88))
+
 ## [1.0.4](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.0.3...v1.0.4) (2026-10-05)
 
 
