@@ -441,7 +441,7 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
   );
 }
 
-console.log("\nSecrets des appelants du starter");
+console.log("\nStarter : appelants, versions citees, managers");
 
 // Le job appele ne lit la valeur d'un secret de l'environment que si
 // l'appelant lui passe ce secret : non mappe, FGP_KEY arrivait vide et le parc
@@ -500,6 +500,31 @@ console.log("\nSecrets des appelants du starter");
           });
       });
     check("chaque version de l'outil citee par le starter est suivie par Renovate", unfollowed, []);
+
+    // Un manager recopie dans le starter pour devancer une release fait
+    // extraire chaque version deux fois une fois le preset monte a cette
+    // release : il doit partir dans la PR de montee.
+    const starterConfig = join(starter, "renovate.json");
+    if (existsSync(starterConfig)) {
+      const config = JSON.parse(readFileSync(starterConfig, "utf8")) as { extends?: string[]; customManagers?: CustomManager[] };
+      const local = (config.customManagers ?? []).flatMap((m) => m.matchStrings ?? []);
+      const watcherRef = (config.extends ?? []).map((e) => /^github>incubateur-ademe\/scalingo-watcher\/\/renovate\/watcher#(\S+)$/.exec(e)?.[1]).find(Boolean);
+      const carriedAt = (ref: string) => {
+        const src = execFileSync("git", ["show", `${ref}:renovate/watcher.json`], { cwd: ROOT_DIR, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        const carried = new Set(((JSON.parse(src) as { customManagers?: CustomManager[] }).customManagers ?? []).flatMap((m) => m.matchStrings ?? []));
+        return local.filter((s) => carried.has(s));
+      };
+      let doubled: string[];
+      try {
+        doubled = watcherRef ? carriedAt(watcherRef).map((s) => `renovate.json (watcher#${watcherRef}) : ${s}`) : [];
+      } catch {
+        doubled = [`renovate.json : watcher#${watcherRef} introuvable dans ce depot, faire git fetch --tags`];
+      }
+      check("le starter ne recopie aucun manager deja porte par le preset watcher qu'il epingle", doubled, []);
+      if (!doubled.length && carriedAt("HEAD").length) {
+        console.log("::warning::manager recopie dans le renovate.json du starter : a retirer, avec sa packageRule, a la montee vers la prochaine release");
+      }
+    }
     check("chaque appelant du starter mappe les secrets du workflow qu'il epingle", gaps, []);
     for (const u of upcoming) console.log(`::warning::secret a mapper dans le starter a la prochaine release : ${u}`);
   }
