@@ -92,7 +92,11 @@ l'application, qui contient ses secrets en clair.
 **[fait]** L'ordre du tableau `apps` est l'ordre de déploiement, de la moins
 critique à la plus critique.
 
-**[fait]** Politique globale dans `defaults`.
+**[fait]** Politique globale dans `defaults`. Le preset `base` la relit dans le
+texte brut du manifeste et la porte dans le `depType` de chaque version d'outil
+(`outil minor=auto major=pr`). Le preset de l'outil en tire l'automerge, seul
+`metabase` le fait aujourd'hui. Une politique écrite sous une forme que Renovate
+ne lit pas, en style flow par exemple, est signalée par `--validate`.
 
 **[fait]** Politique par application. Le `depName` vu par Renovate est le nom de
 l'application Scalingo, pas le dépôt amont, donc une exception pour une seule
@@ -210,7 +214,9 @@ du dépôt amont reste utilisé pour interroger la source des versions, il n'est
 simplement plus ce qui est affiché.
 
 **[fait]** Les deux axes sont étiquetés `source` et `outil` via le type de
-dépendance, ce qui les sépare visuellement dans le tableau de bord.
+dépendance, ce qui les sépare visuellement dans le tableau de bord. Le type
+`outil` porte en plus la politique relue dans le manifeste
+(`outil minor=auto major=pr`).
 
 **[fait]** Les mises à jour sont groupées par nature, donc une seule pull request
 pour les correctifs de tout le parc, une autre pour une montée fonctionnelle, une
@@ -765,9 +771,10 @@ bord et notification), `commit-lock` (push du lock rejoué).
 que soit le répertoire courant.
 
 **[fait]** Sorties d'un passage dans `--out-dir`, par défaut
-`$RUNNER_TEMP/scalingo-watcher` en CI et le répertoire temporaire du système en
-local, plus rien dans le dépôt : un fichier produit à côté du lock finit tôt ou
-tard commité avec lui.
+`$RUNNER_TEMP/scalingo-watcher` en CI et en local un répertoire privé
+`scalingo-watcher-XXXXXX` du répertoire temporaire du système, nouveau à chaque
+passage et affiché à sa création, plus rien dans le dépôt : un fichier produit à
+côté du lock finit tôt ou tard commité avec lui.
 
 **[fait]** Deux modes d'accès à Scalingo, en local comme dans les workflows :
 `SCALINGO_API_TOKEN` en direct, ou `FGP_KEY` et `fgp.json`. L'adresse du proxy

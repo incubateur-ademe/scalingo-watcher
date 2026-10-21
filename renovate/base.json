@@ -22,15 +22,18 @@
       "depTypeTemplate": "source"
     },
     {
-      "description": "Version de l'outil installe par le buildpack, portee par la variable d'environnement de l'app.",
+      "description": "Version de l'outil installe par le buildpack, portee par la variable d'environnement de l'app. Les deux premieres expressions couvrent tout le fichier et y relisent defaults.policy, presente ou non : le depType porte la politique du manifeste (outil minor=auto major=pr), que le preset de chaque outil traduit en automerge.",
       "customType": "regex",
       "managerFilePatterns": [
         "/(^|/)manifest\\.yaml$/"
       ],
+      "matchStringsStrategy": "recursive",
       "matchStrings": [
+        "^(?:[\\s\\S]*?\\r?\\n[ \\t]+policy:[ \\t]*(?:#[^\\r\\n]*)?\\r?\\n(?:[ \\t]*(?:#[^\\r\\n]*)?\\r?\\n|[ \\t]+major:[^\\r\\n]*\\r?\\n)*[ \\t]+minor:[ \\t]*[\"']?(?<minorPolicy>auto|pr)[\"']?[ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n|$))?[\\s\\S]*$",
+        "^(?:[\\s\\S]*?\\r?\\n[ \\t]+policy:[ \\t]*(?:#[^\\r\\n]*)?\\r?\\n(?:[ \\t]*(?:#[^\\r\\n]*)?\\r?\\n|[ \\t]+minor:[^\\r\\n]*\\r?\\n)*[ \\t]+major:[ \\t]*[\"']?(?<majorPolicy>auto|pr)[\"']?[ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n|$))?[\\s\\S]*$",
         "- app: (?<depName>\\S+)[\\s\\S]*?# renovate: datasource=(?<datasource>\\S+) depName=(?<packageName>\\S+)\\s*\\n\\s*version:\\s*[\"']?(?<currentValue>[^\"'\\s]+)[\"']?"
       ],
-      "depTypeTemplate": "outil"
+      "depTypeTemplate": "outil minor={{{minorPolicy}}} major={{{majorPolicy}}}"
     }
   ],
   "packageRules": [

@@ -77,7 +77,7 @@ Communes à toutes les commandes :
 | `--manifest <chemin>` | `manifest.yaml` |
 | `--lock <chemin>` | `lock.json` |
 | `--fgp <chemin>` | `fgp.json` |
-| `--out-dir <chemin>` | `$RUNNER_TEMP/scalingo-watcher` si `RUNNER_TEMP` existe, sinon `scalingo-watcher` dans le répertoire temporaire du système. Créé au besoin. |
+| `--out-dir <chemin>` | `$RUNNER_TEMP/scalingo-watcher` si `RUNNER_TEMP` existe, sinon un répertoire privé `scalingo-watcher-XXXXXX` du répertoire temporaire du système, nouveau à chaque passage et affiché à sa création. Créé au besoin. |
 
 `--out-dir` reçoit les sorties d'un passage, jamais commitées : `incident.md`
 (état du parc lu par l'action `signaler`), `db-proposal.json`, `pr-title.txt` et
@@ -204,9 +204,9 @@ Les quatre appelants complets sont dans le [template](https://github.com/incubat
 
 | Preset | Contenu |
 |---|---|
-| [`renovate/base`](renovate/base.json) | Lecture du manifeste par deux customManagers (commit du dépôt applicatif, version de l'outil), délai de cinq jours, dépôts applicatifs toujours en PR, alertes de vulnérabilité, messages de commit |
-| [`renovate/metabase`](renovate/metabase.json) | Versioning Metabase (lignes OSS et Enterprise séparées), correctifs fusionnés seuls, montées fonctionnelles en PR |
-| [`renovate/watcher`](renovate/watcher.json) | Mises à jour de l'outil : workflows épinglés par sha, une PR groupée, un jour de délai, jamais fusionnée seule |
+| [`renovate/base`](renovate/base.json) | Lecture du manifeste par deux customManagers (commit du dépôt applicatif, version de l'outil et `defaults.policy`), délai de cinq jours, dépôts applicatifs toujours en PR, alertes de vulnérabilité, messages de commit |
+| [`renovate/metabase`](renovate/metabase.json) | Versioning Metabase (lignes OSS et Enterprise séparées), automerge selon `defaults.policy` : sans politique, correctifs fusionnés seuls et montées fonctionnelles en PR |
+| [`renovate/watcher`](renovate/watcher.json) | Mises à jour de l'outil : workflows épinglés par sha, presets, versions citées par la documentation et le `$schema` du manifeste, une PR groupée, un jour de délai, jamais fusionnée seule |
 
 Le consommateur les étend, épinglés par tag, et active les managers qui les
 lisent :
@@ -232,8 +232,8 @@ configuration du consommateur.
 `manifest.yaml` est la seule chose qu'on édite, à la main ou via Renovate. Il dit
 quelle version doit tourner où, depuis quel dépôt applicatif. Son schéma est
 [`schema/manifest.schema.json`](schema/manifest.schema.json), avec le détail de
-chaque champ ; un manifeste le désigne par l'URL taguée de la version qui l'a
-généré. Un champ renommé reste accepté sous son ancien nom, avec un
+chaque champ ; un manifeste le désigne par l'URL taguée de la version de l'outil,
+que Renovate fait avancer avec elle. Un champ renommé reste accepté sous son ancien nom, avec un
 avertissement.
 
 Les commentaires `# renovate:` du manifeste sont fonctionnels : ils portent la

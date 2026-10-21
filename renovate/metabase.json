@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Versioning de Metabase et fusion de ses versions dans le manifeste : correctifs fusionnes seuls, montees fonctionnelles en PR.",
+  "description": "Versioning de Metabase et fusion de ses versions dans le manifeste, selon defaults.policy : correctifs fusionnes seuls et montees fonctionnelles en PR quand la politique est absente.",
   "packageRules": [
     {
       "description": "Metabase publie 0.x pour l'OSS et 1.x pour l'EE : ce sont deux lignes distinctes, jamais comparables entre elles. Le groupe compatibility les isole. Consequence sur les updateTypes : major = 2e chiffre (0.63 -> 0.64, montee fonctionnelle), minor = 3e chiffre (0.63.15 -> 0.63.16, correctif).",
@@ -11,7 +11,7 @@
       "commitMessageTopic": "Metabase"
     },
     {
-      "description": "Correctifs de Metabase : automerge, le job d'apply deroule ensuite dans l'ordre du manifeste. Restreint au manifeste : une mise a jour de scalingo-watcher ne doit jamais etre fusionnee seule. Restreint a Metabase, seul outil dont le versioning fait de minor un correctif.",
+      "description": "Correctifs de Metabase : automerge par defaut, le job d'apply deroule ensuite dans l'ordre du manifeste. Restreint au manifeste : une mise a jour de scalingo-watcher ne doit jamais etre fusionnee seule. Restreint a Metabase, seul outil dont le versioning fait de minor un correctif.",
       "matchManagers": [
         "custom.regex"
       ],
@@ -29,7 +29,27 @@
       "groupName": "correctifs outils"
     },
     {
-      "description": "Montees fonctionnelles de Metabase : PR, jamais d'automerge",
+      "description": "defaults.policy.minor: pr dans le manifeste, lu dans le depType par le preset base : les correctifs attendent une fusion humaine.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "metabase/metabase"
+      ],
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchDepTypes": [
+        "/\\bminor=pr\\b/"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Montees fonctionnelles de Metabase : PR par defaut.",
       "matchManagers": [
         "custom.regex"
       ],
@@ -44,6 +64,25 @@
       ],
       "automerge": false,
       "groupName": "montee fonctionnelle des outils"
+    },
+    {
+      "description": "defaults.policy.major: auto dans le manifeste, lu dans le depType par le preset base : les montees fonctionnelles sont fusionnees seules.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "metabase/metabase"
+      ],
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchDepTypes": [
+        "/\\bmajor=auto\\b/"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "automerge": true
     }
   ]
 }

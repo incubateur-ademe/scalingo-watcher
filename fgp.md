@@ -79,7 +79,7 @@ for region in osc-fr1 osc-secnum-fr1; do
       \"POST:/v1/apps/*/variables\",
       \"PATCH:/v1/apps/*/variables/*\"
     ]
-  }" | node -e "process.stdin.on('data', (d) => console.log('$region', JSON.parse(d).blob))"
+  }" | node -e "let s = ''; process.stdin.on('data', (d) => (s += d)).on('end', () => { let b; try { b = JSON.parse(s).blob; } catch {} if (b) console.log('$region', b); else { console.error('$region', s); process.exitCode = 1; } })"
 done
 ```
 
@@ -106,7 +106,7 @@ curl -sX POST "$FGP/api/generate" -H 'Content-Type: application/json' -d "{
     \"GET:/api/database_type_versions/*\",
     \"GET:/api/operations/*\"
   ]
-}" | node -e "process.stdin.on('data', (d) => console.log(JSON.parse(d).blob))"
+}" | node -e "let s = ''; process.stdin.on('data', (d) => (s += d)).on('end', () => { let b; try { b = JSON.parse(s).blob; } catch {} if (b) console.log(b); else { console.error(s); process.exitCode = 1; } })"
 ```
 
 L'identifiant d'addon se lit avec `scalingo --region <region> --app <app> addons`.

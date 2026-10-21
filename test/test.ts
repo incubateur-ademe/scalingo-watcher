@@ -35,6 +35,7 @@ import {
   describeProposal,
   describeTools,
   loadLock,
+  policyReadByRenovate,
   readManifest,
   RENAMED_FIELDS,
   resolveAliases,
@@ -313,6 +314,133 @@ console.log("\nConsignation du lock");
   rmSync(dir, { recursive: true, force: true });
 }
 
+console.log("\nPresets Renovate");
+
+// Renovate relit le manifeste et la documentation par les expressions des
+// presets, sans rien signaler quand elles ne trouvent rien. Les tests les
+// rejouent : `recursive` applique chaque expression aux correspondances de la
+// precedente et cumule les groupes nommes, que les templates peuvent citer.
+type CustomManager = { managerFilePatterns?: string[]; matchStrings?: string[]; matchStringsStrategy?: string; depTypeTemplate?: string };
+type PackageRule = Record<string, unknown>;
+const preset = (name: string) =>
+  JSON.parse(readFileSync(join(import.meta.dirname, "..", "renovate", `${name}.json`), "utf8")) as {
+    customManagers?: CustomManager[];
+    packageRules?: PackageRule[];
+  };
+const regexOf = (pattern: string) => new RegExp(pattern.replace(/^\/|\/$/g, ""));
+function extract(manager: CustomManager | undefined, src: string): Record<string, string>[] {
+  if (!manager) return [];
+  const matches = (pattern: string, text: string) =>
+    [...text.matchAll(new RegExp(pattern, "g"))].map((m) => ({
+      text: m[0],
+      groups: Object.fromEntries(Object.entries(m.groups ?? {}).filter(([, v]) => v !== undefined)) as Record<string, string>,
+    }));
+  const patterns = manager.matchStrings ?? [];
+  const found =
+    manager.matchStringsStrategy === "recursive"
+      ? patterns.reduce(
+          (layer, pattern) => layer.flatMap((f) => matches(pattern, f.text).map((m) => ({ text: m.text, groups: { ...f.groups, ...m.groups } }))),
+          [{ text: src, groups: {} as Record<string, string> }],
+        )
+      : patterns.flatMap((pattern) => matches(pattern, src));
+  const template = manager.depTypeTemplate;
+  return found.map(({ groups }) => (template ? { ...groups, depType: template.replace(/\{\{\{(\w+)\}\}\}/g, (_, k: string) => groups[k] ?? "") } : groups));
+}
+// Les packageRules s'appliquent dans l'ordre et la derniere qui correspond
+// l'emporte. Un critere que cette emulation ne connait pas la ferait mentir.
+const MATCHERS: Record<string, string> = {
+  matchManagers: "manager",
+  matchPackageNames: "packageName",
+  matchDatasources: "datasource",
+  matchUpdateTypes: "updateType",
+  matchDepTypes: "depType",
+};
+function ruleValue(rules: readonly PackageRule[], dep: Record<string, string>, key: string): unknown {
+  let value: unknown;
+  for (const rule of rules) {
+    const unknown = Object.keys(rule).filter((k) => k.startsWith("match") && !(k in MATCHERS));
+    if (unknown.length) throw new Error(`critere de packageRule non emule : ${unknown.join(", ")}`);
+    const fits = Object.entries(MATCHERS).every(([k, field]) => {
+      const patterns = rule[k] as string[] | undefined;
+      return !patterns || patterns.some((p) => (p.startsWith("/") ? regexOf(p).test(dep[field]) : p === dep[field]));
+    });
+    if (fits && key in rule) value = rule[key];
+  }
+  return value;
+}
+const RULES = ["base", "metabase", "watcher"].flatMap((name) => preset(name).packageRules ?? []);
+const TOOL_VERSIONS = preset("base").customManagers?.find((m) => m.matchStringsStrategy === "recursive");
+const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTemplate === "documentation");
+{
+  const src = readFileSync(join(FIXTURES, "manifest.yaml"), "utf8");
+  const block = "  policy:\n    minor: auto\n    major: pr\n";
+  const depTypes = (manifest: string) => [extract(TOOL_VERSIONS, manifest).length, [...new Set(extract(TOOL_VERSIONS, manifest).map((g) => g.depType))]];
+  check("Renovate porte la politique du manifeste dans le depType de chaque version d'outil", depTypes(src), [4, ["outil minor=auto major=pr"]]);
+  check(
+    "la politique se relit dans n'importe quel ordre, quotee et commentee",
+    depTypes(src.replace(block, "  policy: # relue par Renovate\n    # montees fonctionnelles\n    major: \"auto\"  # a surveiller\n\n    minor: 'pr'\n")),
+    [4, ["outil minor=pr major=auto"]],
+  );
+  check("sans politique, les versions restent suivies et le depType le dit", depTypes(src.replace(block, "")), [4, ["outil minor= major="]]);
+  check(
+    "la politique se relit aussi en fins de ligne CRLF",
+    [depTypes(src.replace(/\n/g, "\r\n")), policyReadByRenovate(src.replace(/\n/g, "\r\n"))],
+    [[4, ["outil minor=auto major=pr"]], { minor: "auto", major: "pr" }],
+  );
+  check(
+    "database.major n'est pas pris pour la politique",
+    depTypes(src.replace("    major: pr\n", "").replace("      version: 16.15.0-1\n", "      version: 16.15.0-1\n      major: allowed\n")),
+    [4, ["outil minor=auto major="]],
+  );
+  check(
+    "une politique en style flow n'est pas relue, --validate le signale",
+    [depTypes(src.replace(block, "  policy: { minor: pr, major: auto }\n")), policyReadByRenovate(src.replace(block, "  policy: { minor: pr, major: auto }\n"))],
+    [[4, ["outil minor= major="]], { minor: undefined, major: undefined }],
+  );
+
+  const metabase = (policy: string) =>
+    ["patch", "minor", "major"].map((updateType) =>
+      ruleValue(RULES, { manager: "custom.regex", packageName: "metabase/metabase", datasource: "github-releases", depType: `outil ${policy}`, updateType }, "automerge"),
+    );
+  check(
+    "la politique decide de l'automerge des versions de Metabase, correctifs seuls par defaut",
+    ["minor= major=", "minor=auto major=pr", "minor=pr major=pr", "minor=auto major=auto", "minor=pr major=auto"].map((p) => [p, metabase(p)]),
+    [
+      ["minor= major=", [true, true, false]],
+      ["minor=auto major=pr", [true, true, false]],
+      ["minor=pr major=pr", [false, false, false]],
+      ["minor=auto major=auto", [true, true, true]],
+      ["minor=pr major=auto", [false, false, true]],
+    ],
+  );
+
+  const watcher = (manager: string, datasource: string, depType: string) =>
+    ["minor", "major"].map((updateType) =>
+      ["automerge", "groupName"].map((key) =>
+        ruleValue(RULES, { manager, packageName: "incubateur-ademe/scalingo-watcher", datasource, depType, updateType }, key),
+      ),
+    );
+  check(
+    "une version de scalingo-watcher arrive dans la PR de l'outil, jamais fusionnee seule",
+    [watcher("github-actions", "github-tags", "action"), watcher("renovate-config", "github-tags", ""), watcher("custom.regex", "github-tags", "documentation")],
+    Array(3).fill(Array(2).fill([false, "scalingo-watcher"])),
+  );
+  check(
+    "Renovate suit les versions de l'outil citees hors des workflows et des presets",
+    [
+      "git clone --depth 1 --branch v1.2.3 https://github.com/incubateur-ademe/scalingo-watcher .scalingo-watcher",
+      "  dans [fgp.md](https://github.com/incubateur-ademe/scalingo-watcher/blob/v1.2.3/fgp.md).",
+      "# yaml-language-server: $schema=https://raw.githubusercontent.com/incubateur-ademe/scalingo-watcher/v1.2.3/schema/manifest.schema.json",
+    ].map((line) => extract(CITED_VERSIONS, line).map((g) => g.currentValue)),
+    [["v1.2.3"], ["v1.2.3"], ["v1.2.3"]],
+  );
+  check(
+    "dans la documentation et le manifeste, pas ailleurs",
+    ["README.md", "docs/installation.md", "manifest.yaml", "lock.json"].map((f) => (CITED_VERSIONS?.managerFilePatterns ?? []).some((p) => regexOf(p).test(f))),
+    [true, true, true, false],
+  );
+}
+
 console.log("\nSecrets des appelants du starter");
 
 // Le job appele ne lit la valeur d'un secret de l'environment que si
@@ -356,6 +484,22 @@ console.log("\nSecrets des appelants du starter");
       }
     }
     check("le starter appelle les workflows de l'outil", callers, 4);
+    // Hors des appelants et de renovate.json, une version de l'outil n'avance
+    // que par le manager de watcher.json : sans lui, le README faisait cloner
+    // une version plus ancienne que celle de la CI du parc.
+    const unfollowed = (readdirSync(starter, { recursive: true, encoding: "utf8" }) as string[])
+      .filter((f) => !/^(\.git|\.github[/\\]workflows)([/\\]|$)/.test(f) && f !== "renovate.json" && statSync(join(starter, f)).isFile())
+      .flatMap((f) => {
+        const followed = (CITED_VERSIONS?.managerFilePatterns ?? []).some((p) => regexOf(p).test(f));
+        return readFileSync(join(starter, f), "utf8")
+          .split("\n")
+          .flatMap((line, i) => {
+            if (!line.includes("scalingo-watcher")) return [];
+            const cited = line.match(/\bv\d+\.\d+\.\d+\b/g)?.length ?? 0;
+            return cited > (followed ? extract(CITED_VERSIONS, line).length : 0) ? [`${f}:${i + 1}`] : [];
+          });
+      });
+    check("chaque version de l'outil citee par le starter est suivie par Renovate", unfollowed, []);
     check("chaque appelant du starter mappe les secrets du workflow qu'il epingle", gaps, []);
     for (const u of upcoming) console.log(`::warning::secret a mapper dans le starter a la prochaine release : ${u}`);
   }
@@ -629,9 +773,18 @@ try {
   // Un nom fixe sous /tmp laissait un autre compte de la machine y poser un lien
   // et detourner les ecritures.
   const paths = resolvePaths([], {}, "/parc");
-  const first = outFile(paths, "incident.md");
-  const second = outFile(paths, "pr-body.md");
+  const printed: string[] = [];
+  const consoleLog = console.log;
+  console.log = (...a: unknown[]) => void printed.push(a.join(" "));
+  let first: string, second: string;
+  try {
+    first = outFile(paths, "incident.md");
+    second = outFile(paths, "pr-body.md");
+  } finally {
+    console.log = consoleLog;
+  }
   const dir = paths.outDir;
+  check("le repertoire prive est affiche une fois, a sa creation", printed, [`Sorties de ce passage dans ${dir}`]);
   check(
     "sans --out-dir ni RUNNER_TEMP, les sorties vont dans un repertoire prive cree une fois",
     [dir.startsWith(join(tmpdir(), "scalingo-watcher-")), dir !== join(tmpdir(), "scalingo-watcher"), statSync(dir).mode & 0o077, [first, second].map((f) => join(dir, basename(f)) === f)],
@@ -949,6 +1102,20 @@ try {
     "une version sans annotation est refusee",
     validateVariant("version", fixtureSrc.replace("      # renovate: datasource=github-releases depName=metabase/metabase\n", "")),
     ["version", 1, ["osc-fr1/alpha-metabase : tool.version n'est pas precedee de son annotation # renovate:, Renovate ne la suit pas"]],
+  );
+  // Renovate ne relit la politique qu'ecrite en bloc : en flow, l'automerge
+  // retombait sur son defaut sans que rien ne le dise.
+  check(
+    "une politique que Renovate ne relit pas est refusee",
+    validateVariant("flow", fixtureSrc.replace("  policy:\n    minor: auto\n    major: pr\n", "  policy: { minor: pr, major: pr }\n")),
+    [
+      "flow",
+      1,
+      [
+        "defaults.policy.minor vaut pr, Renovate lit rien : l'ecrire en bloc, une cle par ligne sous policy:",
+        "defaults.policy.major vaut pr, Renovate lit rien : l'ecrire en bloc, une cle par ligne sous policy:",
+      ],
+    ],
   );
   const orphanLock = JSON.parse(lockFixture) as { apps: Record<string, unknown> };
   orphanLock.apps["osc-fr1/disparue-metabase"] = orphanLock.apps["osc-fr1/alpha-metabase"];
@@ -1280,27 +1447,28 @@ try {
   // Les annotations sont relues par les expressions memes de la configuration
   // Renovate : une annotation de forme approchante passerait le schema et
   // --validate, et Renovate ne la verrait pas.
-  type CustomManager = { managerFilePatterns?: string[]; matchStrings?: string[] };
   const managers = ["renovate/base.json", "renovate.json"]
     .map((f) => join(import.meta.dirname, "..", f))
     .filter((f) => existsSync(f))
     .flatMap((f) => (JSON.parse(readFileSync(f, "utf8")).customManagers ?? []) as CustomManager[])
     .filter((m) => m.matchStrings?.some((s) => s.startsWith("- app: ")));
-  const patterns = [...new Set(managers.flatMap((m) => m.matchStrings ?? []))];
-  const shaPattern = patterns.find((s) => s.includes("currentDigest"));
-  const versionPattern = patterns.find((s) => !s.includes("currentDigest"));
-  const groupsOf = (pattern: string | undefined) =>
-    pattern ? [...generated.src.matchAll(new RegExp(pattern, "g"))].map((m) => m.groups ?? {}) : [];
-  check("la configuration Renovate lit le sha et la version", [Boolean(shaPattern), Boolean(versionPattern)], [true, true]);
+  const shaManager = managers.find((m) => m.matchStrings?.some((p) => p.includes("currentDigest")));
+  const versionManager = managers.find((m) => m !== shaManager);
+  check("la configuration Renovate lit le sha et la version", [Boolean(shaManager), Boolean(versionManager)], [true, true]);
   check(
     "chaque sha genere est lu par Renovate",
-    groupsOf(shaPattern).map((g) => [g.depName, g.datasource, g.repo, g.currentValue, g.currentDigest]),
+    extract(shaManager, generated.src).map((g) => [g.depName, g.datasource, g.repo, g.currentValue, g.currentDigest]),
     generatedApps.map((a) => [a.app, "git-refs", a.source.repo, a.source.branch, a.source.sha]),
   );
   check(
     "chaque version generee est lue par Renovate, avec l'amont de l'outil",
-    groupsOf(versionPattern).map((g) => [g.depName, g.datasource, g.packageName, g.currentValue]),
+    extract(versionManager, generated.src).map((g) => [g.depName, g.datasource, g.packageName, g.currentValue]),
     generatedApps.map((a) => [a.app, "github-releases", upstreamOf(a.tool)?.repo, a.tool.version]),
+  );
+  check(
+    "la politique et le $schema generes sont relus par Renovate",
+    [[...new Set(extract(versionManager, generated.src).map((g) => g.depType))], extract(CITED_VERSIONS, generated.src).map((g) => g.currentValue)],
+    [["outil minor=auto major=pr"], [`v${JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")).version}`]],
   );
   const filePatterns = managers.flatMap((m) => m.managerFilePatterns ?? []);
   check(
@@ -1326,11 +1494,10 @@ try {
     [numeric.apps[0].tool.version, numeric.apps[0].source.branch, validate(numeric)],
     ["11.2", "2024", true],
   );
-  const quotedGroups = (pattern: string | undefined) =>
-    pattern ? [...numericSrc.matchAll(new RegExp(pattern, "g"))].map((m) => m.groups?.currentValue) : [];
+  const quotedGroups = (manager: CustomManager | undefined) => extract(manager, numericSrc).map((g) => g.currentValue);
   check(
     "Renovate lit la version et la branche quotees sans leurs guillemets",
-    [quotedGroups(shaPattern), quotedGroups(versionPattern)],
+    [quotedGroups(shaManager), quotedGroups(versionManager)],
     [["2024"], ["11.2"]],
   );
 
