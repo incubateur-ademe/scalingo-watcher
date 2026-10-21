@@ -1693,6 +1693,7 @@ const envToProduct = (envName: string) => envName.replace(/_VERSION$/, "").toLow
 
 // Le schema appartient au moteur : il voyage avec lui, pas avec le parc.
 const SCHEMA_FILE = join(import.meta.dirname, "..", "schema", "manifest.schema.json");
+const RENOVATE_BASE_FILE = join(import.meta.dirname, "..", "renovate", "base.json");
 
 /**
  * Champs du manifeste renommes depuis leur introduction. L'ancien nom reste
@@ -1717,6 +1718,8 @@ export const RAW_FIELDS: readonly string[] = [
   "apps[].source.sha",
   "apps[].tool.version",
   "apps[].database.version",
+  "defaults.policy.minor",
+  "defaults.policy.major",
 ];
 
 const PER_APP = "apps[].";
@@ -1832,7 +1835,8 @@ function lineBeforeKey(source: string, map: unknown, field: string): string | nu
  * qui suit, sans aucune erreur visible. Une annotation git-refs qui designe un
  * autre depot que source.repo fait chercher a Renovate une branche qui n'existe
  * pas. Une entree de lock sans app n'est plus suivie et decrit un parc qui
- * n'existe pas.
+ * n'existe pas. Une politique que Renovate ne relit pas, ecrite par exemple en
+ * style flow, laisse l'automerge a son defaut sans le dire.
  */
 export function checkFleetData(source: string, manifest: Manifest, lock: Lock): string[] {
   const issues: string[] = [];
@@ -1851,11 +1855,34 @@ export function checkFleetData(source: string, manifest: Manifest, lock: Lock): 
       issues.push(`${key} : tool.version n'est pas precedee de son annotation # renovate:, Renovate ne la suit pas`);
     }
   });
+  const read = policyReadByRenovate(source);
+  for (const key of ["minor", "major"] as const) {
+    const wanted = manifest.defaults.policy?.[key];
+    if (wanted !== read[key]) {
+      issues.push(`defaults.policy.${key} vaut ${wanted ?? "rien"}, Renovate lit ${read[key] ?? "rien"} : l'ecrire en bloc, une cle par ligne sous policy:`);
+    }
+  }
   const declared = new Set(manifest.apps.map(keyOf));
   for (const orphan of Object.keys(lock.apps).filter((k) => !declared.has(k))) {
     issues.push(`${orphan} : entree de lock sans app dans le manifeste, a retirer par --prune si l'abandon est definitif`);
   }
   return issues;
+}
+
+/**
+ * defaults.policy telle que Renovate la relit, par les expressions memes du
+ * preset base : c'est elle, et non le YAML, qui decide de l'automerge.
+ */
+export function policyReadByRenovate(source: string): Policy {
+  type CustomManager = { matchStringsStrategy?: string; matchStrings?: string[] };
+  const managers = (JSON.parse(readFileSync(RENOVATE_BASE_FILE, "utf8")) as { customManagers?: CustomManager[] }).customManagers ?? [];
+  const groups: Record<string, string | undefined> = {};
+  for (const pattern of managers.flatMap((m) => (m.matchStringsStrategy === "recursive" ? (m.matchStrings ?? []) : []))) {
+    for (const [name, value] of Object.entries(new RegExp(pattern).exec(source)?.groups ?? {})) {
+      if (value !== undefined) groups[name] = value;
+    }
+  }
+  return { minor: groups.minorPolicy as Policy["minor"], major: groups.majorPolicy as Policy["major"] };
 }
 
 /** Version du format de lock que ce moteur sait lire et reecrire. */

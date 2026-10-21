@@ -79,7 +79,10 @@ export function resolvePaths(
 /** Chemin d'une sortie, repertoire cree au besoin. */
 export function outFile(paths: Paths, name: string): string {
   if (paths.outDir) mkdirSync(paths.outDir, { recursive: true });
-  else paths.outDir = mkdtempSync(join(tmpdir(), "scalingo-watcher-"));
+  else {
+    paths.outDir = mkdtempSync(join(tmpdir(), "scalingo-watcher-"));
+    console.log(`Sorties de ce passage dans ${paths.outDir}`);
+  }
   return join(paths.outDir, name);
 }
 

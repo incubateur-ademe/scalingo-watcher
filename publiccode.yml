@@ -58,7 +58,7 @@ description:
       - Déploiement progressif, une application éclaireuse puis les suivantes
       - Proposition des montées de version de base en pull request
       - Plan de ce qu'une fusion entraînera, publié en commentaire de pull request
-      - Tableau de bord tenu dans une issue unique, notification Teams, Slack, Mattermost ou Tchap aux changements d'état
+      - Tableau de bord en issue, notification Teams, Slack, Mattermost ou Tchap aux changements d'état
       - Mises à jour de l'outil et du parc suivies par Renovate
 
 legal:

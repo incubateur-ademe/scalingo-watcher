@@ -1,15 +1,34 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Mises a jour de scalingo-watcher chez un consommateur : workflows appelants epingles par sha et presets epingles par tag, avances ensemble dans une seule PR.",
+  "description": "Mises a jour de scalingo-watcher chez un consommateur : workflows appelants epingles par sha, presets epingles par tag, versions citees par la documentation et le $schema du manifeste, avances ensemble dans une seule PR.",
   "extends": [
     "helpers:pinGitHubActionDigests"
+  ],
+  "customManagers": [
+    {
+      "description": "Versions de l'outil citees hors des workflows et de renovate.json : clone local du README, liens vers la documentation, $schema du manifeste. Sans elles, un parc lance init et apply en local avec une version plus ancienne que celle de sa CI.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)[^/]+\\.md$/",
+        "/(^|/)manifest\\.yaml$/"
+      ],
+      "matchStrings": [
+        "--branch (?<currentValue>v\\d+\\.\\d+\\.\\d+) https://github\\.com/incubateur-ademe/scalingo-watcher\\b",
+        "github\\.com/incubateur-ademe/scalingo-watcher/(?:blob|tree)/(?<currentValue>v\\d+\\.\\d+\\.\\d+)/",
+        "raw\\.githubusercontent\\.com/incubateur-ademe/scalingo-watcher/(?<currentValue>v\\d+\\.\\d+\\.\\d+)/"
+      ],
+      "depNameTemplate": "incubateur-ademe/scalingo-watcher",
+      "datasourceTemplate": "github-tags",
+      "depTypeTemplate": "documentation"
+    }
   ],
   "packageRules": [
     {
       "description": "Une version de l'outil s'execute avec les secrets d'acces a Scalingo : un jour de decantation, puis une PR unique fusionnee apres lecture du CHANGELOG, jamais automatiquement.",
       "matchManagers": [
         "github-actions",
-        "renovate-config"
+        "renovate-config",
+        "custom.regex"
       ],
       "matchPackageNames": [
         "incubateur-ademe/scalingo-watcher"
