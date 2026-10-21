@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.5](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.0.4...v1.0.5) (2026-10-21)
+
+
+### Corrections
+
+* `defaults.policy` décide désormais de l'automerge des versions Metabase : `minor: pr` garde les correctifs en PR, `major: auto` fusionne seules les montées fonctionnelles. Sans politique, rien ne change. ([#19](https://github.com/incubateur-ademe/scalingo-watcher/issues/19)) ([57fcc7e](https://github.com/incubateur-ademe/scalingo-watcher/commit/57fcc7e59e06726db2f137975d96b0d7e6705b88))
+* `--validate` refuse une politique que Renovate ne relit pas, écrite en style flow `{ minor: …, major: … }` par exemple : la réécrire en bloc.
+* Renovate fait avancer les versions de l'outil citées dans la documentation et dans le `$schema` du manifeste.
+* `fgp.md` : la génération manuelle des blobs échoue sur une erreur du proxy, au lieu d'écrire `undefined`.
+* En local, le chemin du répertoire de sortie s'affiche.
+
 ## [1.0.4](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.0.3...v1.0.4) (2026-10-05)
 
 
