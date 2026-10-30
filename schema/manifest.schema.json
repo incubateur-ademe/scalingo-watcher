@@ -200,7 +200,7 @@
         "paused": {
           "type": "boolean",
           "default": false,
-          "description": "Sort temporairement l'application du perimetre sans la retirer du manifeste, ce qui conserverait sa configuration et eviterait que son entree de lock devienne orpheline.\n\nA distinguer de l'etat `stopped` que le watcher lit sur Scalingo : celui-ci est constate, la pause est decidee. Une application peut tourner et etre en pause parce qu'on ne veut pas la toucher pour l'instant, ou etre arretee sans etre en pause, auquel cas elle repartira d'elle-meme des qu'elle sera rallumee."
+          "description": "Application lue a chaque passage, jamais ecrite. Son etat, la version qui tourne, le commit deploye et sa base sont releves comme pour les autres, et son entree de lock suit ce reel : les failles signalees et le tableau de bord portent sur ce qui tourne, et a la reprise le plan part d'un etat juste. Aucune ecriture : ni deploiement, ni variable, ni sauvegarde, ni montee ou proposition de montee de base, ni quarantaine. Un ecart avec le manifeste est signale, sans action.\n\nSert a suivre une application dont le compte de l'acces n'est que collaborateur : `init` la pose d'office quand le proprietaire de l'app n'est pas ce compte. Sert aussi a geler une application le temps d'une investigation sans la retirer du manifeste, ce qui rendrait son entree de lock orpheline.\n\nA distinguer de l'etat `stopped` que le watcher lit sur Scalingo : celui-ci est constate, la pause est decidee. Une application peut tourner et etre en pause, ou etre arretee sans etre en pause, auquel cas elle repartira d'elle-meme des qu'elle sera rallumee."
         },
         "database": {
           "type": "object",

@@ -1486,6 +1486,117 @@ try {
     [0, true, true],
   );
 
+  console.log("\nApp en pause : lue, jamais ecrite, contre un fetch simule");
+
+  // beta-metabase est en pause dans le parc de test, et son lock la dit conforme.
+  // Sur Scalingo, elle tourne autre chose : son proprietaire l'a deployee.
+  const PAUSED = "osc-fr1/beta-metabase";
+  const REAL_STATE = ["v0.63.20", "c".repeat(40)];
+  const WITH_ACCESS = { SCALINGO_API_TOKEN: "faux", REAL: JSON.stringify({ [PAUSED]: { version: REAL_STATE[0], sha: REAL_STATE[1] } }) };
+  // L'echange du jeton de compte et le jeton d'addon qui ouvre la lecture
+  // d'une base passent par un POST, sans rien ecrire.
+  const readOnlyCalls = [
+    /^(GET|HEAD) /,
+    /^POST https:\/\/auth\.scalingo\.com\/v1\/tokens\/exchange$/,
+    /^POST https:\/\/api\.[^/]+\/v1\/apps\/[^/]+\/addons\/[^/]+\/token$/,
+  ];
+  const writeCalls = (calls: string[]) => calls.filter((l) => !readOnlyCalls.some((re) => re.test(l)));
+  const pausedEntry = (b: Sandbox) => {
+    const e = loadLock(join(b.fleet, "lock.json")).apps[PAUSED];
+    return [e.tool.version, e.source.sha];
+  };
+  const othersOf = (lockSrc: string) => {
+    const { apps } = JSON.parse(lockSrc) as { apps: Record<string, unknown> };
+    delete apps[PAUSED];
+    return apps;
+  };
+  const BETA = "https://api.osc-fr1.scalingo.com/v1/apps/beta-metabase";
+
+  const applied = sandbox();
+  const applyRun = run(applied, "apply.ts", [...FLEET, "--out-dir", "../sortie"], WITH_ACCESS);
+  if (applyRun.status !== 0) console.log(applyRun.output);
+  check(
+    "une app en pause est relevee : variable, deploiement et base",
+    [
+      applyRun.status,
+      applyRun.calls.includes(`GET ${BETA}/variables`),
+      applyRun.calls.includes(`GET ${BETA}/deployments?per_page=1`),
+      applyRun.calls.includes("GET https://db-api.osc-fr1.scalingo.com/api/databases/osc-fr1~beta-metabase"),
+    ],
+    [0, true, true, true],
+  );
+  check("son entree de lock suit le reel", pausedEntry(applied), REAL_STATE);
+  check("aucun appel d'ecriture, ni vers Scalingo ni vers les bases", writeCalls(applyRun.calls), []);
+  check("les autres entrees du lock ne bougent pas", othersOf(readFileSync(join(applied.fleet, "lock.json"), "utf8")), othersOf(lockFixture));
+  check(
+    "l'ecart avec le manifeste est signale, sans action",
+    /beta-metabase : en pause, lue sans rien ecrire, etat "running", v0\.63\.20 @ ccccccc\n {4}ecart avec le manifeste \(v0\.63\.18 @ aaaaaaa\), aucune action\n/.test(applyRun.output),
+    true,
+  );
+  check("le decompte la garde en pause", / en pause 1 /.test(applyRun.output), true);
+  const dashboard = readFileSync(join(applied.outDir, "incident.md"), "utf8");
+  check(
+    "le tableau de bord porte la version reelle, en ecart",
+    [
+      /^\| \[beta-metabase\]\S+ \| \[v0\.63\.20\]\S+ .*\| en pause, en écart \|$/m.test(dashboard),
+      /^\| \[beta-metabase\]\S+ \| \[16\.9\.0-1\]\S+ .*\| en pause, relevée \|$/m.test(dashboard),
+    ],
+    [true, true],
+  );
+  check("une base en pause ne fait pas d'echeance", /beta-metabase : base en/.test(applyRun.output), false);
+
+  const plannedPaused = sandbox();
+  const planRun = run(plannedPaused, "apply.ts", ["--dry-run", ...FLEET], WITH_ACCESS);
+  check(
+    "en plan, elle est lue et l'ecart annonce, sans rien ecrire",
+    [planRun.status, /ecart avec le manifeste/.test(planRun.output), writeCalls(planRun.calls), readFileSync(join(plannedPaused.fleet, "lock.json"), "utf8") === lockFixture],
+    [0, true, [], true],
+  );
+  const offlinePlan = run(sandbox(), "apply.ts", ["--dry-run", ...FLEET]);
+  check(
+    "sans acces, le plan le dit et ne l'appelle pas",
+    [offlinePlan.status, /beta-metabase : en pause, non relevee faute d'acces/.test(offlinePlan.output), offlinePlan.calls.filter((l) => l.includes("beta-metabase"))],
+    [0, true, []],
+  );
+
+  const reconciled = sandbox();
+  const reconcileRun = run(reconciled, "apply.ts", ["--reconcile", ...FLEET, "--out-dir", "../sortie"], WITH_ACCESS);
+  check(
+    "--reconcile la releve une seule fois, sans rien ecrire",
+    [
+      reconcileRun.status,
+      pausedEntry(reconciled),
+      reconcileRun.calls.filter((l) => l === `GET ${BETA}/variables`).length,
+      /a bouge hors du watcher, le lock disait v0\.63\.18 @ aaaaaaa/.test(reconcileRun.output),
+      /Aucune derive\./.test(reconcileRun.output),
+      /Aucune derive hors des apps en pause\. 1 app\(s\) en pause, relevee\(s\) dans l'application\./.test(reconcileRun.output),
+      writeCalls(reconcileRun.calls),
+    ],
+    [0, REAL_STATE, 1, true, false, true, []],
+  );
+
+  // Le meme ecart, sans la pause, serait rattrape : c'est bien elle qui retient.
+  const unpaused = sandbox();
+  writeFileSync(join(unpaused.fleet, "manifest.yaml"), fixtureSrc.replace("    paused: true\n", ""));
+  const unpausedPlan = run(unpaused, "apply.ts", ["--reconcile", "--dry-run", ...FLEET], WITH_ACCESS);
+  check(
+    "sans la pause, le meme ecart serait planifie",
+    [unpausedPlan.status, /beta-metabase : outil v0\.63\.20 -> v0\.63\.18, source main ccccccc -> aaaaaaa/.test(unpausedPlan.output)],
+    [0, true],
+  );
+
+  const adopted = sandbox();
+  const adoptRun = run(adopted, "apply.ts", ["--adopt", ...FLEET, "--app", "beta"], WITH_ACCESS);
+  check("--adopt la releve comme les autres", [adoptRun.status, pausedEntry(adopted), writeCalls(adoptRun.calls)], [0, REAL_STATE, []]);
+
+  const pruned = sandbox();
+  const pruneRun = run(pruned, "apply.ts", ["--prune", ...FLEET]);
+  check(
+    "--prune garde son entree, l'app restant declaree",
+    [pruneRun.status, readFileSync(join(pruned.fleet, "lock.json"), "utf8") === lockFixture, pruneRun.calls],
+    [0, true, []],
+  );
+
   console.log("\nPremier manifeste par init, contre un fetch simule");
 
   // Le parc simule de fetch-init.ts : quatre apps decrites entierement, quatre a
@@ -1498,6 +1609,7 @@ try {
   type GeneratedApp = {
     app: string;
     region: string;
+    paused?: boolean;
     backup?: string;
     database?: { version: string };
     source: { repo: string; branch: string; sha: string };
@@ -1554,6 +1666,45 @@ try {
   check("un git_ref qui n'est pas un sha est ecarte",/epsilon-metabase : git_ref "master"/.test(init.output), true);
   check("une app sans outil connu n'est pas citee", init.output.includes("site-vitrine"), false);
   check("aucun secret ne sort, ni a l'ecran ni dans le manifeste", [init.output.includes(SECRET), generated.src.includes(SECRET)], [false, false]);
+
+  const pausedApps = (m: { apps: GeneratedApp[] } | null) => (m?.apps ?? []).filter((a) => a.paused).map((a) => a.app);
+  check("une app hors du compte de l'acces est ecrite en pause, et elle seule", pausedApps(generated.manifest), ["zeta-metabase"]);
+  check(
+    "la pause dit pourquoi, au-dessus du champ",
+    /\n {4}# proprietaire autre-equipe, hors compte : lue, jamais ecrite\n {4}paused: true\n/.test(generated.src),
+    true,
+  );
+  const accountUnread = sandbox();
+  const accountUnreadRun = run(accountUnread, "init.ts", [...REGIONS, ...NEW_FLEET], { ...TOKEN, ACCOUNT_UNREADABLE: "1" }, INIT_FETCH);
+  check(
+    "compte illisible : init le dit une fois et ne deduit aucune pause",
+    [
+      accountUnreadRun.status,
+      accountUnreadRun.output.split("Compte de l'acces illisible").length - 1,
+      pausedApps(readGenerated(accountUnread).manifest),
+      readGenerated(accountUnread).manifest?.apps.length,
+    ],
+    [0, 1, [], 4],
+  );
+  const ownerUnread = sandbox();
+  const ownerUnreadRun = run(
+    ownerUnread,
+    "init.ts",
+    [...REGIONS, ...NEW_FLEET],
+    { ...TOKEN, OWNER_UNREADABLE: "alpha-metabase", OWNER_MISSING: "zeta-metabase" },
+    INIT_FETCH,
+  );
+  check(
+    "proprietaire illisible : l'app est gardee, sans pause deduite, et init le note",
+    [
+      ownerUnreadRun.status,
+      readGenerated(ownerUnread).manifest?.apps.map(appKey),
+      pausedApps(readGenerated(ownerUnread).manifest),
+      ownerUnreadRun.output.split("proprietaire illisible").length - 1,
+      /Releve impossible/.test(ownerUnreadRun.output),
+    ],
+    [0, generatedApps.map(appKey), [], 2, false],
+  );
 
   const readOnly = [
     /^(GET|HEAD) /,
@@ -1668,6 +1819,11 @@ try {
     [["alpha-metabase", "16.15.0-1"], ["beta-metabase", null], ["grafana-interne", null], ["zeta-metabase", null]],
   );
   check("et la commande suivante reprend --fgp", /--adopt .* --fgp \S+fgp\.json\n/.test(proxied.output), true);
+  check(
+    "derriere le proxy, le compte est illisible : dit une fois, aucune pause deduite",
+    [proxied.output.split("Compte de l'acces illisible").length - 1, pausedApps(readGenerated(viaProxy).manifest)],
+    [1, []],
+  );
 } finally {
   for (const root of sandboxes) rmSync(root, { recursive: true, force: true });
 }
