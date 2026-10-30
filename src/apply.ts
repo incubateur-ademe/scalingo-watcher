@@ -4,6 +4,8 @@
  *
  *   node src/apply.ts --dry-run     plan, aucune ecriture
  *   node src/apply.ts --propose-db  avance d'un cran les bases pilotees, dans le manifeste
+ *   node src/apply.ts --propose-security
+ *                                   monte les versions que les avis de l'amont couvrent
  *   node src/apply.ts               applique
  *   node src/apply.ts --app alpha   restreint aux apps dont le nom contient alpha
  *
@@ -26,7 +28,22 @@ import { isMap, isScalar, isSeq, parse, parseDocument, type Document, type ToStr
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { accessModes, flagValue, outFile, readFgpFile, resolvePaths, shown, type Fgp, type Paths } from "./options.ts";
 import { deniedByProxy, REGENERATE_HINT } from "./fgp-scopes.ts";
-import { compareLines, toolName, upstreamOf, type ToolDeclaration, type Upstream } from "./upstream.ts";
+import {
+  advisoriesFor,
+  cmpVersion,
+  compareLines,
+  judgeAdvisories,
+  parseSemver,
+  pinnedVersion,
+  toolName,
+  upstreamOf,
+  versionInRange,
+  type AdvisoryHit,
+  type AdvisoryVerdict,
+  type Range,
+  type ToolDeclaration,
+  type Upstream,
+} from "./upstream.ts";
 
 type Policy = { minor?: "auto" | "pr"; major?: "auto" | "pr" };
 type Backup = "required" | "not-available";
@@ -80,6 +97,7 @@ const MAX_INTERRUPTED_SCOUTS = 2;
 const DEPLOY_CONCURRENCY = 3;
 const INCIDENT_FILE = "incident.md";
 const PROPOSAL_FILE = "db-proposal.json";
+const SECURITY_PROPOSAL_FILE = "security-proposal.json";
 const PR_TITLE_FILE = "pr-title.txt";
 const PR_BODY_FILE = "pr-body.md";
 // Une montee de base est plus lente qu'un deploiement et depend de sa taille.
@@ -102,6 +120,35 @@ const warn = (key: string, detail: string) => warnings.push({ key, detail });
 const security: Array<{ key: string; detail: string }> = [];
 const observedDatabases = new Map<string, { version: string; nextVersion: string | null; engine: string | null }>();
 const alert = (key: string, detail: string) => security.push({ key, detail });
+
+/**
+ * Ce que l'amont dit de la version en service de chaque application.
+ *
+ * `missing` porte la raison quand il n'y a pas de verdict : des avis illisibles
+ * et une version illisible ne disent pas la meme chose, et aucun des deux ne dit
+ * "indemne". Un silence sans cause se confondrait avec une absence de faille.
+ */
+type AppAdvisories = {
+  version: string;
+  repo: string;
+  verdict: AdvisoryVerdict | null;
+  missing: string | null;
+  paused: boolean;
+};
+const observedAdvisories = new Map<string, AppAdvisories>();
+
+/**
+ * Applications dont la version en service tombe sous un avis qu'une montee
+ * referme, et sur lesquelles cette montee peut avoir lieu. Elles seules passent
+ * dans ce qui demande une intervention : voir checkAdvisories.
+ *
+ * Une app en pause n'en fait jamais partie. Rien n'y est deploye et
+ * --propose-security l'ecarte, donc le rapport designerait une pull request qui
+ * ne sera jamais ouverte, et le marqueur d'etat resterait leve sur une faille
+ * que personne ne peut refermer depuis le watcher. Elle reste constatee au
+ * tableau, comme la montee de base d'une app en pause.
+ */
+const fixableAdvisories = () => [...observedAdvisories].filter(([, a]) => a.verdict?.fix && !a.paused);
 
 /**
  * Deux transports possibles vers Scalingo.
@@ -138,6 +185,7 @@ const OPT = {
   prune: argv.includes("--prune"),
   force: argv.includes("--force"),
   proposeDb: argv.includes("--propose-db"),
+  proposeSecurity: argv.includes("--propose-security"),
   validateOnly: argv.includes("--validate"),
   // Lu en tete de main(), comme les chemins : le module est aussi importe par
   // d'autres commandes, dont les options ne le concernent pas.
@@ -1043,6 +1091,33 @@ const appUrl = (e: AppEntry) => `https://dashboard.scalingo.com/apps/${e.region}
 const databaseLink = (v: string, engine: string | null | undefined) =>
   `[${v}](https://doc.scalingo.com/changelog#changelog-databases-${engine ?? "postgresql"}-${v.replace(/\./g, "-")})`;
 
+/** Version liee a son annonce, quand on sait ou l'amont les publie. */
+const releaseLink = (upstream: Upstream | null, v: string) =>
+  upstream ? `[${v}](https://github.com/${upstream.repo}/releases/tag/${v})` : v;
+
+const SEVERITY_RANK = ["low", "medium", "high", "critical"];
+const SEVERITY_LABEL: Record<string, string> = {
+  low: "faible",
+  medium: "moyenne",
+  high: "élevée",
+  critical: "critique",
+};
+const severityLabel = (s: string | null) => (s ? (SEVERITY_LABEL[s] ?? s) : null);
+
+/** La plus grave des gravites annoncees, celle qui qualifie la ligne. */
+const worstSeverity = (hits: readonly AdvisoryHit[]): string | null =>
+  hits.reduce<string | null>(
+    (worst, h) =>
+      h.severity && (!worst || SEVERITY_RANK.indexOf(h.severity) > SEVERITY_RANK.indexOf(worst))
+        ? h.severity
+        : worst,
+    null,
+  );
+
+// Au-dela, la cellule devient illisible et n'apporte plus rien : le detail de
+// chaque avis est de toute facon dans la section d'intervention.
+const ADVISORIES_SHOWN = 3;
+
 const stateOf = (e: AppEntry, known: LockEntry | undefined) => {
   const reached = known?.tool.version === e.tool.version && known?.source.sha === e.source.sha;
   if (e.paused) return reached ? "en pause, conforme" : "en pause, en écart";
@@ -1064,7 +1139,7 @@ export async function describeTools(targets: AppEntry[], lock: Lock): Promise<st
       const known = lock.apps[key];
       const version = known?.tool.version ?? entry.tool.version;
       const upstream = upstreamOf(entry.tool);
-      const release = (v: string) => (upstream ? `[${v}](https://github.com/${upstream.repo}/releases/tag/${v})` : v);
+      const release = (v: string) => releaseLink(upstream, v);
       const available = upstream ? await latestInLine(upstream, version) : null;
       const head = await branchHead(entry.source.repo, entry.source.branch);
       const sha = known?.source.sha ?? entry.source.sha;
@@ -1098,8 +1173,13 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
     .filter(([, v]) => v?.quarantine);
 
   const broken = problems.length;
+  const fixable = fixableAdvisories();
   const nothingToReport =
-    broken === 0 && quarantined.length === 0 && warnings.length === 0 && security.length === 0;
+    broken === 0 &&
+    quarantined.length === 0 &&
+    warnings.length === 0 &&
+    security.length === 0 &&
+    fixable.length === 0;
 
   const lines: string[] = await describeTools(targets, lock);
   lines.push(
@@ -1108,6 +1188,76 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
     "une tentative a échoué sur cette cible et elle ne sera pas retentée tant que le",
     "manifeste ne change pas. `en pause`, lue à chaque passage mais jamais modifiée :",
     "l'écart éventuel avec le manifeste est constaté, sans action.",
+    "",
+  );
+
+  lines.push("## Avis de sécurité amont", "");
+  lines.push("| App | Version | Avis | Correctif | État |");
+  lines.push("| --- | --- | --- | --- | --- |");
+  for (const entry of targets) {
+    const key = keyOf(entry);
+    const upstream = upstreamOf(entry.tool);
+    const seen = observedAdvisories.get(key);
+    const version = seen?.version ?? lock.apps[key]?.tool.version ?? entry.tool.version;
+    const verdict = seen?.verdict ?? null;
+    const blind = verdict && verdict.unreadable.length > 0 ? `, ${verdict.unreadable.length} plage(s) illisible(s)` : "";
+
+    let advice = "";
+    if (!upstream) advice = "amont inconnu";
+    else if (!seen) advice = "non relevés";
+    else if (!verdict) advice = seen.missing!;
+    else if (verdict.hits.length === 0) advice = `aucun${blind}`;
+    else {
+      const shown = verdict.hits
+        .slice(0, ADVISORIES_SHOWN)
+        .map((h) => `[${h.ghsa}](${h.url})`)
+        .join(", ");
+      const rest = verdict.hits.length - ADVISORIES_SHOWN;
+      const gravity = severityLabel(worstSeverity(verdict.hits));
+      advice = `${gravity ? `${gravity}, ` : ""}${shown}${rest > 0 ? ` et ${rest} autre(s)` : ""}${blind}`;
+    }
+
+    let fix = "";
+    if (verdict && verdict.hits.length > 0) {
+      fix = verdict.fix ? releaseLink(upstream, verdict.fix) : "aucun atteignable dans sa ligne";
+      // Le correctif existe mais rien ne le posera : le dire ici, sinon la
+      // colonne promet une montee que --propose-security n'ouvrira pas.
+      if (verdict.fix && seen?.paused) fix += " (en pause, non proposé)";
+    }
+
+    let state = "";
+    if (!upstream) state = "";
+    else if (!seen) state = "non relevé";
+    else if (!verdict) state = "sans verdict";
+    else if (verdict.hits.length > 0) state = `${seen.paused ? "en pause, " : ""}affectée`;
+    else if (verdict.unreadable.length > 0) state = "plage illisible";
+    else state = "indemne";
+
+    lines.push(
+      `| [${entry.app}](${appUrl(entry)}) ` +
+        `| ${releaseLink(upstream, version)} | ${advice} | ${fix} | ${state} |`,
+    );
+  }
+  lines.push("");
+  lines.push(
+    "Le relevé interroge les avis de sécurité du dépôt amont de l'outil, et",
+    "confronte à leurs plages de versions ce que le lock dit tourner, non ce que",
+    "le manifeste demande. Renovate ne peut pas tenir ce rôle : un outil installé",
+    "par un buildpack depuis une variable d'environnement n'est une dépendance",
+    "d'aucun écosystème de paquets.",
+    "",
+    "**État** : `indemne`, aucun avis ne porte sur la version en service.",
+    "`affectée`, au moins un avis la couvre, et la colonne `Correctif` donne la",
+    "version qui en sort, ou dit qu'aucune n'est atteignable dans sa ligne",
+    "d'édition. `plage illisible`, un avis existe dont la plage de versions n'a",
+    "pas la forme attendue : il n'est ni retenu ni écarté. `sans verdict`, les",
+    "avis n'ont pas pu être lus, ou la version en service n'est pas comparable.",
+    "",
+    "Seule une faille dont le correctif est atteignable demande une intervention.",
+    "Une faille sans correctif atteignable reste à ce tableau : la réclamer à",
+    "chaque passage en ferait l'alerte permanente qu'on apprend à ignorer. Une",
+    "application `en pause` y reste aussi, son correctif fût-il atteignable :",
+    "rien n'y est déployé, donc aucune pull request ne la concernera.",
     "",
   );
 
@@ -1187,6 +1337,27 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
       "",
     );
   }
+  if (fixable.length > 0) {
+    lines.push(`### Avis de sécurité amont`, "");
+    for (const [key, a] of fixable) {
+      lines.push(`- **${key}** : ${a.version} vers ${a.verdict!.fix}`);
+      for (const h of a.verdict!.hits) {
+        const gravity = severityLabel(h.severity);
+        lines.push(
+          `  - [${h.ghsa}](${h.url})${h.cve ? ` (${h.cve})` : ""}${gravity ? `, ${gravity}` : ""}` +
+            `${h.summary ? ` : ${h.summary.split("\n")[0].slice(0, 160)}` : ""}`,
+        );
+      }
+    }
+    lines.push(
+      "",
+      "Ces avis viennent du dépôt amont de l'outil, seule source qui les porte",
+      "pour un outil hors écosystème de paquets. La version indiquée est la plus",
+      "basse de la ligne en service qu'aucun de ces avis ne couvre. La pull request",
+      "qui fait avancer le manifeste est ouverte par `propose-security`.",
+      "",
+    );
+  }
   if (broken > 0) {
     lines.push(`${broken} application(s) n'ont pas abouti :`, "");
     for (const { key, detail } of problems) lines.push(`- **${key}** : ${detail}`);
@@ -1238,44 +1409,6 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
  */
 const KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
 const NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0";
-
-type Version = number[];
-
-function parseSemver(raw: string): Version | null {
-  const m = /^v?(\d+(?:\.\d+)*)/.exec(raw.trim());
-  return m ? m[1].split(".").map(Number) : null;
-}
-
-/**
- * Version a comparer aux plages des failles, ou null si elle n'en designe pas
- * une seule. Un alias glissant comme v0.63.x se lirait 0.63, donc 0.63.0, et
- * tomberait dans toute plage ouverte en x.63.0 quelle que soit la version servie.
- */
-export function pinnedVersion(raw: string): Version | null {
-  if (/(^|\.)[x*](\.|$)/i.test(raw.trim())) return null;
-  return parseSemver(raw);
-}
-
-function cmpVersion(a: Version, b: Version): number {
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const d = (a[i] ?? 0) - (b[i] ?? 0);
-    if (d !== 0) return d;
-  }
-  return 0;
-}
-
-type Range = { startIncl?: string; endExcl?: string; endIncl?: string };
-
-function versionInRange(v: Version, r: Range): boolean {
-  const start = r.startIncl ? parseSemver(r.startIncl) : null;
-  const endE = r.endExcl ? parseSemver(r.endExcl) : null;
-  const endI = r.endIncl ? parseSemver(r.endIncl) : null;
-  if (!start && !endE && !endI) return false;
-  if (start && cmpVersion(v, start) < 0) return false;
-  if (endE && cmpVersion(v, endE) >= 0) return false;
-  if (endI && cmpVersion(v, endI) > 0) return false;
-  return true;
-}
 
 async function fetchJson<T>(url: string): Promise<T | null> {
   try {
@@ -1401,7 +1534,7 @@ async function proposeDatabaseUpgrades(targets: AppEntry[], token: string): Prom
         continue;
       }
 
-      const path = ["apps", appIndex(document, entry.app), "database", "version"];
+      const path = ["apps", appIndex(document, entry), "database", "version"];
       if (path[1] === -1 || document.getIn(path) !== expected) {
         log(`  ${key} : version ${expected} introuvable dans le manifeste, rien n'est modifie`);
         continue;
@@ -1503,15 +1636,201 @@ export function describeProposal(proposals: Array<{ app: string; from: string; t
   return { title, body: body.join("\n") };
 }
 
+type AdvisoryProposal = { app: string; tool: string; from: string; to: string; advisories: string[] };
+
+/**
+ * Fait avancer dans le manifeste les versions d'outil que les avis de leur
+ * amont couvrent, pour qu'une pull request porte la decision.
+ *
+ * Renovate ne peut pas s'en charger, pour la raison exacte qui lui interdit de
+ * suivre les versions de bases : un outil installe par un buildpack depuis une
+ * variable d'environnement n'est une dependance d'aucun ecosysteme de paquets.
+ * Une alerte Dependabot exige un avis revu, rattache a l'un des ecosystemes
+ * supportes, et une dependance visible dans le graphe de dependances ;
+ * `osvVulnerabilityAlerts` ne couvre qu'une dizaine de datasources de paquets.
+ * Le watcher ouvre donc lui-meme cette pull request, second et dernier endroit
+ * du projet ou il en cree une.
+ *
+ * Elle juge la version du manifeste et non celle du lock : le manifeste est
+ * l'intention, et c'est la seule chose que cette commande edite. Proposer depuis
+ * ce qui tourne ferait reculer le manifeste des qu'il est en avance. Le constat
+ * du rapport, lui, juge bien ce qui tourne.
+ *
+ * Aucun acces a Scalingo : les avis et le manifeste suffisent. Les applications
+ * en pause sont ecartees, comme pour les bases, rien n'y etant jamais deploye.
+ */
+async function proposeSecurityUpgrades(targets: AppEntry[]): Promise<void> {
+  const source = readFileSync(paths.manifest, "utf8");
+  const document = parseDocument(source);
+  const proposals: AdvisoryProposal[] = [];
+  const verdicts = new Map<string, AdvisoryVerdict | null>();
+  let withUpstream = 0;
+  let failures = 0;
+
+  for (const entry of targets.filter((e) => !e.paused)) {
+    const key = keyOf(entry);
+    const upstream = upstreamOf(entry.tool);
+    if (!upstream) {
+      log(`  ${key} : amont inconnu, aucun avis a confronter`);
+      continue;
+    }
+    withUpstream++;
+    const version = entry.tool.version;
+    const couple = `${upstream.repo}#${upstream.line}#${version}`;
+    if (!verdicts.has(couple)) {
+      const list = await advisoriesFor(upstream.repo, ghJson);
+      verdicts.set(couple, list ? judgeAdvisories(list, version, upstream.line) : null);
+    }
+    const verdict = verdicts.get(couple)!;
+
+    if (!verdict) {
+      failures++;
+      log(`  ${key} : avis de ${upstream.repo} illisibles, ou ${version} incomparable`);
+      continue;
+    }
+    if (verdict.hits.length === 0) {
+      log(`  ${key} : ${version}, aucun avis de ${upstream.repo} ne la couvre`);
+      continue;
+    }
+    const names = verdict.hits.map((h) => h.cve ?? h.ghsa).join(", ");
+    if (!verdict.fix) {
+      log(`  ${key} : ${version} affectee par ${names}, aucun correctif atteignable dans sa ligne`);
+      continue;
+    }
+
+    const path = ["apps", appIndex(document, entry), "tool", "version"];
+    if (path[1] === -1 || document.getIn(path) !== version) {
+      log(`  ${key} : version ${version} introuvable dans le manifeste, rien n'est modifie`);
+      continue;
+    }
+    document.setIn(path, verdict.fix);
+    proposals.push({
+      app: entry.app,
+      tool: toolName(entry.tool.env),
+      from: version,
+      to: verdict.fix,
+      advisories: verdict.hits.map((h) => h.cve ?? h.ghsa),
+    });
+    log(`  ${key} : ${version} -> ${verdict.fix} (${names})`);
+  }
+
+  // Comme pour les bases : sans ce garde, une API injoignable se lirait comme un
+  // parc indemne, et le passage sortirait en succes.
+  if (withUpstream > 0 && failures === withUpstream) {
+    throw new Error(`aucun des ${failures} amont(s) concerne(s) n'a pu etre releve`);
+  }
+
+  if (proposals.length === 0) {
+    log(`\nAucune montee de securite a proposer.`);
+    if (OPT.dryRun) return;
+    // Un repertoire de sortie encore a creer ne contient rien de perime.
+    for (const name of paths.outDir ? [SECURITY_PROPOSAL_FILE, PR_TITLE_FILE, PR_BODY_FILE] : []) {
+      const stale = join(paths.outDir, name);
+      if (existsSync(stale)) unlinkSync(stale);
+    }
+    return;
+  }
+  if (OPT.dryRun) {
+    log(`\n${proposals.length} montee(s) de securite a proposer (plan : manifeste et sorties laisses en l'etat).`);
+    return;
+  }
+
+  let options = writeOptions(source);
+  if (!options) {
+    log(`\nMise en forme de ${shown(paths.manifest)} non reproductible : il est reecrit dans la forme par defaut.`);
+    options = { lineWidth: 0 };
+  }
+  writeFileSync(paths.manifest, document.toString(options));
+  log(`\n${proposals.length} montee(s) de securite proposee(s) dans le manifeste.`);
+
+  writeFileSync(outFile(paths, SECURITY_PROPOSAL_FILE), JSON.stringify({ apps: proposals }, null, 2) + "\n");
+  const pr = describeAdvisoryProposal(proposals);
+  writeFileSync(outFile(paths, PR_TITLE_FILE), pr.title + "\n");
+  writeFileSync(outFile(paths, PR_BODY_FILE), pr.body + "\n");
+}
+
+/**
+ * Titre et corps de la pull request de montee de securite.
+ *
+ * Meme contrainte que pour les bases : la branche etant reutilisee d'un passage
+ * a l'autre, une pull request deja relue peut se retrouver a porter autre chose,
+ * et son libelle doit decrire ce qu'elle contient maintenant.
+ */
+export function describeAdvisoryProposal(proposals: AdvisoryProposal[]): { title: string; body: string } {
+  const tools = new Set(proposals.map((p) => p.tool));
+  const what = tools.size === 1 ? [...tools][0] : `${tools.size} outils`;
+  const reached = new Set(proposals.map((p) => p.to));
+  const names = proposals.map((p) => p.app).join(", ");
+  let title =
+    proposals.length === 1
+      ? `Monter ${what} de ${proposals[0].app} en ${proposals[0].to}, avis de securite`
+      : reached.size === 1
+        ? `Monter ${what} en ${[...reached][0]} sur ${proposals.length} apps, avis de securite : ${names}`
+        : `Monter ${what} sur ${proposals.length} apps, avis de securite : ${names}`;
+  if (title.length > 100) title = `Monter ${what} sur ${proposals.length} app(s), avis de securite`;
+
+  const all = [...new Set(proposals.flatMap((p) => p.advisories))];
+  const body = [
+    "Les versions en service de ces applications sont couvertes par un avis de",
+    "securite publie par le depot amont de leur outil. La version visee est la",
+    "plus basse de leur ligne qu'aucun de ces avis ne couvre.",
+    "",
+    "**Pourquoi ce releve ne vit pas dans Renovate.** Un outil installe par un",
+    "buildpack depuis une variable d'environnement n'est une dependance d'aucun",
+    "ecosysteme de paquets. Une alerte Dependabot exige un avis revu, rattache a",
+    "l'un des ecosystemes supportes, et une dependance visible dans le graphe de",
+    "dependances : `manifest.yaml` n'est pas un manifeste reconnu.",
+    "`osvVulnerabilityAlerts` ne couvre qu'une dizaine de datasources de paquets.",
+    "C'est le meme cas que les versions de bases Scalingo, qui ne sont publiees",
+    "nulle part et dont le watcher ouvre lui-meme la pull request de montee.",
+    "",
+    "Ni le CVE ni le score CVSS ne servent de cle : la majorite des avis du depot",
+    "Metabase n'en portent aucun. Seules les plages `vulnerable_version_range` et",
+    "`patched_versions` de l'avis sont lues.",
+    "",
+    "**Fusionner autorise la montee, sans la declencher.** La reconciliation la",
+    "deploiera a son passage suivant, precedee d'une sauvegarde dont l'echec",
+    "annule l'operation.",
+    "",
+    `### ${proposals.length} application(s) concernee(s)`,
+    "",
+    ...proposals.map((p) => `- \`${p.app}\` : ${p.tool} ${p.from} vers ${p.to} (${p.advisories.join(", ")})`),
+    "",
+    `### ${all.length} avis`,
+    "",
+    ...all.map((a) => `- ${a}`),
+    "",
+    "Pour n'en faire qu'une partie, retirer les lignes correspondantes avant de",
+    "fusionner : les autres reviendront au passage suivant.",
+    "",
+    "Une faille sans correctif atteignable dans la ligne en service n'apparait pas",
+    "ici : elle figure au tableau de bord, sans pull request. Monter de ligne est",
+    "une montee fonctionnelle, qui ne se decide pas sous la pression d'un avis.",
+  ];
+  return { title, body: body.join("\n") };
+}
+
 /** Vrai si passer de l'une a l'autre franchit une majeure du moteur. */
 const crossesMajor = (current: string, target: string) =>
   current.split(".")[0] !== target.split(".")[0];
 
-/** Rang d'une app dans le document du manifeste, ou -1. */
-function appIndex(document: Document, app: string): number {
+/**
+ * Rang d'une app dans le document du manifeste, ou -1.
+ *
+ * Designee par region et par nom, comme partout ailleurs dans le moteur : le nom
+ * seul ne suffit pas, et rien ne garantit son unicite. `init` ecrit une entree
+ * par region et par app sans dedoublonner les noms, le schema ne contraint pas
+ * l'unicite et --validate ne la verifie pas. Sur le nom seul, deux instances
+ * homonymes dans deux regions rendaient le meme rang : la seconde se faisait
+ * ecarter sur un message faux, "version introuvable dans le manifeste", et le
+ * passage sortait en succes sans avoir propose sa montee.
+ */
+function appIndex(document: Document, ref: AppRef): number {
   const apps = document.get("apps");
   if (!isSeq(apps)) return -1;
-  return apps.items.findIndex((item) => isMap(item) && item.get("app") === app);
+  return apps.items.findIndex(
+    (item) => isMap(item) && item.get("app") === ref.app && item.get("region") === ref.region,
+  );
 }
 
 /**
@@ -1786,6 +2105,76 @@ async function checkExploited(targets: AppEntry[], lock: Lock): Promise<void> {
 
 const envToProduct = (envName: string) => envName.replace(/_VERSION$/, "").toLowerCase();
 
+// Nombre d'avis lus par depot amont, et depots dont la liste n'a pas pu l'etre.
+// Une surveillance muette doit dire qu'elle a regarde : sans ce decompte, un
+// amont sans avis sur les versions en service et un releve en panne rendent
+// exactement le meme rapport.
+const advisoriesRead = new Map<string, number>();
+const advisoriesUnread = new Set<string>();
+
+/**
+ * Confronte les versions en service aux avis de securite de leur depot amont.
+ *
+ * Renovate ne peut pas tenir ce role, pour la raison exacte qui lui interdit de
+ * suivre les versions de bases Scalingo : un outil qu'un buildpack installe
+ * depuis une variable d'environnement n'est une dependance d'aucun ecosysteme de
+ * paquets. Son `vulnerabilityAlerts` ne s'applique qu'a ce que la plateforme
+ * sait rattacher a une dependance, et `osvVulnerabilityAlerts` qu'a une dizaine
+ * de datasources de paquets. Le watcher releve donc lui-meme, comme il propose
+ * lui-meme les montees de bases.
+ *
+ * Un appel par couple depot amont et version en service : sept instances du
+ * meme outil a la meme version donneraient sept fois la meme requete. Le verdict
+ * se rend en revanche par application, le parc n'etant pas homogene : six
+ * instances en v0.64.4.2 et une en v0.63.16 sont deux situations distinctes.
+ *
+ * Seule une faille dont le correctif est atteignable est signalee. Une faille
+ * sans correctif atteignable reste au tableau, sans passer dans ce qui demande
+ * une intervention : la signaler a chaque passage en ferait l'alerte permanente
+ * qu'on apprend a ignorer, comme la montee de base volontairement retenue. Et
+ * rien ne serait propose : il n'existe pas toujours de version corrigee le jour
+ * ou on apprend la faille.
+ */
+async function checkAdvisories(targets: AppEntry[], lock: Lock): Promise<void> {
+  const judged = new Map<string, { verdict: AdvisoryVerdict | null; missing: string | null }>();
+  for (const entry of targets) {
+    const key = keyOf(entry);
+    const upstream = upstreamOf(entry.tool);
+    if (!upstream) continue;
+    const version = lock.apps[key]?.tool.version ?? entry.tool.version;
+    if (!version) continue;
+
+    const couple = `${upstream.repo}#${upstream.line}#${version}`;
+    let seen = judged.get(couple);
+    if (!seen) {
+      const list = await advisoriesFor(upstream.repo, ghJson);
+      if (!list) advisoriesUnread.add(upstream.repo);
+      else advisoriesRead.set(upstream.repo, list.length);
+      const verdict = list ? judgeAdvisories(list, version, upstream.line) : null;
+      seen = { verdict, missing: verdict ? null : list ? "version illisible" : "avis illisibles" };
+      judged.set(couple, seen);
+    }
+    // Le verdict se partage par couple, l'enregistrement est par application :
+    // la pause est une decision prise app par app.
+    observedAdvisories.set(key, { version, repo: upstream.repo, ...seen, paused: Boolean(entry.paused) });
+  }
+}
+
+/** Ce que le journal et le rapport disent d'un verdict, en une ligne. */
+const advisoryLine = (a: AppAdvisories): string => {
+  if (!a.verdict) return `${a.version} : ${a.missing}, aucun verdict`;
+  const { hits, fix, unreadable } = a.verdict;
+  const names = hits.map((h) => h.cve ?? h.ghsa).join(", ");
+  const blind = unreadable.length > 0 ? `, ${unreadable.length} plage(s) illisible(s)` : "";
+  if (hits.length === 0) return `${a.version} : aucun avis${blind}`;
+  const reach = fix
+    ? a.paused
+      ? `corrigee en ${fix}, non proposee car en pause`
+      : `corrigee en ${fix}`
+    : `aucun correctif atteignable dans sa ligne`;
+  return `${a.version} est affectee par ${hits.length} avis (${names}), ${reach}${blind}`;
+};
+
 // ---------------------------------------------------------------- main
 
 // Le schema appartient au moteur : il voyage avec lui, pas avec le parc.
@@ -2027,8 +2416,17 @@ async function main() {
     return;
   }
 
+  // Les deux propositions ecrivent pr-title.txt et pr-body.md au meme endroit,
+  // et leurs workflows poussent sur deux branches distinctes. Les mener ensemble
+  // ferait porter a l'une le libelle de l'autre.
+  if (OPT.proposeDb && OPT.proposeSecurity) {
+    log("--propose-db et --propose-security ecrivent les memes sorties : un passage par proposition.");
+    process.exit(1);
+  }
+
   // --validate, --prune et --dry-run n'ecrivent que des fichiers locaux.
-  const offline = OPT.dryRun || OPT.prune || OPT.validateOnly;
+  // --propose-security ne lit que le manifeste et les avis de l'amont.
+  const offline = OPT.dryRun || OPT.prune || OPT.validateOnly || OPT.proposeSecurity;
   // Le proxy porte l'authentification a lui seul : reclamer en plus un jeton de
   // compte reviendrait a exiger ce qu'on vient justement de retirer du depot.
   if (!apiToken && !fgp && !offline) {
@@ -2055,6 +2453,19 @@ async function main() {
     }
     log("PROPOSITION DE MONTEES DE BASE\n");
     await proposeDatabaseUpgrades(targets, apiToken ? await bearerToken() : "");
+    return;
+  }
+
+  // Comme la proposition de montee de base : avant le lock, sans rien deployer,
+  // et seul le manifeste en sort modifie. Sans acces a Scalingo, les avis de
+  // l'amont et le manifeste suffisant a rendre le verdict.
+  if (OPT.proposeSecurity) {
+    if (targets.length === 0) {
+      log("aucune app ne correspond au filtre.");
+      return;
+    }
+    log("PROPOSITION DE MONTEES DE SECURITE\n");
+    await proposeSecurityUpgrades(targets);
     return;
   }
 
@@ -2264,6 +2675,7 @@ async function main() {
   await applyDatabases(targets, token);
 
   await checkExploited(targets, lock);
+  await checkAdvisories(targets, lock);
   await checkDatabases(targets, token);
 
   // Une surveillance silencieuse doit dire qu'elle a regarde, sinon son silence
@@ -2282,6 +2694,23 @@ async function main() {
     log(`\n${security.length} faille(s) activement exploitee(s) :`);
     for (const { key, detail } of security) log(`  ${key} : ${detail}`);
     log(`Monter la version prime sur le delai de decantation habituel.`);
+  }
+
+  // Comme pour les stacks : un amont sans avis sur les versions en service et un
+  // releve en panne rendraient sinon le meme silence.
+  const noticed = [...observedAdvisories].filter(
+    ([, a]) => !a.verdict || a.verdict.hits.length > 0 || a.verdict.unreadable.length > 0,
+  );
+  if (noticed.length > 0) {
+    log(`\n${noticed.length} application(s) au regard des avis de leur amont :`);
+    for (const [key, a] of noticed) log(`  ${key} : ${advisoryLine(a)}`);
+    if (fixableAdvisories().length > 0) log(`\`--propose-security\` ouvre la pull request qui porte la montee.`);
+  }
+  if (advisoriesUnread.size > 0) {
+    log(`\nAvis illisibles sur ${[...advisoriesUnread].join(", ")} : aucun verdict de securite sur cet amont.`);
+  } else if (noticed.length === 0 && advisoriesRead.size > 0) {
+    const total = [...advisoriesRead.values()].reduce((n, c) => n + c, 0);
+    log(`\nAucun avis amont ne porte sur les versions en service. ${total} avis confrontes sur ${advisoriesRead.size} depot(s).`);
   }
 
   if (warnings.length > 0) {

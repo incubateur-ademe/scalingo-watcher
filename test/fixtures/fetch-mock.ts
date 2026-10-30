@@ -14,12 +14,15 @@
  * leur variable d'outil et leur dernier deploiement.
  * DENIED=1 fait refuser par le proxy tout appel qui passe par lui, faute de scope,
  * hormis la liste des apps.
+ * ADVISORIES, liste d'avis de depot, repond a l'API des avis de securite ; sans
+ * elle, l'amont n'en publie aucun.
  */
 
 import { appendFileSync } from "node:fs";
 
 const versions = JSON.parse(process.env.VERSIONS!) as Record<string, string>;
 const real = JSON.parse(process.env.REAL ?? "{}") as Record<string, { version: string; sha: string }>;
+const advisories = JSON.parse(process.env.ADVISORIES ?? "[]") as unknown[];
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -31,6 +34,10 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   let r: RegExpExecArray | null;
 
   if (m === "POST" && u === "https://auth.scalingo.com/v1/tokens/exchange") return json({ token: "porteur" });
+  // Tout vient de la premiere page, les suivantes sont vides.
+  if (m === "GET" && /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/security-advisories\?/.test(u)) {
+    return json(u.includes("page=1") ? advisories : []);
+  }
   if (m === "POST" && u.endsWith("/api/generate")) {
     if (process.env.GENERATED) appendFileSync(process.env.GENERATED, `${String(init.body)}\n`);
     return json({ blob: "blob-factice" });

@@ -3,7 +3,15 @@ import { parse } from "yaml";
 import { resolveAliases } from "./apply.ts";
 import { deniedByProxy, REGENERATE_HINT } from "./fgp-scopes.ts";
 import { accessModes, flagValue, flagValues, readFgpFile, resolvePaths, shown, type Fgp } from "./options.ts";
-import { compareLines, lineLabel, upstreamOf, type ToolDeclaration, type Upstream } from "./upstream.ts";
+import {
+  advisoriesFor,
+  compareLines,
+  judgeAdvisories,
+  lineLabel,
+  upstreamOf,
+  type ToolDeclaration,
+  type Upstream,
+} from "./upstream.ts";
 
 /**
  * Audit du parc Scalingo : état des buildpacks et des versions applicatives.
@@ -109,6 +117,8 @@ const DORMANT_DAYS = 180;
  * etait collecte puis jamais affiche, ce qui est arrive et ne se voyait pas.
  */
 const FINDINGS = [
+  ["upstream-advisory", "Version couverte par un avis de securite de son depot amont"],
+  ["advisory-unreadable", "Avis de securite amont dont la plage de versions n'a pas pu etre lue"],
   ["missing-version-env", "Variable de version absente (la version est resolue au build)"],
   ["floating-version-env", "Variable de version flottante (* ou latest)"],
   ["unpinned-buildpack", "Buildpack non pinne (suit la branche par defaut)"],
@@ -155,6 +165,8 @@ type ProductReport = {
   latestOverall: string | null;
   behind: boolean;
   floating: boolean;
+  /** null quand l'amont est inconnu, ses avis illisibles ou la version pas comparable. */
+  advisory: { hits: string[]; fix: string | null; unreadable: number } | null;
 };
 
 // ---------------------------------------------------------------- args
@@ -593,6 +605,7 @@ async function analyse(report: AppReport, officialBuildpacks: Set<string>, findi
       latestOverall: null,
       behind: false,
       floating: declared !== null && FLOATING.has(declared.trim()),
+      advisory: null,
     };
 
     if (declared === null) {
@@ -644,6 +657,41 @@ async function analyse(report: AppReport, officialBuildpacks: Set<string>, findi
       } catch (e) {
         push("collect-error", `releases ${upstream.repo}: ${(e as Error).message}`);
       }
+
+      // Les avis de l'amont sont la seule source qui dise quelque chose d'un
+      // outil hors ecosysteme de paquets : ni Dependabot ni les alertes OSV de
+      // Renovate ne le voient. Le verdict porte sur la version declaree, celle
+      // qui tourne. Une version flottante n'est pas comparable, et un avis dont
+      // la plage est illisible n'est ni retenu ni ecarte : il se dit.
+      try {
+        const published = await advisoriesFor(upstream.repo, githubJson);
+        const current = declared && !FLOATING.has(declared.trim()) ? declared : null;
+        const verdict = published && current ? judgeAdvisories(published, current, upstream.line) : null;
+        if (verdict) {
+          entry.advisory = {
+            hits: verdict.hits.map((h) => h.cve ?? h.ghsa),
+            fix: verdict.fix,
+            unreadable: verdict.unreadable.length,
+          };
+          if (verdict.hits.length > 0) {
+            push(
+              "upstream-advisory",
+              `${product} ${current} est couverte par ${verdict.hits.length} avis de ${upstream.repo} ` +
+                `(${entry.advisory.hits.join(", ")}) : ` +
+                (verdict.fix ? `corrigee en ${verdict.fix}` : `aucun correctif atteignable dans sa ligne`),
+            );
+          }
+          if (verdict.unreadable.length > 0) {
+            push(
+              "advisory-unreadable",
+              `${product} : ${verdict.unreadable.length} plage(s) de ${upstream.repo} illisible(s), ` +
+                `dont ${verdict.unreadable[0].ghsa} "${verdict.unreadable[0].range}" : ni retenue, ni ecartee`,
+            );
+          }
+        }
+      } catch (e) {
+        push("collect-error", `avis ${upstream.repo}: ${(e as Error).message}`);
+      }
     }
 
     report.products.push(entry);
@@ -688,6 +736,19 @@ function render(reports: AppReport[], findings: Finding[]) {
       else if (p.behind) target = `  =>  ${p.latestSameMajor}`;
       else target = "  (a jour)";
       log(`  ${p.envName.padEnd(28)} ${cur}${target}`);
+      // Sur sa propre ligne : la version et son retard d'un cote, ce que
+      // l'amont dit de sa securite de l'autre. Les mettre bout a bout rendait la
+      // ligne trop longue pour qu'on y lise l'un ou l'autre.
+      const advisory = p.advisory;
+      if (advisory && advisory.hits.length > 0) {
+        log(
+          `  ${"".padEnd(28)} ${advisory.hits.length} avis amont (${advisory.hits.join(", ")})` +
+            (advisory.fix ? `  =>  ${advisory.fix}` : "  (aucun correctif atteignable dans sa ligne)"),
+        );
+      }
+      if (advisory && advisory.unreadable > 0) {
+        log(`  ${"".padEnd(28)} ${advisory.unreadable} plage(s) d'avis illisible(s) : ni retenue(s), ni ecartee(s)`);
+      }
     }
   }
 
