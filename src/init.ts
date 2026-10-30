@@ -56,7 +56,7 @@ export type InitEntry = AppRef & {
 
 type Described = InitEntry & { notes: string[] };
 type Outcome = { found: Described } | { skipped: string } | { failed: string } | { outside: true } | null;
-type RepoLink = { owner: string; repo: string; branch: string; scm_type: string };
+type RepoLink = { owner: string; repo: string; branch: string | null; scm_type: string };
 
 const CONCURRENCY = 5;
 const log = (...a: unknown[]) => console.log(...a);
@@ -190,6 +190,9 @@ async function describeApp(ref: AppRef): Promise<Outcome> {
   const link = await repoLink(ref);
   if (!link) return { skipped: "aucun depot lie a l'app (scm_repo_link) : source a declarer a la main" };
   if (link.scm_type !== "github") return { skipped: `depot lie sur ${link.scm_type} : le moteur ne deploie que depuis GitHub` };
+  if (!link.branch) {
+    return { skipped: `depot lie sans branche (${link.owner}/${link.repo}, deploiement manuel) : branche a declarer a la main` };
+  }
 
   return {
     found: {

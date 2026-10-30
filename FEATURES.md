@@ -85,8 +85,8 @@ manifeste existant n'est écrasé qu'avec `--force`. La commande d'amorçage du
 lock est affichée, pas lancée.
 
 **[fait]** `init` écarte, en le disant, une application dont la version est
-flottante, qui n'a pas de dépôt lié ou dont le dernier déploiement ne désigne
-pas un commit. Seule la variable de l'outil est lue dans l'environnement de
+flottante, qui n'a pas de dépôt lié, dont le dépôt est lié sans branche, ou
+dont le dernier déploiement ne désigne pas un commit. Seule la variable de l'outil est lue dans l'environnement de
 l'application, qui contient ses secrets en clair.
 
 **[fait]** L'ordre du tableau `apps` est l'ordre de déploiement, de la moins

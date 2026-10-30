@@ -1488,7 +1488,7 @@ try {
 
   console.log("\nPremier manifeste par init, contre un fetch simule");
 
-  // Le parc simule de fetch-init.ts : quatre apps decrites entierement, trois a
+  // Le parc simule de fetch-init.ts : quatre apps decrites entierement, quatre a
   // ecarter pour une raison chacune, une sans outil connu.
   const INIT_FETCH = pathToFileURL(join(FIXTURES, "fetch-init.ts")).href;
   const SECRET = "valeur-secrete-qui-ne-doit-sortir-nulle-part";
@@ -1550,7 +1550,8 @@ try {
 
   check("une version flottante est ecartee", /gamma-metabase : METABASE_VERSION="latest"/.test(init.output), true);
   check("une app sans depot lie est ecartee", /delta-metabase : aucun depot lie/.test(init.output), true);
-  check("un git_ref qui n'est pas un sha est ecarte", /epsilon-metabase : git_ref "master"/.test(init.output), true);
+  check("un depot lie sans branche est ecarte", /eta-metabase : depot lie sans branche/.test(init.output), true);
+  check("un git_ref qui n'est pas un sha est ecarte",/epsilon-metabase : git_ref "master"/.test(init.output), true);
   check("une app sans outil connu n'est pas citee", init.output.includes("site-vitrine"), false);
   check("aucun secret ne sort, ni a l'ecran ni dans le manifeste", [init.output.includes(SECRET), generated.src.includes(SECRET)], [false, false]);
 

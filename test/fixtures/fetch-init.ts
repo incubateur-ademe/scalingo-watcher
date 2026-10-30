@@ -12,12 +12,12 @@ import { appendFileSync } from "node:fs";
 type SimulatedApp = {
   variables: Record<string, string>;
   deployment?: { git_ref: string | null; status: string };
-  link?: { owner: string; repo: string; branch: string; scm_type: string };
+  link?: { owner: string; repo: string; branch: string | null; scm_type: string };
   addons?: string[];
   database?: string;
 };
 
-const github = (repo: string, branch: string) => ({ owner: "exemple", repo, branch, scm_type: "github" });
+const github = (repo: string, branch: string | null) => ({ owner: "exemple", repo, branch, scm_type: "github" });
 const deployed = (c: string, status = "success") => ({ git_ref: c.repeat(40), status });
 
 const SECRET = "valeur-secrete-qui-ne-doit-sortir-nulle-part";
@@ -42,6 +42,11 @@ const PARC: Record<string, Record<string, SimulatedApp>> = {
       deployment: deployed("d"),
       addons: ["postgresql"],
       database: "16.15.0-1",
+    },
+    "eta-metabase": {
+      variables: { METABASE_VERSION: "v0.63.18" },
+      deployment: deployed("9"),
+      link: github("metabase-scalingo", null),
     },
     "gamma-metabase": {
       variables: { METABASE_VERSION: "latest" },
