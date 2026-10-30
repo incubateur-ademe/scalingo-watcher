@@ -1246,6 +1246,16 @@ function parseSemver(raw: string): Version | null {
   return m ? m[1].split(".").map(Number) : null;
 }
 
+/**
+ * Version a comparer aux plages des failles, ou null si elle n'en designe pas
+ * une seule. Un alias glissant comme v0.63.x se lirait 0.63, donc 0.63.0, et
+ * tomberait dans toute plage ouverte en x.63.0 quelle que soit la version servie.
+ */
+export function pinnedVersion(raw: string): Version | null {
+  if (/(^|\.)[x*](\.|$)/i.test(raw.trim())) return null;
+  return parseSemver(raw);
+}
+
 function cmpVersion(a: Version, b: Version): number {
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
     const d = (a[i] ?? 0) - (b[i] ?? 0);
@@ -1761,7 +1771,7 @@ async function checkExploited(targets: AppEntry[], lock: Lock): Promise<void> {
     for (const e of targets) {
       if (envToProduct(e.tool.env) !== product) continue;
       const raw = lock.apps[keyOf(e)]?.tool.version ?? e.tool.version;
-      const v = raw ? parseSemver(raw) : null;
+      const v = raw ? pinnedVersion(raw) : null;
       if (!v) continue;
       for (const f of exploits) {
         if (!f.ranges.some((r) => versionInRange(v, r))) continue;

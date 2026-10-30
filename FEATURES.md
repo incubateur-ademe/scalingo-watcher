@@ -640,6 +640,11 @@ chose quand il se déclenche.
 l'exécution. Il n'existe pas toujours de version corrigée le jour où on
 l'apprend, et un parc rouge en permanence cesse d'être lu.
 
+**[fait]** Une version glissante (`v0.63.x`) n'est pas confrontée aux failles.
+Elle ne désigne pas la version servie, et lue comme `0.63.0` elle tomberait dans
+toute plage ouverte en début de ligne. Seule une version épinglée déclenche une
+alerte.
+
 **[fait]** Surveillance des stacks. Chaque application est confrontée à la liste
 des stacks de sa région, qui portent une date de dépréciation. Un stack en fin de
 vie ne casse rien le jour même : il cesse d'abord de recevoir des correctifs,
