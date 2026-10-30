@@ -6,6 +6,8 @@
  * est note dans le fichier TRACE. Tout autre appel repond 500.
  * OUTAGE=1 fait echouer la liste des apps, comme un proxy injoignable.
  * ACCOUNT_UNREADABLE=1 fait echouer la lecture du compte de l'acces.
+ * OWNER_UNREADABLE et OWNER_MISSING, listes d'apps separees par des virgules,
+ * font echouer la lecture de leur proprietaire ou l'omettent de la reponse.
  * Le compte de l'acces est ACCOUNT, proprietaire de chaque app qui n'en
  * declare pas d'autre.
  */
@@ -121,6 +123,9 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
     return json({ apps: Object.keys(fleet).map((name) => ({ id: `id-${name}`, name, status: "running" })) });
   }
   if (m === "GET" && (r = /^\/v1\/apps\/([^/]+)$/.exec(u.pathname)) && fleet[r[1]]) {
+    const listed = (v: string | undefined) => (v ?? "").split(",").includes(r![1]);
+    if (listed(process.env.OWNER_UNREADABLE)) return json({ error: "indisponible" }, 503);
+    if (listed(process.env.OWNER_MISSING)) return json({ app: { id: `id-${r[1]}`, name: r[1], status: "running" } });
     const owner = fleet[r[1]].owner ?? ACCOUNT;
     return json({ app: { id: `id-${r[1]}`, name: r[1], status: "running", owner: { ...owner, email: `${owner.username}@exemple.test` } } });
   }

@@ -1470,9 +1470,11 @@ try {
       pausedEntry(reconciled),
       reconcileRun.calls.filter((l) => l === `GET ${BETA}/variables`).length,
       /a bouge hors du watcher, le lock disait v0\.63\.18 @ aaaaaaa/.test(reconcileRun.output),
+      /Aucune derive\./.test(reconcileRun.output),
+      /Aucune derive hors des apps en pause\. 1 app\(s\) en pause, relevee\(s\) dans l'application\./.test(reconcileRun.output),
       writeCalls(reconcileRun.calls),
     ],
-    [0, REAL_STATE, 1, true, []],
+    [0, REAL_STATE, 1, true, false, true, []],
   );
 
   // Le meme ecart, sans la pause, serait rattrape : c'est bien elle qui retient.
@@ -1585,6 +1587,25 @@ try {
       readGenerated(accountUnread).manifest?.apps.length,
     ],
     [0, 1, [], 4],
+  );
+  const ownerUnread = sandbox();
+  const ownerUnreadRun = run(
+    ownerUnread,
+    "init.ts",
+    [...REGIONS, ...NEW_FLEET],
+    { ...TOKEN, OWNER_UNREADABLE: "alpha-metabase", OWNER_MISSING: "zeta-metabase" },
+    INIT_FETCH,
+  );
+  check(
+    "proprietaire illisible : l'app est gardee, sans pause deduite, et init le note",
+    [
+      ownerUnreadRun.status,
+      readGenerated(ownerUnread).manifest?.apps.map(appKey),
+      pausedApps(readGenerated(ownerUnread).manifest),
+      ownerUnreadRun.output.split("proprietaire illisible").length - 1,
+      /Releve impossible/.test(ownerUnreadRun.output),
+    ],
+    [0, generatedApps.map(appKey), [], 2, false],
   );
 
   const readOnly = [

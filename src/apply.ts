@@ -257,11 +257,13 @@ export async function currentAccount(): Promise<{ id: string } | { unreadable: s
 
 /** Proprietaire d'une app, tel que Scalingo le rend sur l'app. */
 export async function appOwner(ref: AppRef): Promise<{ id: string; username: string }> {
-  const { app } = await reqApi<{ app: { owner: { id: string; username: string } } }>(
+  const { app } = await reqApi<{ app?: { owner?: { id?: string; username?: string } } }>(
     `${apiHost(ref.region)}/v1/apps/${ref.app}`,
     ref.region,
   );
-  return { id: app.owner.id, username: app.owner.username };
+  const owner = app?.owner;
+  if (!owner?.id) throw new Error("reponse sans proprietaire");
+  return { id: owner.id, username: owner.username ?? owner.id };
 }
 
 async function exchangeToken(apiToken: string): Promise<string> {
@@ -2144,7 +2146,12 @@ async function main() {
         real.source.sha === entry.source.sha && real.tool.version === entry.tool.version;
       lock.apps[key] = { ...real, quarantine: reached ? null : (known?.quarantine ?? null) };
     }
-    log(drifts === 0 ? "\nAucune derive.\n" : `\n${drifts} derive(s) relevee(s).\n`);
+    // Sans cette precision, "Aucune derive." precedait la derive d'une app en
+    // pause, annoncee juste apres dans l'application.
+    const paused = targets.filter((e) => e.paused).length;
+    const pausedNote = paused > 0 ? ` ${paused} app(s) en pause, relevee(s) dans l'application.` : "";
+    const scope = paused > 0 ? " hors des apps en pause" : "";
+    log(drifts === 0 ? `\nAucune derive${scope}.${pausedNote}\n` : `\n${drifts} derive(s) relevee(s)${scope}.${pausedNote}\n`);
   }
 
   log(OPT.dryRun ? "PLAN (aucune ecriture)" : "APPLICATION");

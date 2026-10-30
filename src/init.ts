@@ -206,8 +206,12 @@ async function describeApp(ref: AppRef, accountId: string | null): Promise<Outco
 
   let foreignOwner: string | undefined;
   if (accountId !== null) {
-    const owner = await appOwner(ref);
-    if (owner.id !== accountId) {
+    // Comme pour un compte illisible : rien n'est deduit, et l'app reste retenue.
+    const owner = await appOwner(ref).catch((e: Error) => {
+      notes.push(`proprietaire illisible (${e.message.slice(0, 120)}) : aucune pause deduite`);
+      return null;
+    });
+    if (owner && owner.id !== accountId) {
       foreignOwner = owner.username;
       notes.push(`proprietaire ${owner.username}, hors compte : ecrite en pause, lue mais jamais ecrite`);
     }
