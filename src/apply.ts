@@ -644,6 +644,31 @@ export const targetReached = (
   real.deployment?.status === "success";
 
 /**
+ * Vrai quand la cible est strictement anterieure a la version en service.
+ *
+ * Le manifeste dit l'intention, pas la verite : une app montee a la main avant
+ * que le manifeste ne suive se ferait redescendre au passage suivant, sur une
+ * base portant deja les migrations de la version superieure, que l'ancien
+ * binaire refuse de demarrer. Et une migration ne se defait pas en redeployant
+ * l'ancienne version, seulement en restaurant la base.
+ *
+ * Deux reserves, qui rendent faux plutot que de trancher a tort :
+ * - une version glissante ne designe pas ce qui est servi, d'ou pinnedVersion
+ *   et non parseSemver : v0.63.x lue comme 0.63.0 passerait pour une descente
+ *   face a n'importe quel correctif de sa ligne ;
+ * - deux lignes publiees en parallele ne s'ordonnent pas entre elles. Chez
+ *   Metabase, v1.52.2 date de 2024 quand v0.63.16 date de 2026 : comparer leurs
+ *   numeros ne dit rien de leur anciennete.
+ */
+export function targetGoesBack(tool: ToolDeclaration, deployed: string | null, target: string): boolean {
+  if (!deployed) return false;
+  const [running, wanted] = [pinnedVersion(deployed), pinnedVersion(target)];
+  if (!running || !wanted) return false;
+  if (compareLines(running, wanted, upstreamOf(tool)?.line ?? 1) !== 0) return false;
+  return cmpVersion(wanted, running) < 0;
+}
+
+/**
  * `failed` = Scalingo a rendu un statut terminal non reussi. La cible est en
  * cause, on met en quarantaine.
  * `error` = on n'a pas pu mener l'operation a son terme (reseau, API, sauvegarde
@@ -904,6 +929,23 @@ async function applyApp(
       note(key, `changement de branche : l'app tourne ${current.source.sha.slice(0, 7)}, absent de ${entry.source.branch}. Corriger la branche du manifeste, ou assumer le changement en mettant a jour le lock.`);
       return "rejected";
     }
+  }
+
+  // Troisieme controle, sur le sens de l'ecart et non plus sur sa coherence.
+  // Les deux precedents verifient d'ou vient ce qu'on deploie ; celui-ci
+  // verifie qu'on ne recule pas. Il ne vaut que face a une version que le lock
+  // dit reellement en service : apres un echec, la variable porte la nouvelle
+  // valeur sans que le binaire ait change, et refuser le retour en arriere
+  // serait precisement refuser la seule reaction sensee.
+  if (!OPT.force && everDeployed && targetGoesBack(entry.tool, current!.tool.version, target.version)) {
+    emit(`    DESCENTE DE VERSION : l'app tourne ${current!.tool.version}, le manifeste demande ${target.version}`);
+    emit(`    aligne le manifeste sur ce qui tourne, ou restaure la base avant de forcer la descente`);
+    note(
+      key,
+      `descente de version : l'app tourne ${current!.tool.version}, le manifeste demande ${target.version}. ` +
+        `Aligner le manifeste sur ce qui tourne, ou restaurer la base avant de forcer la descente par --force --app.`,
+    );
+    return "rejected";
   }
 
   if (OPT.dryRun) return "planned";

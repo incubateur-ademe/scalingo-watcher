@@ -40,6 +40,7 @@ import {
   readManifest,
   RENAMED_FIELDS,
   resolveAliases,
+  targetGoesBack,
   targetReached,
   writeOptions,
 } from "../src/apply.ts";
@@ -791,6 +792,27 @@ console.log("\nCible atteinte");
     targetReached(releve("success"), { ...CIBLE, version: "v0.64.4.2" }),
     false,
   );
+}
+
+console.log("\nSens de l'ecart avec le manifeste");
+
+{
+  const metabase = { env: "METABASE_VERSION" };
+  check("une cible anterieure recule", targetGoesBack(metabase, "v0.64.4.2", "v0.63.18"), true);
+  check("une cible posterieure non", targetGoesBack(metabase, "v0.63.18", "v0.64.4.2"), false);
+  check("une cible identique non", targetGoesBack(metabase, "v0.63.18", "v0.63.18"), false);
+  check("un correctif de la meme ligne recule", targetGoesBack(metabase, "v0.63.18", "v0.63.15"), true);
+  // Lue comme 0.63.0, une version glissante passerait pour une descente face a
+  // n'importe quel correctif de sa ligne.
+  check("une cible glissante ne tranche pas", targetGoesBack(metabase, "v0.63.18", "v0.63.x"), false);
+  check("une version servie glissante non plus", targetGoesBack(metabase, "v0.63.x", "v0.63.18"), false);
+  // v1.52.2 date de 2024 quand v0.63.16 date de 2026 : les deux editions de
+  // Metabase ne s'ordonnent pas entre elles.
+  check("deux lignes ne s'ordonnent pas", targetGoesBack(metabase, "v1.52.2", "v0.64.4.2"), false);
+  check("une app sans variable de version ne tranche pas", targetGoesBack(metabase, null, "v0.63.18"), false);
+  // Sans amont declare, la ligne vaut un composant : nginx 1.27 a 1.26 recule.
+  check("un outil hors table se compare sur sa majeure", targetGoesBack({ env: "NGINX_VERSION" }, "1.27.4", "1.27.3"), true);
+  check("et pas d'une majeure a l'autre", targetGoesBack({ env: "NGINX_VERSION" }, "1.27.4", "2.0.0"), false);
 }
 
 console.log("\nScopes des blobs du proxy");
@@ -1616,14 +1638,20 @@ try {
     [0, REAL_STATE, 1, true, false, true, []],
   );
 
-  // Le meme ecart, sans la pause, serait rattrape : c'est bien elle qui retient.
+  // Le meme ecart, sans la pause, part dans l'application : c'est bien elle qui
+  // retient. Il s'y fait refuser, le reel etant plus recent que le manifeste,
+  // ce qui est l'objet du controle de descente de version teste plus bas.
   const unpaused = sandbox();
   writeFileSync(join(unpaused.fleet, "manifest.yaml"), fixtureSrc.replace("    paused: true\n", ""));
   const unpausedPlan = run(unpaused, "apply.ts", ["--reconcile", "--dry-run", ...FLEET], WITH_ACCESS);
   check(
-    "sans la pause, le meme ecart serait planifie",
-    [unpausedPlan.status, /beta-metabase : outil v0\.63\.20 -> v0\.63\.18, source main ccccccc -> aaaaaaa/.test(unpausedPlan.output)],
-    [0, true],
+    "sans la pause, le meme ecart part dans l'application",
+    [
+      unpausedPlan.status,
+      /beta-metabase : outil v0\.63\.20 -> v0\.63\.18, source main ccccccc -> aaaaaaa/.test(unpausedPlan.output),
+      /beta-metabase : en pause/.test(unpausedPlan.output),
+    ],
+    [0, true, false],
   );
 
   const adopted = sandbox();
@@ -1636,6 +1664,43 @@ try {
     "--prune garde son entree, l'app restant declaree",
     [pruneRun.status, readFileSync(join(pruned.fleet, "lock.json"), "utf8") === lockFixture, pruneRun.calls],
     [0, true, []],
+  );
+
+  console.log("\nDescente de version refusee, contre un fetch simule");
+
+  // Le 2026-10-30 : une app pilote montee a la main en v0.64 avant que le
+  // manifeste ne suive. La reconciliation suivante l'aurait redescendue en
+  // v0.63 sur une base portant deja les migrations de la 064, que l'ancien
+  // binaire refuse de demarrer. Seule une fusion dans la fenetre l'a evite.
+  const AHEAD = "osc-fr1/alpha-metabase";
+  const descente = (args: string[], status = "success") => {
+    const b = sandbox();
+    const out = run(b, "apply.ts", ["--reconcile", ...args, ...FLEET, "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [AHEAD]: { version: "v0.64.4.2", sha: "a".repeat(40), status } }),
+    });
+    if (out.status !== 0) console.log(out.output);
+    return {
+      status: out.status,
+      refusee: /DESCENTE DE VERSION : l'app tourne v0\.64\.4\.2, le manifeste demande v0\.63\.18/.test(out.output),
+      ecrit: writeCalls(out.calls),
+    };
+  };
+
+  check("une cible anterieure a ce qui tourne est refusee", descente([]), { status: 0, refusee: true, ecrit: [] });
+  check("le plan la refuse aussi, au lieu de l'annoncer", descente(["--dry-run"]), { status: 0, refusee: true, ecrit: [] });
+  // Apres un deploiement rate, la variable porte la nouvelle version sans que le
+  // binaire ait change : refuser le retour en arriere serait refuser la seule
+  // reaction sensee.
+  check(
+    "apres un deploiement rate, le retour en arriere reste possible",
+    descente(["--dry-run"], "build-error"),
+    { status: 0, refusee: false, ecrit: [] },
+  );
+  check(
+    "--force l'assume, la base restant a restaurer a la main",
+    descente(["--dry-run", "--force", "--app", "alpha"]),
+    { status: 0, refusee: false, ecrit: [] },
   );
 
   console.log("\nQuarantaine levee sur preuve, contre un fetch simule");
