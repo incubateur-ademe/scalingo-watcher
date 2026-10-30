@@ -35,6 +35,7 @@ import {
   describeProposal,
   describeTools,
   loadLock,
+  pinnedVersion,
   policyReadByRenovate,
   readManifest,
   RENAMED_FIELDS,
@@ -760,6 +761,10 @@ check("le nom vient de la table", toolName("METABASE_VERSION"), "Metabase");
 check("a defaut, de la variable", toolName("OPENSEARCH_DASHBOARDS_VERSION"), "Opensearch dashboards");
 // Chez Metabase, v0 et v1 sont deux editions publiees en parallele : v1.52.2
 // n'est pas une montee pour une instance en v0.63.
+check("une version epinglee se compare aux failles", pinnedVersion("v0.63.16.7"), [0, 63, 16, 7]);
+check("un alias .x ne se lit pas comme x.y.0", pinnedVersion("v0.63.x"), null);
+check("un alias X majuscule non plus", pinnedVersion("v1.X"), null);
+check("un alias * non plus", pinnedVersion("0.63.*"), null);
 check("v0.63 et v1.52 sont sur deux lignes", compareLines([0, 63, 18], [1, 52, 2], 1) < 0, true);
 check("v0.63 et v0.64 sont sur la meme ligne", compareLines([0, 63, 18], [0, 64, 0], 1), 0);
 check("une ligne de deux composants separe 0.63 de 0.64", compareLines([0, 63, 18], [0, 64, 0], 2) < 0, true);
