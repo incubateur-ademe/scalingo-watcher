@@ -1942,6 +1942,20 @@ try {
   const pausedOnly = sandbox();
   writeFileSync(join(pausedOnly.fleet, "manifest.yaml"), ONLY_PAUSED_SRC);
   writeFileSync(join(pausedOnly.fleet, "lock.json"), JSON.stringify(pausedLock, null, 2) + "\n");
+  // Le montage se verifie lui-meme : seule l'app en pause doit rester en
+  // v0.63.18. Pose par une expression sur le texte du manifeste, il se defait
+  // sans bruit a la moindre retouche de la fixture, et le test continuerait de
+  // passer en n'eprouvant plus rien.
+  check(
+    "seule l'app en pause est laissee sous l'avis",
+    (parse(ONLY_PAUSED_SRC) as typeof fixture).apps.map((a) => [a.app, a.paused === true, (a.tool as { version: string }).version]),
+    [
+      ["alpha-metabase", false, "v0.63.20"],
+      ["beta-metabase", true, "v0.63.18"],
+      ["gamma-metabase", false, "v0.63.20"],
+      ["delta-metabase", false, "v0.63.20"],
+    ],
+  );
   const pausedRun = run(pausedOnly, "apply.ts", [...FLEET, "--out-dir", "../sortie"], {
     SCALINGO_API_TOKEN: "faux",
     REAL: JSON.stringify({ "osc-fr1/beta-metabase": { version: "v0.63.18", sha: "a".repeat(40) } }),
