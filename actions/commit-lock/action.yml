@@ -1,7 +1,8 @@
 name: consigner le lock
 description: >
   Commite le lock s'il a change et le pousse sur la branche executee, en
-  rejouant le commit par-dessus ce qui a ete pousse entre-temps.
+  rejouant le commit par-dessus ce qui a ete pousse entre-temps. Quand le lock
+  lui-meme a ete ecrit des deux cotes, c'est le releve le plus recent qui vaut.
 
 inputs:
   lock-path:
@@ -39,16 +40,59 @@ runs:
         git add -- "$LOCK_PATH"
         git commit -m "$MESSAGE"
 
+        # generatedAt tel que le moteur l'ecrit, une cle par ligne. Vide quand il
+        # vaut null, c'est-a-dire quand aucun etat n'a encore ete consigne.
+        lock_date() {
+          sed -n 's/^[[:space:]]*"generatedAt"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+        }
+
+        # Le releve de ce passage, retenu avant toute tentative : pendant un
+        # rebase, HEAD designe le cote sur lequel on rejoue, pas notre commit.
+        mine=$(git rev-parse "HEAD:$LOCK_PATH")
+        mine_at=$(git cat-file blob "$mine" | lock_date)
+
         # Une convergence dure parfois des dizaines de minutes : une fusion
         # arrivee entre-temps fait refuser le push. Le commit est rejoue
         # par-dessus, et un lock qui ne revient pas fait echouer le job, sinon
         # la prochaine execution repartirait d'un etat perime sans que personne
         # ne le voie.
+        #
+        # Un conflit sur le lock, lui, ne cede pas a une nouvelle tentative : le
+        # rebase echoue a l'identique, et les trois tentatives ne retardaient
+        # l'echec que de quarante-cinq secondes. Il arrive des que le distant a
+        # ecrit le lock de son cote, ce qui n'a rien d'exceptionnel : un cron parti
+        # pendant qu'une vague finissait suffit.
+        #
+        # Un lock est un etat releve, pas un travail humain : il ne s'arbitre pas
+        # ligne par ligne, c'est le releve le plus recent qui vaut, et generatedAt
+        # dit lequel l'est sans supposer que ce soit celui de ce passage.
+        # L'arbitrage prend le fichier entier et non application par application :
+        # deux passages qui auraient touche des applications differentes dans la
+        # meme fenetre perdent les entrees du plus ancien, que la reconciliation
+        # suivante releve de toute facon.
         for attempt in 1 2 3; do
           if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then
             echo "lock pousse (tentative $attempt)"
             exit 0
           fi
+
+          if [ "$(git diff --name-only --diff-filter=U)" = "$LOCK_PATH" ]; then
+            git rebase --abort
+            remote_at=$(git show "origin/$GITHUB_REF_NAME:$LOCK_PATH" | lock_date)
+            # Le distant porte deja le commit concurrent : on repart de lui plutot
+            # que de rejouer le notre, qui conflicterait encore.
+            git checkout -q --detach "origin/$GITHUB_REF_NAME"
+            if [ -n "$remote_at" ] && [[ "$remote_at" > "$mine_at" ]]; then
+              echo "::warning::lock ecrit en meme temps par un autre passage, et son releve est plus recent ($remote_at contre ${mine_at:-aucune date}) : celui de ce passage est abandonne, la reconciliation suivante le relevera"
+              exit 0
+            fi
+            echo "lock ecrit en meme temps par un autre passage, le releve de ce passage est plus recent (${mine_at:-aucune date} contre ${remote_at:-aucune date}) et le remplace"
+            git cat-file blob "$mine" > "$LOCK_PATH"
+            git add -- "$LOCK_PATH"
+            git commit -q -m "$MESSAGE"
+            continue
+          fi
+
           git rebase --abort 2>/dev/null || true
           if [ "$attempt" -lt 3 ]; then
             echo "push refuse, nouvelle tentative dans $((attempt * 15)) s"

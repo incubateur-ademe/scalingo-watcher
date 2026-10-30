@@ -315,6 +315,80 @@ console.log("\nConsignation du lock");
     env: { ...gitEnv, LOCK_PATH: "lock.json", MESSAGE: "x", GITHUB_REF_TYPE: "branch", GITHUB_REF_NAME: "main" },
   });
   check("un lock deja commite et inchange n'est pas recommite", [again.status, /lock inchange/.test(again.stdout)], [0, true]);
+
+  // Deux ecritures concurrentes se soldaient toujours par un echec : le rebase
+  // conflicte, et comme le conflit est deterministe les trois tentatives
+  // echouent a l'identique. Constate le 2026-10-30 sur le parc, un cron parti
+  // quatorze secondes apres la fin d'une vague qui venait d'ecrire le lock.
+  const lockAt = (at: string) => `${JSON.stringify({ version: 1, generatedAt: at, apps: {} }, null, 2)}\n`;
+  const commitLock = (args: { ours: string; theirs?: string; autre?: boolean }) => {
+    const b = mkdtempSync(join(tmpdir(), "scalingo-watcher-lock-"));
+    git(b, "init", "-q", "--bare", "-b", "main", "remote.git");
+    const bare = join(b, "remote.git");
+    git(b, "clone", "-q", bare, "work");
+    const w = join(b, "work");
+    const commitHere = (cwd: string, ...files: string[]) =>
+      git(cwd, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x", "--", ...files);
+    writeFileSync(join(w, "lock.json"), lockAt("2026-10-30T12:00:00.000Z"));
+    writeFileSync(join(w, "README"), "depart\n");
+    git(w, "add", "lock.json", "README");
+    commitHere(w, "lock.json", "README");
+    git(w, "push", "-q", "origin", "HEAD:main");
+
+    // Le passage concurrent, pousse depuis un autre clone pendant que le notre
+    // travaille : il ecrit le lock, ou seulement un autre fichier.
+    git(b, "clone", "-q", bare, "concurrent");
+    const c = join(b, "concurrent");
+    if (args.autre) {
+      writeFileSync(join(c, "README"), "touche ailleurs\n");
+      commitHere(c, "README");
+    } else {
+      writeFileSync(join(c, "lock.json"), lockAt(args.theirs!));
+      commitHere(c, "lock.json");
+    }
+    git(c, "push", "-q", "origin", "HEAD:main");
+
+    writeFileSync(join(w, "lock.json"), lockAt(args.ours));
+    const out = spawnSync("bash", ["-c", step], {
+      cwd: w,
+      encoding: "utf8",
+      env: { ...gitEnv, LOCK_PATH: "lock.json", MESSAGE: "chore(lock): etat du parc", GITHUB_REF_TYPE: "branch", GITHUB_REF_NAME: "main" },
+    });
+    const pushed = git(bare, "show", "main:lock.json");
+    const result = {
+      status: out.status,
+      retenu: (/"generatedAt": "([^"]+)"/.exec(pushed) ?? [])[1] ?? null,
+      // Le commit concurrent doit rester dans l'historique : l'arbitrage porte
+      // sur le lock, il ne defait pas ce que l'autre passage a pousse.
+      concurrentGarde: git(bare, "log", "--format=%H", "main").trim().split("\n").length >= 2,
+      sortie: `${out.stdout}${out.stderr}`,
+    };
+    rmSync(b, { recursive: true, force: true });
+    return result;
+  };
+
+  const plusRecent = commitLock({ theirs: "2026-10-30T13:00:00.000Z", ours: "2026-10-30T13:06:46.000Z" });
+  check(
+    "sur ecriture concurrente, le releve le plus recent est pousse",
+    [plusRecent.status, plusRecent.retenu, plusRecent.concurrentGarde],
+    [0, "2026-10-30T13:06:46.000Z", true],
+  );
+  // Le distant plus recent n'est pas ecrase : son releve a vu un etat plus
+  // tardif, et la reconciliation suivante relevera ce que celui-ci perd.
+  const plusAncien = commitLock({ theirs: "2026-10-30T13:06:46.000Z", ours: "2026-10-30T13:00:00.000Z" });
+  check(
+    "un releve plus ancien que le distant est abandonne, sans echouer",
+    [plusAncien.status, plusAncien.retenu, /::warning::lock ecrit en meme temps/.test(plusAncien.sortie)],
+    [0, "2026-10-30T13:06:46.000Z", true],
+  );
+  // Le simple retard, lui, se rejoue comme avant : rien a arbitrer.
+  const retard = commitLock({ autre: true, ours: "2026-10-30T13:06:46.000Z" });
+  check(
+    "un distant qui a bouge ailleurs est simplement rejoue par-dessus",
+    [retard.status, retard.retenu, /lock pousse/.test(retard.sortie)],
+    [0, "2026-10-30T13:06:46.000Z", true],
+  );
+
   rmSync(dir, { recursive: true, force: true });
 }
 

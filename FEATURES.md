@@ -193,6 +193,23 @@ convergence, est rejoué par-dessus après `pull --rebase`, trois tentatives au
 plus. Un lock qui ne revient pas fait échouer le job : la prochaine exécution
 repartirait sinon d'un état périmé sans que personne ne le voie.
 
+**[fait]** Deux écritures concurrentes du lock s'arbitrent par sa date au lieu
+d'échouer. Quand le distant a lui aussi modifié le lock, le rebase conflicte, et
+comme le conflit est déterministe les trois tentatives échouaient à l'identique :
+elles ne retardaient l'échec que de quarante-cinq secondes. Le cas n'a rien
+d'exceptionnel, un cron parti pendant qu'une vague finissait suffit, et c'est
+arrivé le 2026-10-30. Un lock est un état relevé, pas un travail humain : il ne
+s'arbitre pas ligne par ligne, c'est le relevé le plus récent qui vaut, et
+`generatedAt` dit lequel l'est sans supposer que ce soit celui du passage en
+cours. Le relevé le plus récent est reposé par-dessus le commit concurrent, qui
+reste dans l'historique. Quand c'est le distant qui est le plus récent, le relevé
+du passage est abandonné avec un avertissement et sans échec : il n'y a rien à
+sauver, son état est antérieur.
+
+**[fait]** Un conflit sur un autre fichier que le lock n'est pas arbitré. Il
+garde les trois tentatives puis l'échec : ce n'est pas un état relevé, et ce
+n'est pas au watcher de trancher.
+
 ---
 
 ## 4. Veille (presets `renovate/`)
@@ -732,6 +749,12 @@ dit.
 référence, une descente refusée sort en 0 : elle est portée par le rapport
 d'incident et par le marqueur du tableau de bord, pas par l'intégration continue.
 
+**L'arbitrage du lock prend le fichier entier.** Il garde le relevé le plus
+récent, pas la réunion des deux. Deux passages qui auraient touché des
+applications différentes dans la même fenêtre perdent donc les entrées du plus
+ancien. La réconciliation suivante les relève, puisqu'elle lit le parc réel et
+non le lock.
+
 **`--adopt` oublie la quarantaine.** L'amorçage réécrit chaque entrée depuis
 l'état réel, quarantaine comprise, et ne le signale pas. C'est un ré-étalonnage
 demandé à la main, mais lancé sur un parc où une application est gelée, il la
@@ -983,7 +1006,8 @@ workflow appelé, et installe Node et pnpm aux versions déclarées par l'outil
 (action `setup`). Le dépôt consommateur n'a ni `package.json` ni `.nvmrc`.
 
 **[fait]** Actions composites dans `actions/` : `setup`, `signaler` (tableau de
-bord et notification), `commit-lock` (push du lock rejoué).
+bord et notification), `commit-lock` (push du lock rejoué, et arbitré par sa date
+quand deux passages l'ont écrit).
 
 **[fait]** Chemins des fichiers du parc en options (`--manifest`, `--lock`,
 `--fgp`), relatifs au répertoire courant. Le schéma est lu à côté du moteur, quel
