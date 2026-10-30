@@ -5,11 +5,15 @@
  * par le proxy (region lue dans le blob d'API, blob-api-<region>). Chaque appel
  * est note dans le fichier TRACE. Tout autre appel repond 500.
  * OUTAGE=1 fait echouer la liste des apps, comme un proxy injoignable.
+ * ACCOUNT_UNREADABLE=1 fait echouer la lecture du compte de l'acces.
+ * Le compte de l'acces est ACCOUNT, proprietaire de chaque app qui n'en
+ * declare pas d'autre.
  */
 
 import { appendFileSync } from "node:fs";
 
 type SimulatedApp = {
+  owner?: { id: string; username: string };
   variables: Record<string, string>;
   deployment?: { git_ref: string | null; status: string };
   link?: { owner: string; repo: string; branch: string | null; scm_type: string };
@@ -21,6 +25,7 @@ const github = (repo: string, branch: string | null) => ({ owner: "exemple", rep
 const deployed = (c: string, status = "success") => ({ git_ref: c.repeat(40), status });
 
 const SECRET = "valeur-secrete-qui-ne-doit-sortir-nulle-part";
+const ACCOUNT = { id: "us-compte", username: "compte-du-jeton" };
 
 const PARC: Record<string, Record<string, SimulatedApp>> = {
   "osc-fr1": {
@@ -72,6 +77,7 @@ const PARC: Record<string, Record<string, SimulatedApp>> = {
       link: github("metabase-scalingo", "main"),
     },
     "zeta-metabase": {
+      owner: { id: "us-autre", username: "autre-equipe" },
       variables: { METABASE_VERSION: "v0.63.18" },
       deployment: deployed("f"),
       link: github("metabase-scalingo", "main"),
@@ -93,6 +99,10 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   let r: RegExpExecArray | null;
 
   if (m === "POST" && u.href === "https://auth.scalingo.com/v1/tokens/exchange") return json({ token: "porteur" });
+  if (m === "GET" && u.href === "https://auth.scalingo.com/v1/users/self") {
+    if (process.env.ACCOUNT_UNREADABLE) return json({ error: "indisponible" }, 503);
+    return json({ user: { ...ACCOUNT, email: "compte@exemple.test" } });
+  }
 
   if (m === "HEAD" && u.host === "raw.githubusercontent.com") {
     return new Response(null, { status: process.env.SCHEMA_TAG_MISSING ? 404 : 200 });
@@ -109,6 +119,10 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   if (m === "GET" && u.pathname === "/v1/apps") {
     if (process.env.OUTAGE) return json({ error: "injoignable" }, 503);
     return json({ apps: Object.keys(fleet).map((name) => ({ id: `id-${name}`, name, status: "running" })) });
+  }
+  if (m === "GET" && (r = /^\/v1\/apps\/([^/]+)$/.exec(u.pathname)) && fleet[r[1]]) {
+    const owner = fleet[r[1]].owner ?? ACCOUNT;
+    return json({ app: { id: `id-${r[1]}`, name: r[1], status: "running", owner: { ...owner, email: `${owner.username}@exemple.test` } } });
   }
   if (!(r = /^\/v1\/apps\/([^/]+)\/(.+)$/.exec(u.pathname)) || !fleet[r[1]]) return json({ error: "appel imprevu" }, 500);
   const [name, route] = [r[1], r[2]];

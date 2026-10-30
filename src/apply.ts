@@ -239,6 +239,31 @@ export function openAccess(resolved: Paths): boolean {
 /** URL du proxy quand l'acces passe par lui, null en direct. */
 export const proxyUrl = () => fgp?.url ?? null;
 
+/**
+ * Identifiant du compte qui porte l'acces, ou la raison pour laquelle il est
+ * illisible. Derriere le proxy, chaque blob vise l'hote d'API d'une region :
+ * auth.scalingo.com n'y est pas joignable.
+ */
+export async function currentAccount(): Promise<{ id: string } | { unreadable: string }> {
+  if (fgp) return { unreadable: "derriere le proxy, auth.scalingo.com n'est pas joignable" };
+  try {
+    const { user } = await req<{ user: { id: string } }>("https://auth.scalingo.com/v1/users/self", await bearerToken());
+    if (!user?.id) return { unreadable: "reponse sans user.id" };
+    return { id: user.id };
+  } catch (e) {
+    return { unreadable: (e as Error).message.slice(0, 160) };
+  }
+}
+
+/** Proprietaire d'une app, tel que Scalingo le rend sur l'app. */
+export async function appOwner(ref: AppRef): Promise<{ id: string; username: string }> {
+  const { app } = await reqApi<{ app: { owner: { id: string; username: string } } }>(
+    `${apiHost(ref.region)}/v1/apps/${ref.app}`,
+    ref.region,
+  );
+  return { id: app.owner.id, username: app.owner.username };
+}
+
 async function exchangeToken(apiToken: string): Promise<string> {
   const basic = Buffer.from(`:${apiToken}`).toString("base64");
   const res = await fetch("https://auth.scalingo.com/v1/tokens/exchange", {
@@ -517,7 +542,11 @@ export const deployedSha = (deployment: Deployment | null): string | null =>
  * Sert a amorcer le lock sur un parc existant : sans ca, le premier apply
  * considererait tout comme inconnu et redeploierait le parc entier pour rien.
  */
-async function adoptApp(entry: AppEntry): Promise<LockEntry> {
+async function adoptApp(
+  entry: AppEntry,
+  emit: (line: string) => void = log,
+  fallbackSha: string = entry.source.sha,
+): Promise<LockEntry> {
   const base = `${apiHost(entry.region)}/v1/apps/${entry.app}`;
   const { variables } = await reqApi<{ variables: Array<{ name: string; value: string }> }>(
     `${base}/variables`,
@@ -527,8 +556,12 @@ async function adoptApp(entry: AppEntry): Promise<LockEntry> {
 
   const last = await lastDeployment(entry);
   const deployed = deployedSha(last);
-  const sha = deployed ?? entry.source.sha;
-  if (!deployed) log(`    (git_ref "${last?.git_ref || "absent"}" illisible, sha du manifeste retenu par defaut)`);
+  const sha = deployed ?? fallbackSha;
+  if (!deployed) {
+    emit(
+      `    (git_ref "${last?.git_ref || "absent"}" illisible, sha ${fallbackSha === entry.source.sha ? "du manifeste" : "du lock"} retenu par defaut)`,
+    );
+  }
 
   return {
     source: { repo: entry.source.repo, sha },
@@ -668,6 +701,66 @@ async function readStacks(region: string): Promise<Map<string, { name: string; d
   return out;
 }
 
+/**
+ * Une app en pause est lue a chaque passage, jamais ecrite. C'est le cas d'une
+ * app dont le compte n'est que collaborateur : on la suit sans y toucher.
+ *
+ * Son lock suit le reel, comme sous --reconcile. Fige a l'amorcage, il faisait
+ * porter les failles et le tableau de bord sur une version qui ne tournait
+ * plus, et a la reprise le plan partait d'un etat faux.
+ */
+async function observePaused(
+  entry: AppEntry,
+  lock: Lock,
+  token: string,
+  emit: (line: string) => void,
+): Promise<Outcome> {
+  const key = keyOf(entry);
+  const current = lock.apps[key];
+  if (!token && !fgp) {
+    emit(`  ${key} : en pause, non relevee faute d'acces`);
+    return "paused";
+  }
+  const state = await readAppStatus(entry);
+  if (!("unreadable" in state) && state.stack) await warnDeprecatedStack(entry, state.stack);
+
+  let real: LockEntry;
+  try {
+    real = await adoptApp(entry, emit, current?.source.sha || entry.source.sha);
+  } catch (e) {
+    emit(`  ${key} : en pause, releve impossible, lock laisse en l'etat`);
+    emit(`    ${(e as Error).message.slice(0, 240)}`);
+    note(key, `en pause, releve impossible : ${(e as Error).message.slice(0, 240)}`);
+    return "paused";
+  }
+
+  const pin = (e: { tool: { version: string | null }; source: { sha: string } }) =>
+    `${e.tool.version ?? "non epinglee"} @ ${e.source.sha.slice(0, 7) || "?"}`;
+  const status = "unreadable" in state ? "etat illisible" : `etat "${state.status}"`;
+  const reached = real.source.sha === entry.source.sha && real.tool.version === entry.tool.version;
+  emit(`  ${key} : en pause, lue sans rien ecrire, ${status}, ${pin(real)}`);
+  if (!reached) emit(`    ecart avec le manifeste (${pin(entry)}), aucune action`);
+  if (current && (current.tool.version !== real.tool.version || current.source.sha !== real.source.sha)) {
+    emit(`    a bouge hors du watcher, le lock disait ${pin(current)}`);
+  }
+  // Aucune sauvegarde n'a ete faite : la derniere connue reste la bonne. La
+  // quarantaine tombe si l'app a atteint la cible, comme sous --reconcile.
+  lock.apps[key] = { ...real, backup: current?.backup ?? null, quarantine: reached ? null : (current?.quarantine ?? null) };
+  return "paused";
+}
+
+async function warnDeprecatedStack(entry: AppEntry, stackId: string): Promise<void> {
+  const stack = (await readStacks(entry.region)).get(stackId);
+  if (!stack?.deprecatedAt) return;
+  const days = Math.round((Date.parse(stack.deprecatedAt) - Date.now()) / 86400000);
+  warn(
+    keyOf(entry),
+    days > 0
+      ? `tourne sur le stack ${stack.name}, deprecie dans ${days} jour(s), le ${stack.deprecatedAt.slice(0, 10)}`
+      : `tourne sur le stack ${stack.name}, deprecie depuis le ${stack.deprecatedAt.slice(0, 10)}`,
+  );
+}
+
 async function applyApp(
   entry: AppEntry,
   manifest: Manifest,
@@ -681,10 +774,7 @@ async function applyApp(
   const target: Target = { sha: entry.source.sha, version: entry.tool.version };
 
   // La pause est une decision, pas un constat : elle vaut meme si l'app tourne.
-  if (entry.paused) {
-    emit(`  ${key} : en pause dans le manifeste, ignoree`);
-    return "paused";
-  }
+  if (entry.paused) return observePaused(entry, lock, token, emit);
 
   // Avant tout le reste : une app qu'on ne doit pas reveiller reste tranquille.
   // Ce n'est pas un echec, donc pas de quarantaine et pas de code de sortie.
@@ -699,18 +789,7 @@ async function applyApp(
       note(key, `etat illisible : ${state.unreadable.slice(0, 240)}`);
       return "rejected";
     }
-    if (state.stack) {
-      const stack = (await readStacks(entry.region)).get(state.stack);
-      if (stack?.deprecatedAt) {
-        const days = Math.round((Date.parse(stack.deprecatedAt) - Date.now()) / 86400000);
-        warn(
-          key,
-          days > 0
-            ? `tourne sur le stack ${stack.name}, deprecie dans ${days} jour(s), le ${stack.deprecatedAt.slice(0, 10)}`
-            : `tourne sur le stack ${stack.name}, deprecie depuis le ${stack.deprecatedAt.slice(0, 10)}`,
-        );
-      }
-    }
+    if (state.stack) await warnDeprecatedStack(entry, state.stack);
 
     if (NOT_DEPLOYABLE.has(state.status)) {
       emit(`  ${key} : etat "${state.status}", non deployable, laissee en l'etat`);
@@ -950,20 +1029,17 @@ const appUrl = (e: AppEntry) => `https://dashboard.scalingo.com/apps/${e.region}
  * `#changelog-databases-postgresql-16-15-0-1`. Elle n'existe que pour les
  * versions annoncees : pour une version plus ancienne, le lien ouvre le
  * changelog sans se positionner, ce qui reste utilisable. Le moteur de la base
- * est celui de l'addon releve. Sans releve (app en pause, acces refuse), on
+ * est celui de l'addon releve. Sans releve (acces refuse, blob absent), on
  * suppose PostgreSQL, seul moteur que init pilote.
  */
 const databaseLink = (v: string, engine: string | null | undefined) =>
   `[${v}](https://doc.scalingo.com/changelog#changelog-databases-${engine ?? "postgresql"}-${v.replace(/\./g, "-")})`;
 
-const stateOf = (e: AppEntry, known: LockEntry | undefined) =>
-  e.paused
-    ? "en pause"
-    : known?.quarantine
-      ? "quarantaine"
-      : known?.tool.version === e.tool.version && known?.source.sha === e.source.sha
-        ? "conforme"
-        : "en écart";
+const stateOf = (e: AppEntry, known: LockEntry | undefined) => {
+  const reached = known?.tool.version === e.tool.version && known?.source.sha === e.source.sha;
+  if (e.paused) return reached ? "en pause, conforme" : "en pause, en écart";
+  return known?.quarantine ? "quarantaine" : reached ? "conforme" : "en écart";
+};
 
 /**
  * Une section par outil, dans l'ordre ou il apparait dans le manifeste : les
@@ -1022,7 +1098,8 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
     "**État** : `conforme`, ce qui tourne correspond au manifeste. `en écart`, le",
     "manifeste demande autre chose et la convergence le rattrapera. `quarantaine`,",
     "une tentative a échoué sur cette cible et elle ne sera pas retentée tant que le",
-    "manifeste ne change pas. `en pause`, sortie du périmètre par le manifeste.",
+    "manifeste ne change pas. `en pause`, lue à chaque passage mais jamais modifiée :",
+    "l'écart éventuel avec le manifeste est constaté, sans action.",
     "",
   );
 
@@ -1045,14 +1122,14 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
       `| [${entry.app}](${appUrl(entry)}/resources) ` +
         `| ${databaseLink(v, observed?.engine)}${observed ? "" : " (déclarée, non relevée)"} ` +
         `| ${nextVersion ? `${databaseLink(nextVersion, observed?.engine)}${heldBack ? " (majeure retenue)" : ""}` : "non"} ` +
-        `| ${entry.paused ? "en pause" : observed ? "relevée" : "non relevée"} |`,
+        `| ${entry.paused ? "en pause, " : ""}${observed ? "relevée" : "non relevée"} |`,
     );
   }
   lines.push("");
   lines.push(
     "**État** : `relevée`, la version a été lue sur Scalingo. `non relevée`, la",
-    "valeur affichée vient du manifeste et non d'un constat. `en pause`,",
-    "l'application est hors périmètre et sa base n'est pas interrogée.",
+    "valeur affichée vient du manifeste et non d'un constat. `en pause`, la base",
+    "est lue mais jamais sauvegardée ni montée.",
     "",
   );
 
@@ -1631,7 +1708,6 @@ async function checkDatabases(targets: AppEntry[], token: string): Promise<void>
   if (!token && !fgp) return;
   let readCount = 0;
   for (const entry of targets) {
-    if (entry.paused) continue;
     let addons: Array<{ id: string; addon_provider: { id: string; name: string } }>;
     try {
       addons = await findDatabaseAddons(entry);
@@ -1648,6 +1724,8 @@ async function checkDatabases(targets: AppEntry[], token: string): Promise<void>
 
       // Une montee qu'on a decide de retenir n'est pas une echeance : la
       // signaler a chaque passage rendrait l'alerte permanente, donc ignoree.
+      // Une app en pause est dans ce cas, puisque rien n'y sera monte.
+      if (entry.paused) continue;
       if (nextVersion && crossesMajor(db.version, nextVersion) && entry.database?.major !== "allowed") {
         continue;
       }
@@ -2042,6 +2120,8 @@ async function main() {
     log("RELEVE DE L'ETAT REEL\n");
     let drifts = 0;
     for (const entry of targets) {
+      // Releve de toute facon par observePaused, a chaque passage.
+      if (entry.paused) continue;
       const key = keyOf(entry);
       const known = lock.apps[key];
       let real: LockEntry;
@@ -2105,7 +2185,8 @@ async function main() {
       stopped = true;
     } else if (outcome !== "error" && outcome !== "paused") {
       // Une app menee a son terme prouve que Scalingo repond, et rompt la serie.
-      // `paused` ne prouve rien : il se decide a la lecture du manifeste.
+      // `paused` ne prouve rien : une lecture qui passe ne dit pas qu'une
+      // ecriture passerait.
       interruptedScouts = 0;
     } else if (outcome === "error") {
       // Une interruption ne dit rien de la cible, le type Outcome le pose deja.

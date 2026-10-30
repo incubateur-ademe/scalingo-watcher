@@ -89,6 +89,11 @@ flottante, qui n'a pas de dépôt lié, dont le dépôt est lié sans branche, o
 dont le dernier déploiement ne désigne pas un commit. Seule la variable de l'outil est lue dans l'environnement de
 l'application, qui contient ses secrets en clair.
 
+**[fait]** `init` compare le propriétaire de chaque application au compte de
+l'accès. Une application dont ce compte n'est pas propriétaire est écrite en
+pause, avec un commentaire qui nomme son propriétaire. Derrière le proxy, le
+compte n'est pas lisible : `init` le dit une fois et ne déduit aucune pause.
+
 **[fait]** L'ordre du tableau `apps` est l'ordre de déploiement, de la moins
 critique à la plus critique.
 
@@ -105,6 +110,16 @@ instance s'écrit comme une règle nominative (`matchDepNames`) dans le
 
 **[fait]** Deux valeurs de politique seulement, `auto` et `pr`. Refuser une
 montée consiste à ne pas fusionner la pull request.
+
+**[fait]** Pause par application (`paused: true`) : l'application est lue à
+chaque passage et jamais écrite. Son état, sa version, son commit et sa base sont
+relevés, et son entrée de lock suit ce réel, comme sous `--reconcile` : les
+failles signalées et le tableau de bord portent sur ce qui tourne, et à la
+reprise le plan part d'un état juste. Ni déploiement, ni variable, ni
+sauvegarde, ni montée ou proposition de montée de base, ni quarantaine. Un écart
+avec le manifeste est affiché dans le plan et le tableau de bord (`en pause, en
+écart`), sans action. Usage visé : suivre une application dont le compte de
+l'accès n'est que collaborateur.
 
 **[fait]** Mode de sauvegarde par application : `required` ou `not-available`.
 Cette seconde valeur se pose consciemment après vérification, jamais par défaut.
@@ -699,9 +714,9 @@ compare la tête de leur dépôt à la date du dernier déploiement. C'est la se
 façon de voir qu'un redéploiement embarquerait du code différent.
 
 **[fait]** Une version de base non relevée est présentée comme déclarée et non
-comme constatée. C'est le cas d'une application en pause, dont la base n'est pas
-interrogée : afficher la cible du manifeste sans le dire la ferait passer pour un
-constat.
+comme constatée. C'est le cas d'une base que l'accès ne permet pas de lire, faute
+de blob de sauvegarde par exemple : afficher la cible du manifeste sans le dire
+la ferait passer pour un constat.
 
 **[fait]** L'équipe n'est prévenue que sur un changement d'état, pas à chaque
 retouche du tableau de bord. Celui-ci bouge dès qu'une version paraît en amont,

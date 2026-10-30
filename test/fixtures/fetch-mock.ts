@@ -7,11 +7,16 @@
  * version suivante dans la meme majeure. Le proxy rend un blob factice a chaque
  * generation. Tout autre appel repond 500.
  * OUTAGE=1 fait echouer la liste des addons, comme un proxy injoignable.
+ *
+ * Chaque app repond "running" sur un stack sans echeance. REAL (region/app ->
+ * { version, sha }) donne l'etat reel des apps qu'on veut pouvoir relever :
+ * leur variable d'outil et leur dernier deploiement.
  */
 
 import { appendFileSync } from "node:fs";
 
 const versions = JSON.parse(process.env.VERSIONS!) as Record<string, string>;
+const real = JSON.parse(process.env.REAL ?? "{}") as Record<string, { version: string; sha: string }>;
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -29,6 +34,22 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
     return json({ addons: [{ id: `${r[1]}~${r[2]}`, addon_provider: { id: "postgresql" } }] });
   }
   if (m === "POST" && /\/v1\/apps\/[^/]+\/addons\/[^/]+\/token$/.test(u)) return json({ addon: { token: "addon" } });
+  if (m === "GET" && /^https:\/\/api\.[^/]+\.scalingo\.com\/v1\/features\/stacks$/.test(u)) {
+    return json({ stacks: [{ id: "st-24", name: "scalingo-24", deprecated_at: null }] });
+  }
+  if (m === "GET" && (r = /^https:\/\/api\.([^/]+)\.scalingo\.com\/v1\/apps\/([^/?]+)(\/.*)?$/.exec(u))) {
+    const [, region, app, route = ""] = r;
+    if (route === "") return json({ app: { name: app, status: "running", stack_id: "st-24" } });
+    const state = real[`${region}/${app}`];
+    if (!state) return json({ error: "appel imprevu" }, 500);
+    if (route === "/variables") return json({ variables: [{ id: "var-1", name: "METABASE_VERSION", value: state.version }] });
+    if (route === "/deployments?per_page=1") {
+      return json({ deployments: [{ id: `dep-${app}`, status: "success", created_at: "2026-10-01T00:00:00Z", git_ref: state.sha }] });
+    }
+    if (route === `/deployments/dep-${app}/output`) {
+      return new Response("-----> Downloading Buildpack: https://github.com/Scalingo/metabase-buildpack\n", { status: 200 });
+    }
+  }
   if (m === "GET" && (r = /\/api\/databases\/([^/~]+)~([^/]+)$/.exec(u))) {
     const v = versions[`${r[1]}/${r[2]}`];
     return json({ database: { readable_version: v, next_version_id: v.split(".")[0] } });

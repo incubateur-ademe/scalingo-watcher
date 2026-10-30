@@ -13,6 +13,10 @@
  * et branche lies a l'app, sha du deploiement le plus recent, version de sa base
  * PostgreSQL. Un manifeste existant n'est ecrase qu'avec --force.
  *
+ * Une app dont le compte de l'acces n'est pas proprietaire est ecrite en pause :
+ * le watcher la lira sans jamais y ecrire. Si ce compte est illisible, derriere
+ * le proxy notamment, aucune pause n'est deduite.
+ *
  * Le lock n'est pas touche. La commande d'amorcage (apply.ts --adopt) est
  * affichee, a lancer apres relecture de l'ordre des apps.
  *
@@ -29,7 +33,9 @@ import { dirname, join } from "node:path";
 import { parse, stringify } from "yaml";
 import {
   apiHost,
+  appOwner,
   checkFleetData,
+  currentAccount,
   deployedSha,
   findDatabaseAddons,
   lastDeployment,
@@ -46,6 +52,9 @@ import { accessModes, flagValue, flagValues, resolvePaths, shown, type Paths } f
 import { toolName, UPSTREAM } from "./upstream.ts";
 
 export type InitEntry = AppRef & {
+  // Nom du proprietaire quand ce n'est pas le compte de l'acces : l'app est
+  // alors ecrite en pause.
+  foreignOwner?: string;
   backup?: "not-available";
   database?: string;
   source: { repo: string; branch: string; sha: string };
@@ -124,6 +133,9 @@ export function renderManifest(entries: readonly InitEntry[], schema: string): s
   entries.forEach((e, i) => {
     if (i > 0) lines.push("");
     lines.push(`  - app: ${scalar(e.app)}`, `    region: ${scalar(e.region)}`);
+    if (e.foreignOwner !== undefined) {
+      lines.push(`    # proprietaire ${e.foreignOwner.replace(/\s+/g, " ")}, hors compte : lue, jamais ecrite`, "    paused: true");
+    }
     if (e.backup) {
       lines.push("    # aucun addon de base releve par init : deploiement sans sauvegarde, a confirmer", `    backup: ${e.backup}`);
     }
@@ -162,7 +174,7 @@ async function repoLink(ref: AppRef): Promise<RepoLink | null> {
  * de l'app a son depot. Le sha est celui que --adopt relevera, pour que le plan
  * qui suit l'amorcage ne voie aucun ecart.
  */
-async function describeApp(ref: AppRef): Promise<Outcome> {
+async function describeApp(ref: AppRef, accountId: string | null): Promise<Outcome> {
   const { variables } = await reqApi<{ variables: Array<{ name: string; value: string }> }>(
     `${apiHost(ref.region)}/v1/apps/${ref.app}/variables`,
     ref.region,
@@ -192,9 +204,19 @@ async function describeApp(ref: AppRef): Promise<Outcome> {
     return { skipped: `depot lie sans branche (${link.owner}/${link.repo}, deploiement manuel) : branche a declarer a la main` };
   }
 
+  let foreignOwner: string | undefined;
+  if (accountId !== null) {
+    const owner = await appOwner(ref);
+    if (owner.id !== accountId) {
+      foreignOwner = owner.username;
+      notes.push(`proprietaire ${owner.username}, hors compte : ecrite en pause, lue mais jamais ecrite`);
+    }
+  }
+
   return {
     found: {
       ...ref,
+      ...(foreignOwner !== undefined ? { foreignOwner } : {}),
       source: { repo: `${link.owner}/${link.repo}`, branch: link.branch, sha },
       tool: { ...tool, upstream: UPSTREAM[tool.env].repo },
       notes,
@@ -254,6 +276,11 @@ async function main() {
   if (!openAccess(paths)) fail("Aucun acces configure.", accessModes(paths.fgp));
   const proxy = proxyUrl();
   if (proxy) log(`Acces par le proxy ${proxy}`);
+  const account = await currentAccount();
+  if ("unreadable" in account) {
+    log(`Compte de l'acces illisible (${account.unreadable}) : aucune app n'est mise en pause d'apres son proprietaire.`);
+  }
+  const accountId = "id" in account ? account.id : null;
 
   const outcomes: Array<{ ref: AppRef; outcome: Outcome }> = [];
   for (const region of regions) {
@@ -267,7 +294,7 @@ async function main() {
     outcomes.push(
       ...(await pool(refs, CONCURRENCY, async (ref) => ({
         ref,
-        outcome: await describeApp(ref).catch((e: Error): Outcome => ({ failed: e.message.slice(0, 160) })),
+        outcome: await describeApp(ref, accountId).catch((e: Error): Outcome => ({ failed: e.message.slice(0, 160) })),
       }))),
     );
   }
