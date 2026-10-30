@@ -1844,10 +1844,12 @@ try {
   });
   if (securedRun.status !== 0) console.log(securedRun.output);
   // Aucun acces a Scalingo : les avis de l'amont et le manifeste suffisent a
-  // rendre le verdict, et c'est le manifeste seul qui est edite.
+  // rendre le verdict, et c'est le manifeste seul qui est edite. L'hote est
+  // ancre : en sous-chaine, "https://ailleurs.test/api.github.com/" passerait.
+  const ADVISORY_CALL = /^GET https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/security-advisories\?/;
   check(
     "la proposition n'interroge que l'amont, jamais Scalingo",
-    [securedRun.status, securedRun.calls.filter((l) => !l.includes("api.github.com"))],
+    [securedRun.status, securedRun.calls.filter((l) => !ADVISORY_CALL.test(l))],
     [0, []],
   );
   const securedSrc = readFileSync(join(secured.fleet, "manifest.yaml"), "utf8");
@@ -1932,7 +1934,6 @@ try {
   // et jamais deployees par ce passage.
   const ONLY_PAUSED_SRC = fixtureSrc
     .replaceAll("version: v0.63.18", "version: v0.63.20")
-    .replace("    paused: true\n", "    paused: true\n")
     .replace(/(- app: beta-metabase[\s\S]*?)version: v0\.63\.20/, "$1version: v0.63.18");
   const pausedLock = JSON.parse(lockFixture) as { apps: Record<string, { tool: { version: string } }> };
   for (const [key, entry] of Object.entries(pausedLock.apps)) {
