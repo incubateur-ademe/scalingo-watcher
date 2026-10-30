@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.1.0...v1.1.1) (2026-10-30)
+
+
+### Corrections
+
+* **renovate:** suivre Metabase par github-tags, les releases ne portent pas les correctifs ([#25](https://github.com/incubateur-ademe/scalingo-watcher/issues/25)) ([a1eaacf](https://github.com/incubateur-ademe/scalingo-watcher/commit/a1eaacf6e1274b8f297497efe81cca2f26c49173))
+
 ## [1.1.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.0.5...v1.1.0) (2026-10-30)
 
 
