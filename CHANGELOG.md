@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.0.5...v1.1.0) (2026-10-30)
+
+
+### Nouveautés
+
+* une app en pause est lue a chaque passage, jamais ecrite ([#23](https://github.com/incubateur-ademe/scalingo-watcher/issues/23)) ([627cab8](https://github.com/incubateur-ademe/scalingo-watcher/commit/627cab8f77ca2e0862520a7a5b116cb64e1b6c9f))
+
+
+### Corrections
+
+* **fgp:** scopes des blobs bornes app par app ([#22](https://github.com/incubateur-ademe/scalingo-watcher/issues/22)) ([7d00820](https://github.com/incubateur-ademe/scalingo-watcher/commit/7d00820f997c7acc6d050062926aad6bd7f53441))
+* **init:** ecarter une app liee a son depot sans branche ([#21](https://github.com/incubateur-ademe/scalingo-watcher/issues/21)) ([ae17718](https://github.com/incubateur-ademe/scalingo-watcher/commit/ae1771823a8ea281ae981672e5836adb6ff61183))
+
 ## [1.0.5](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.0.4...v1.0.5) (2026-10-21)
 
 
