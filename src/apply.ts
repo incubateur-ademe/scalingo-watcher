@@ -622,6 +622,26 @@ async function shaIsOnBranch(repo: string, branch: string, sha: string): Promise
 
 const keyOf = (e: AppRef) => `${e.region}/${e.app}`;
 const sameTarget = (a: Target, b: Target) => a.sha === b.sha && a.version === b.version;
+const targetOf = (e: AppEntry): Target => ({ sha: e.source.sha, version: e.tool.version });
+
+/**
+ * La cible est atteinte quand le reel y correspond et qu'un deploiement reussi
+ * l'y a mise.
+ *
+ * Faire porter ce constat au seul couple version-commit laissait un echec se
+ * lire comme un succes : sur echec, la variable de version porte deja la
+ * nouvelle valeur, que l'outil ne remet pas, et le deploiement rate a pour
+ * git_ref le commit de la cible. Le releve concluait donc que la cible etait
+ * atteinte, levait la quarantaine, et la reconciliation suivante retentait la
+ * meme cible avec une sauvegarde fraiche, toutes les heures.
+ */
+export const targetReached = (
+  real: Pick<LockEntry, "source" | "tool" | "deployment">,
+  target: Target,
+): boolean =>
+  real.source.sha === target.sha &&
+  real.tool.version === target.version &&
+  real.deployment?.status === "success";
 
 /**
  * `failed` = Scalingo a rendu un statut terminal non reussi. La cible est en
@@ -745,15 +765,19 @@ async function observePaused(
   const pin = (e: { tool: { version: string | null }; source: { sha: string } }) =>
     `${e.tool.version ?? "non epinglee"} @ ${e.source.sha.slice(0, 7) || "?"}`;
   const status = "unreadable" in state ? "etat illisible" : `etat "${state.status}"`;
-  const reached = real.source.sha === entry.source.sha && real.tool.version === entry.tool.version;
+  // L'ecart s'annonce sur le couple version-commit, qui est ce que les deux
+  // lignes affichent : dire "ecart" en montrant deux fois le meme pin n'aurait
+  // aucun sens. La quarantaine, elle, demande la preuve d'un deploiement reussi.
+  const samePin = real.source.sha === entry.source.sha && real.tool.version === entry.tool.version;
   emit(`  ${key} : en pause, lue sans rien ecrire, ${status}, ${pin(real)}`);
-  if (!reached) emit(`    ecart avec le manifeste (${pin(entry)}), aucune action`);
+  if (!samePin) emit(`    ecart avec le manifeste (${pin(entry)}), aucune action`);
   if (current && (current.tool.version !== real.tool.version || current.source.sha !== real.source.sha)) {
     emit(`    a bouge hors du watcher, le lock disait ${pin(current)}`);
   }
   // Aucune sauvegarde n'a ete faite : la derniere connue reste la bonne. La
   // quarantaine tombe si l'app a atteint la cible, comme sous --reconcile.
-  lock.apps[key] = { ...real, backup: current?.backup ?? null, quarantine: reached ? null : (current?.quarantine ?? null) };
+  const quarantine = targetReached(real, targetOf(entry)) ? null : (current?.quarantine ?? null);
+  lock.apps[key] = { ...real, backup: current?.backup ?? null, quarantine };
   return "paused";
 }
 
@@ -779,7 +803,7 @@ async function applyApp(
   const key = keyOf(entry);
   const current = lock.apps[key];
   const sameRepo = current?.source.repo === entry.source.repo;
-  const target: Target = { sha: entry.source.sha, version: entry.tool.version };
+  const target = targetOf(entry);
 
   // La pause est une decision, pas un constat : elle vaut meme si l'app tourne.
   if (entry.paused) return observePaused(entry, lock, token, emit);
@@ -2159,8 +2183,7 @@ async function main() {
       // La quarantaine survit au releve, sinon chaque passage la leverait et on
       // retenterait indefiniment une cible qui echoue. Elle tombe en revanche si
       // l'app a atteint la cible entre-temps, quel qu'en soit le moyen.
-      const reached =
-        real.source.sha === entry.source.sha && real.tool.version === entry.tool.version;
+      const reached = targetReached(real, targetOf(entry));
       lock.apps[key] = { ...real, quarantine: reached ? null : (known?.quarantine ?? null) };
     }
     // Sans cette precision, "Aucune derive." precedait la derive d'une app en

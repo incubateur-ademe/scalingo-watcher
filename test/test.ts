@@ -40,6 +40,7 @@ import {
   readManifest,
   RENAMED_FIELDS,
   resolveAliases,
+  targetReached,
   writeOptions,
 } from "../src/apply.ts";
 import { upstreamKey, upstreamsDeclared } from "../src/audit.ts";
@@ -768,6 +769,29 @@ check("un alias * non plus", pinnedVersion("0.63.*"), null);
 check("v0.63 et v1.52 sont sur deux lignes", compareLines([0, 63, 18], [1, 52, 2], 1) < 0, true);
 check("v0.63 et v0.64 sont sur la meme ligne", compareLines([0, 63, 18], [0, 64, 0], 1), 0);
 check("une ligne de deux composants separe 0.63 de 0.64", compareLines([0, 63, 18], [0, 64, 0], 2) < 0, true);
+
+console.log("\nCible atteinte");
+
+// Le couple version-commit correspond aussi apres un echec : la variable porte
+// deja la nouvelle valeur, que l'outil ne remet pas, et le deploiement rate a
+// pour git_ref le commit de la cible. Sans la preuve d'un deploiement reussi,
+// le releve levait la quarantaine et la cible repartait toutes les heures.
+{
+  const CIBLE = { sha: "a".repeat(40), version: "v0.63.18" };
+  const releve = (status: string | null) => ({
+    source: { repo: "exemple/metabase-scalingo", sha: CIBLE.sha },
+    tool: { env: "METABASE_VERSION", version: CIBLE.version },
+    deployment: status ? { id: "dep-1", status, at: "2026-10-30T10:00:00.000Z" } : null,
+  });
+  check("un deploiement reussi sur la cible l'atteint", targetReached(releve("success"), CIBLE), true);
+  check("un deploiement rate ne l'atteint pas", targetReached(releve("build-error"), CIBLE), false);
+  check("aucun deploiement connu ne l'atteint pas", targetReached(releve(null), CIBLE), false);
+  check(
+    "un deploiement reussi sur une autre version ne l'atteint pas",
+    targetReached(releve("success"), { ...CIBLE, version: "v0.64.4.2" }),
+    false,
+  );
+}
 
 console.log("\nScopes des blobs du proxy");
 
@@ -1612,6 +1636,52 @@ try {
     "--prune garde son entree, l'app restant declaree",
     [pruneRun.status, readFileSync(join(pruned.fleet, "lock.json"), "utf8") === lockFixture, pruneRun.calls],
     [0, true, []],
+  );
+
+  console.log("\nQuarantaine levee sur preuve, contre un fetch simule");
+
+  // Le job de reconciliation du parc tourne a l'heure. Sur echec, le releve
+  // lisait la cible comme atteinte, effacait la quarantaine, et la meme cible
+  // repartait au passage suivant avec une sauvegarde fraiche, indefiniment.
+  const QUARANTINED = "osc-fr1/alpha-metabase";
+  const CIBLE = { sha: "a".repeat(40), version: "v0.63.18" };
+  const lockEnQuarantaine = () => {
+    const l = JSON.parse(lockFixture) as { apps: Record<string, Record<string, unknown>> };
+    l.apps[QUARANTINED].quarantine = {
+      target: CIBLE,
+      reason: "build-error",
+      at: "2026-10-29T10:00:00.000Z",
+      deploymentId: "dep-alpha-metabase",
+    };
+    return JSON.stringify(l, null, 2) + "\n";
+  };
+  const apresReleve = (status: string) => {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "lock.json"), lockEnQuarantaine());
+    const out = run(b, "apply.ts", ["--reconcile", ...FLEET, "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [QUARANTINED]: { ...CIBLE, status } }),
+    });
+    if (out.status !== 0) console.log(out.output);
+    return {
+      status: out.status,
+      quarantaine: Boolean(loadLock(join(b.fleet, "lock.json")).apps[QUARANTINED].quarantine),
+      ignoree: /alpha-metabase : en quarantaine sur cette cible/.test(out.output),
+      deploiement: out.calls.some((l) => /^POST \S+\/deployments$/.test(l)),
+    };
+  };
+
+  check(
+    "un deploiement rate sur la cible ne leve pas la quarantaine",
+    apresReleve("build-error"),
+    { status: 0, quarantaine: true, ignoree: true, deploiement: false },
+  );
+  // Elle doit tomber des que la cible est reellement atteinte, quel qu'en soit
+  // le moyen : sinon une app montee a la main resterait gelee pour toujours.
+  check(
+    "un deploiement reussi sur la cible la leve",
+    apresReleve("success"),
+    { status: 0, quarantaine: false, ignoree: false, deploiement: false },
   );
 
   console.log("\nPremier manifeste par init, contre un fetch simule");
