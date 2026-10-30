@@ -649,6 +649,29 @@ const majorInvalid = template();
 majorInvalid.apps[0].database = { version: "16.15.0-2", major: "oui" };
 check("database.major refuse une valeur libre", validate(majorInvalid), false);
 
+// Le gabarit ne declare aucune fenetre : le champ est facultatif, et c'est le
+// moteur, non le schema, qui porte le defaut. Ajv ne compile pas `useDefaults`,
+// donc le mot-cle `default` du schema n'est que de la documentation.
+check("un manifeste sans fenetre de garde reste valide", validate(fixture), true);
+
+const settleOff = template();
+settleOff.apps[0].settle = { window: 0 };
+check("une fenetre nulle est acceptee, c'est l'extinction", validate(settleOff), true);
+
+const settleEmpty = template();
+settleEmpty.apps[0].settle = {};
+check("une fenetre sans duree est refusee", validate(settleEmpty), false);
+
+// Une valeur donnee en millisecondes figerait la vague des heures sous le
+// verrou que la reconciliation suivante attend.
+const settleMs = template();
+settleMs.apps[0].settle = { window: 180000 };
+check("une duree donnee en millisecondes est refusee", validate(settleMs), false);
+
+const settleUnknownField = template();
+settleUnknownField.apps[0].settle = { window: 180, marker: "COMPLETE" };
+check("un champ inconnu dans settle est refuse", validate(settleUnknownField), false);
+
 const withUpstream = template();
 (withUpstream.apps[0].tool as Record<string, unknown>).upstream = { repo: "exemple/outil", line: 2 };
 check("tool.upstream est accepte", validate(withUpstream), true);
@@ -797,22 +820,25 @@ console.log("\nCible atteinte");
 console.log("\nSens de l'ecart avec le manifeste");
 
 {
-  const metabase = { env: "METABASE_VERSION" };
-  check("une cible anterieure recule", targetGoesBack(metabase, "v0.64.4.2", "v0.63.18"), true);
-  check("une cible posterieure non", targetGoesBack(metabase, "v0.63.18", "v0.64.4.2"), false);
-  check("une cible identique non", targetGoesBack(metabase, "v0.63.18", "v0.63.18"), false);
-  check("un correctif de la meme ligne recule", targetGoesBack(metabase, "v0.63.18", "v0.63.15"), true);
+  check("une cible anterieure recule", targetGoesBack("v0.64.4.2", "v0.63.18"), true);
+  check("une cible posterieure non", targetGoesBack("v0.63.18", "v0.64.4.2"), false);
+  check("une cible identique non", targetGoesBack("v0.63.18", "v0.63.18"), false);
+  check("un correctif anterieur recule", targetGoesBack("v0.63.18", "v0.63.15"), true);
   // Lue comme 0.63.0, une version glissante passerait pour une descente face a
   // n'importe quel correctif de sa ligne.
-  check("une cible glissante ne tranche pas", targetGoesBack(metabase, "v0.63.18", "v0.63.x"), false);
-  check("une version servie glissante non plus", targetGoesBack(metabase, "v0.63.x", "v0.63.18"), false);
-  // v1.52.2 date de 2024 quand v0.63.16 date de 2026 : les deux editions de
-  // Metabase ne s'ordonnent pas entre elles.
-  check("deux lignes ne s'ordonnent pas", targetGoesBack(metabase, "v1.52.2", "v0.64.4.2"), false);
-  check("une app sans variable de version ne tranche pas", targetGoesBack(metabase, null, "v0.63.18"), false);
-  // Sans amont declare, la ligne vaut un composant : nginx 1.27 a 1.26 recule.
-  check("un outil hors table se compare sur sa majeure", targetGoesBack({ env: "NGINX_VERSION" }, "1.27.4", "1.27.3"), true);
-  check("et pas d'une majeure a l'autre", targetGoesBack({ env: "NGINX_VERSION" }, "1.27.4", "2.0.0"), false);
+  check("une cible glissante ne tranche pas", targetGoesBack("v0.63.18", "v0.63.x"), false);
+  check("une version servie glissante non plus", targetGoesBack("v0.63.x", "v0.63.18"), false);
+  check("une app sans variable de version ne tranche pas", targetGoesBack(null, "v0.63.18"), false);
+  // Ecarter les lignes entre elles inversait les risques : la descente de
+  // majeure, la plus destructrice, passait quand un correctif anterieur etait
+  // refuse. Chez Metabase, la ligne est l'edition, et en descendre merite la
+  // meme decision explicite.
+  check("une descente de majeure recule", targetGoesBack("12.1.0", "11.6.3"), true);
+  check("une montee de majeure non", targetGoesBack("1.27.4", "2.0.0"), false);
+  check("l'Enterprise vers l'OSS recule", targetGoesBack("v1.52.2", "v0.64.4.2"), true);
+  // Rien n'est compare au-dela des composants numeriques de tete : le filet a
+  // ce trou, et la docstring le dit plutot que de le laisser surprendre.
+  check("un suffixe non numerique n'est pas vu", targetGoesBack("1.27.4-2", "1.27.4-1"), false);
 }
 
 console.log("\nScopes des blobs du proxy");
@@ -1682,7 +1708,7 @@ try {
     if (out.status !== 0) console.log(out.output);
     return {
       status: out.status,
-      refusee: /DESCENTE DE VERSION : l'app tourne v0\.64\.4\.2, le manifeste demande v0\.63\.18/.test(out.output),
+      refusee: /DESCENTE DE VERSION : METABASE_VERSION porte v0\.64\.4\.2, le manifeste demande v0\.63\.18/.test(out.output),
       ecrit: writeCalls(out.calls),
     };
   };
@@ -1710,8 +1736,10 @@ try {
   // repartait au passage suivant avec une sauvegarde fraiche, indefiniment.
   const QUARANTINED = "osc-fr1/alpha-metabase";
   const CIBLE = { sha: "a".repeat(40), version: "v0.63.18" };
-  const lockEnQuarantaine = () => {
+  const lockEnQuarantaine = (sha = CIBLE.sha) => {
     const l = JSON.parse(lockFixture) as { apps: Record<string, Record<string, unknown>> };
+    l.apps[QUARANTINED].source = { repo: "exemple/metabase-scalingo", sha };
+    l.apps[QUARANTINED].backup = { id: "bkp-42", at: "2026-10-29T09:00:00.000Z" };
     l.apps[QUARANTINED].quarantine = {
       target: CIBLE,
       reason: "build-error",
@@ -1720,34 +1748,119 @@ try {
     };
     return JSON.stringify(l, null, 2) + "\n";
   };
-  const apresReleve = (status: string) => {
+  const apresReleve = (status: string, sha = CIBLE.sha, lockSha?: string) => {
     const b = sandbox();
-    writeFileSync(join(b.fleet, "lock.json"), lockEnQuarantaine());
+    writeFileSync(join(b.fleet, "lock.json"), lockEnQuarantaine(lockSha));
     const out = run(b, "apply.ts", ["--reconcile", ...FLEET, "--out-dir", "../sortie"], {
       SCALINGO_API_TOKEN: "faux",
-      REAL: JSON.stringify({ [QUARANTINED]: { ...CIBLE, status } }),
+      REAL: JSON.stringify({ [QUARANTINED]: { version: CIBLE.version, sha, status } }),
     });
     if (out.status !== 0) console.log(out.output);
+    const entry = loadLock(join(b.fleet, "lock.json")).apps[QUARANTINED];
     return {
       status: out.status,
-      quarantaine: Boolean(loadLock(join(b.fleet, "lock.json")).apps[QUARANTINED].quarantine),
+      quarantaine: Boolean(entry.quarantine),
       ignoree: /alpha-metabase : en quarantaine sur cette cible/.test(out.output),
       deploiement: out.calls.some((l) => /^POST \S+\/deployments$/.test(l)),
+      sauvegarde: entry.backup?.id ?? null,
     };
   };
 
-  check(
-    "un deploiement rate sur la cible ne leve pas la quarantaine",
-    apresReleve("build-error"),
-    { status: 0, quarantaine: true, ignoree: true, deploiement: false },
-  );
-  // Elle doit tomber des que la cible est reellement atteinte, quel qu'en soit
-  // le moyen : sinon une app montee a la main resterait gelee pour toujours.
-  check(
-    "un deploiement reussi sur la cible la leve",
-    apresReleve("success"),
-    { status: 0, quarantaine: false, ignoree: false, deploiement: false },
-  );
+  check("un deploiement rate sur la cible ne leve pas la quarantaine", apresReleve("build-error"), {
+    status: 0,
+    quarantaine: true,
+    ignoree: true,
+    deploiement: false,
+    sauvegarde: "bkp-42",
+  });
+  // Elle doit tomber des que la cible est atteinte, quel qu'en soit le moyen :
+  // sinon une app montee a la main resterait gelee pour toujours. La preuve
+  // reste le statut rendu par Scalingo, que la fenetre de garde ne rejoue pas au
+  // releve : un deploiement fait hors du watcher est cru sur sa parole.
+  check("un deploiement reussi sur la cible la leve", apresReleve("success"), {
+    status: 0,
+    quarantaine: false,
+    ignoree: false,
+    deploiement: false,
+    sauvegarde: "bkp-42",
+  });
+  // git_ref qui n'est pas un sha, ce que rend un deploiement declenche depuis le
+  // dashboard : le repli prenait le sha du manifeste, donc l'egalite cherchee,
+  // et levait la quarantaine sans avoir rien constate.
+  check("un git_ref illisible ne fabrique plus l'egalite de sha", apresReleve("success", "main", "c".repeat(40)), {
+    status: 0,
+    quarantaine: true,
+    ignoree: true,
+    deploiement: false,
+    sauvegarde: "bkp-42",
+  });
+
+  console.log("\nFenetre de garde apres deploiement, contre un fetch simule");
+
+  // Le 2026-10-30 : Scalingo a conclu reussi un deploiement dont Metabase
+  // migrait encore sa base, et le succes n'a pu etre etabli qu'en lisant les
+  // journaux applicatifs. La fenetre existe pour que le feu vert de l'eclaireur
+  // dise quelque chose.
+  const DELTA = "osc-secnum-fr1/delta-metabase";
+  // delta-metabase est la derniere app du gabarit, et la seule sans base ni
+  // sauvegarde : son deploiement se joue en quelques appels.
+  const bumped = (() => {
+    const was = "version: v0.63.18";
+    const at = fixtureSrc.lastIndexOf(was);
+    return `${fixtureSrc.slice(0, at)}version: v0.63.19${fixtureSrc.slice(at + was.length)}`;
+  })();
+  const withSettle = bumped.replace("    backup: not-available\n", "    backup: not-available\n    settle:\n      window: 1\n");
+
+  const deploiement = (manifestSrc: string, env: Record<string, string> = {}) => {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), manifestSrc);
+    const out = run(b, "apply.ts", [...FLEET, "--app", "delta", "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [DELTA]: { version: "v0.63.18", sha: "a".repeat(40) } }),
+      ...env,
+    });
+    const entry = loadLock(join(b.fleet, "lock.json")).apps[DELTA];
+    return {
+      status: out.status,
+      version: entry.tool.version,
+      quarantaine: entry.quarantine?.reason ?? null,
+      releves: out.calls.filter((l) => l.endsWith("/events?from=1")).length,
+      vague: /Echec sur l'eclaireur/.test(out.output),
+    };
+  };
+
+  check("sans fenetre declaree, rien n'est relu et le statut conclut seul", deploiement(bumped), {
+    status: 0,
+    version: "v0.63.19",
+    quarantaine: null,
+    releves: 0,
+    vague: false,
+  });
+  check("une fenetre que rien ne trouble conclut au succes", deploiement(withSettle), {
+    status: 0,
+    version: "v0.63.19",
+    quarantaine: null,
+    releves: 2,
+    vague: false,
+  });
+  // Le lock ne doit pas porter la nouvelle version, et la vague doit s'arreter
+  // la : c'est tout l'objet du defaut.
+  check("un redemarrage en erreur pendant la fenetre met en quarantaine", deploiement(withSettle, { CRASH: "1" }), {
+    status: 1,
+    version: "v0.63.18",
+    quarantaine: "redemarrage en erreur pendant la fenetre de garde (restart)",
+    releves: 2,
+    vague: true,
+  });
+  // La relecture du statut en fin de fenetre attrape ce que les evenements ont
+  // pu rater, mais seulement sur un statut qui dit quelque chose.
+  check("une app eteinte au bout de la fenetre aussi", deploiement(withSettle, { STOPPED: "1" }), {
+    status: 1,
+    version: "v0.63.18",
+    quarantaine: 'app "stopped" au bout de la fenetre de garde',
+    releves: 2,
+    vague: true,
+  });
 
   console.log("\nPremier manifeste par init, contre un fetch simule");
 

@@ -30,6 +30,7 @@ import { compareLines, toolName, upstreamOf, type ToolDeclaration, type Upstream
 
 type Policy = { minor?: "auto" | "pr"; major?: "auto" | "pr" };
 type Backup = "required" | "not-available";
+type Settle = { window: number };
 
 type AppEntry = {
   app: string;
@@ -37,6 +38,7 @@ type AppEntry = {
   paused?: boolean;
   database?: { version: string; major?: "hold" | "allowed" };
   backup?: Backup;
+  settle?: Settle;
   source: { repo: string; branch: string; sha: string };
   tool: ToolDeclaration & { version: string };
 };
@@ -44,7 +46,7 @@ type AppEntry = {
 /** Ce qui designe une app sur Scalingo, avant meme qu'elle figure au manifeste. */
 export type AppRef = Pick<AppEntry, "app" | "region">;
 
-type Manifest = { defaults: { policy?: Policy; backup?: Backup }; apps: AppEntry[] };
+type Manifest = { defaults: { policy?: Policy; backup?: Backup; settle?: Settle }; apps: AppEntry[] };
 
 type Target = { sha: string; version: string };
 
@@ -503,6 +505,86 @@ async function deploy(entry: AppEntry, target: Target) {
   }
 }
 
+// ---------------------------------------------------------------- fenetre de garde
+//
+// Un statut terminal reussi ne veut pas dire que l'outil tourne. Scalingo
+// conclut un deploiement des que le conteneur ecoute son port. Metabase ouvre
+// Jetty avant de migrer sa base : le port repond en quelques secondes, le
+// deploiement est marque reussi, puis la migration tourne, et un echec la fait
+// sortir en code 1. D'ici la, le lock porte deja "deployed" et l'eclaireur a
+// donne son feu vert aux suivantes, qui partent a trois de front.
+//
+// La fenetre de garde relit donc les evenements de l'app pendant le temps
+// declare, a la recherche d'un redemarrage que personne n'a demande.
+//
+// Deux chemins ecartes. Une sonde sur l'app elle-meme : derriere un
+// oauth2-proxy, c'est le wrapper qui prend $PORT, et sa disponibilite ne dit
+// plus rien de l'outil deploye. Une lecture des journaux applicatifs : leur URL
+// vit sur un autre hote que l'API, donc hors de portee d'un blob du proxy, elle
+// porte son jeton en clair, et la plateforme jette des lignes au-dela de son
+// debit d'ingestion, ce qui rendrait un marqueur absent indiscernable d'un echec.
+//
+// Ce que la fenetre prouve est borne, et il faut le dire : non pas que l'outil a
+// fini de demarrer, mais qu'il n'est pas tombe dans le temps qu'on lui a laisse.
+
+const CRASH_EVENTS = new Set(["crash", "repeated_crash"]);
+const BROKEN = new Set(["crashed", "stopped"]);
+type AppEvent = { id: string; type: string; type_data?: { reason?: string } };
+
+/** Vrai pour un evenement qui dit que l'app est tombee, et non qu'on l'a touchee. */
+const unexpectedRestart = (e: AppEvent) =>
+  CRASH_EVENTS.has(e.type) || (e.type === "restart" && e.type_data?.reason === "unexpected_failure");
+
+async function readEvents(entry: AppEntry): Promise<AppEvent[]> {
+  // `from` compte en heures, une au minimum. La premiere page suffit : un
+  // redemarrage qui vient de se produire y figure en tete.
+  const { events } = await reqApi<{ events?: AppEvent[] }>(
+    `${apiHost(entry.region)}/v1/apps/${entry.app}/events?from=1`,
+    entry.region,
+  );
+  // Une forme inattendue doit se dire : une liste vide ferait passer la fenetre
+  // pour une surveillance alors qu'elle ne regarderait rien.
+  if (!Array.isArray(events)) throw new Error(`reponse sans liste d'evenements sur ${keyOf(entry)}`);
+  return events;
+}
+
+/**
+ * Raison de refuser le deploiement, ou null si rien ne s'est manifeste.
+ *
+ * Les evenements deja la ne comptent pas : seuls comptent ceux qui apparaissent
+ * ensuite, ce qui evite de comparer notre horloge a celle de la plateforme.
+ *
+ * Une lecture impossible leve plutot que de rendre un echec : le moteur
+ * distingue le rejet, qui met en quarantaine, de l'interruption, qui laisse le
+ * lock en l'etat. C'est par la qu'arrive le refus du proxy quand fgp.json
+ * precede ce champ, et son message renvoie a la regeneration des blobs.
+ */
+async function settleOut(entry: AppEntry, window: number, emit: (line: string) => void): Promise<string | null> {
+  emit(`    fenetre de garde, ${window} s...`);
+  const seen = new Set((await readEvents(entry)).map((e) => e.id));
+  const deadline = Date.now() + window * 1000;
+  for (;;) {
+    await sleep(Math.min(POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())));
+    const fresh = (await readEvents(entry)).filter((e) => !seen.has(e.id));
+    for (const e of fresh) seen.add(e.id);
+    const fallen = fresh.find(unexpectedRestart);
+    if (fallen) return `redemarrage en erreur pendant la fenetre de garde (${fallen.type})`;
+    if (Date.now() >= deadline) break;
+  }
+  // Le statut d'app ne suffirait pas a lui seul : la plateforme ne marque
+  // `crashed` qu'au treizieme crash consecutif, soit plusieurs heures, et l'app
+  // se lit `running` pendant toute la boucle. Il attrape en revanche une app
+  // eteinte ou deja abandonnee, pour le prix d'une lecture.
+  //
+  // Seuls ces deux statuts disent quelque chose. Les etats transitoires,
+  // `booting`, `restarting` et `scaling`, ne prouvent rien : refuser dessus
+  // aurait mis en quarantaine une app que quelqu'un redimensionne pendant la
+  // fenetre, pour une raison etrangere au deploiement.
+  const state = await readAppStatus(entry);
+  if ("unreadable" in state) throw new Error(`statut illisible apres la fenetre de garde : ${state.unreadable}`);
+  return BROKEN.has(state.status) ? `app "${state.status}" au bout de la fenetre de garde` : null;
+}
+
 /** Les buildpacks reellement utilises ne sont lisibles que dans les logs du build. */
 async function readBuildpacks(entry: AppEntry, deploymentId: string) {
   // Cette route rend du texte brut, pas du JSON : elle ne passe pas par req().
@@ -652,20 +734,25 @@ export const targetReached = (
  * binaire refuse de demarrer. Et une migration ne se defait pas en redeployant
  * l'ancienne version, seulement en restaurant la base.
  *
- * Deux reserves, qui rendent faux plutot que de trancher a tort :
- * - une version glissante ne designe pas ce qui est servi, d'ou pinnedVersion
- *   et non parseSemver : v0.63.x lue comme 0.63.0 passerait pour une descente
- *   face a n'importe quel correctif de sa ligne ;
- * - deux lignes publiees en parallele ne s'ordonnent pas entre elles. Chez
- *   Metabase, v1.52.2 date de 2024 quand v0.63.16 date de 2026 : comparer leurs
- *   numeros ne dit rien de leur anciennete.
+ * La comparaison est purement numerique, sans egard pour les lignes de
+ * publication. Un changement de ligne vers un numero inferieur est donc refuse
+ * comme le reste : chez Metabase c'est un passage de l'Enterprise a l'OSS, qui
+ * merite une decision explicite au moins autant qu'une descente ordinaire.
+ * Ecarter les lignes entre elles aurait inverse les risques pour tout autre
+ * outil, ou le premier composant est bien la majeure : la descente la plus
+ * destructrice, de 12.1 a 11.6, serait passee quand 12.1.3 vers 12.1.0 etait
+ * refusee.
+ *
+ * Deux trous, que la fonction ne pretend pas couvrir. Une version glissante ne
+ * designe pas ce qui est servi, d'ou pinnedVersion et non parseSemver : v0.63.x
+ * lue comme 0.63.0 passerait pour une descente face a tout correctif de sa
+ * ligne. Et rien n'est compare au-dela des composants numeriques de tete, donc
+ * 1.27.4-2 vers 1.27.4-1 n'est pas vu.
  */
-export function targetGoesBack(tool: ToolDeclaration, deployed: string | null, target: string): boolean {
+export function targetGoesBack(deployed: string | null, target: string): boolean {
   if (!deployed) return false;
   const [running, wanted] = [pinnedVersion(deployed), pinnedVersion(target)];
-  if (!running || !wanted) return false;
-  if (compareLines(running, wanted, upstreamOf(tool)?.line ?? 1) !== 0) return false;
-  return cmpVersion(wanted, running) < 0;
+  return running !== null && wanted !== null && cmpVersion(wanted, running) < 0;
 }
 
 /**
@@ -802,6 +889,9 @@ async function observePaused(
   // Aucune sauvegarde n'a ete faite : la derniere connue reste la bonne. La
   // quarantaine tombe si l'app a atteint la cible, comme sous --reconcile.
   const quarantine = targetReached(real, targetOf(entry)) ? null : (current?.quarantine ?? null);
+  // Sans cette ligne, une quarantaine maintenue sur une app dont le pin
+  // correspond ne s'expliquait nulle part.
+  if (samePin && quarantine) emit(`    quarantaine maintenue, aucun deploiement reussi sur cette cible`);
   lock.apps[key] = { ...real, backup: current?.backup ?? null, quarantine };
   return "paused";
 }
@@ -937,12 +1027,19 @@ async function applyApp(
   // dit reellement en service : apres un echec, la variable porte la nouvelle
   // valeur sans que le binaire ait change, et refuser le retour en arriere
   // serait precisement refuser la seule reaction sensee.
-  if (!OPT.force && everDeployed && targetGoesBack(entry.tool, current!.tool.version, target.version)) {
-    emit(`    DESCENTE DE VERSION : l'app tourne ${current!.tool.version}, le manifeste demande ${target.version}`);
+  if (!OPT.force && everDeployed && targetGoesBack(current!.tool.version, target.version)) {
+    // "la variable porte" et non "l'app tourne" : c'est tout ce qu'on sait. La
+    // variable dit la version du prochain build, et personne n'expose celle du
+    // binaire en service. Une variable changee a la main sans deploiement fait
+    // donc refuser une cible que l'app servait deja, et c'est assume : les deux
+    // cas se resolvent du meme geste, regarder pourquoi le reel et le manifeste
+    // ne disent pas la meme chose.
+    const was = `${entry.tool.env} porte ${current!.tool.version}`;
+    emit(`    DESCENTE DE VERSION : ${was}, le manifeste demande ${target.version}`);
     emit(`    aligne le manifeste sur ce qui tourne, ou restaure la base avant de forcer la descente`);
     note(
       key,
-      `descente de version : l'app tourne ${current!.tool.version}, le manifeste demande ${target.version}. ` +
+      `descente de version : ${was}, le manifeste demande ${target.version}. ` +
         `Aligner le manifeste sur ce qui tourne, ou restaurer la base avant de forcer la descente par --force --app.`,
     );
     return "rejected";
@@ -951,6 +1048,10 @@ async function applyApp(
   if (OPT.dryRun) return "planned";
 
   const backupMode: Backup = entry.backup ?? manifest.defaults.backup ?? "required";
+  // Fenetre nulle par defaut : le statut du deploiement conclut seul, aucun
+  // appel de plus, soit le comportement d'avant ce champ. La surcharge se fait
+  // en bloc, un objet ne s'heritant pas cle par cle.
+  const settle: Settle = entry.settle ?? manifest.defaults.settle ?? { window: 0 };
   let backup: LockEntry["backup"] = current?.backup ?? null;
 
   try {
@@ -968,7 +1069,12 @@ async function applyApp(
     emit(`    deploiement...`);
     const dep = await deploy(entry, target);
 
-    if (dep.status !== "success") {
+    // Le statut de Scalingo ne dit qu'une chose : le conteneur a repondu. La
+    // fenetre de garde, quand elle est declaree, verifie qu'il tient.
+    const failure =
+      dep.status !== "success" ? dep.status : settle.window > 0 ? await settleOut(entry, settle.window, emit) : null;
+
+    if (failure) {
       lock.apps[key] = {
         ...(current ?? {
           source: { repo: entry.source.repo, sha: "" },
@@ -979,10 +1085,10 @@ async function applyApp(
           quarantine: null,
         }),
         backup,
-        quarantine: { target, reason: dep.status, at: new Date().toISOString(), deploymentId: dep.id },
+        quarantine: { target, reason: failure, at: new Date().toISOString(), deploymentId: dep.id },
       };
-      emit(`    ECHEC (${dep.status}), mise en quarantaine`);
-      note(key, `deploiement en echec (${dep.status}), mise en quarantaine.`);
+      emit(`    ECHEC (${failure}), mise en quarantaine`);
+      note(key, `deploiement en echec (${failure}), mise en quarantaine.`);
       return "failed";
     }
 
@@ -2211,7 +2317,11 @@ async function main() {
       const known = lock.apps[key];
       let real: LockEntry;
       try {
-        real = await adoptApp(entry);
+        // Le repli sur le sha du lock, et non sur celui du manifeste : quand le
+        // git_ref du dernier deploiement n'est pas un sha, prendre celui du
+        // manifeste fabriquait l'egalite qui fait conclure que la cible est
+        // atteinte, et levait la quarantaine sans rien avoir constate.
+        real = await adoptApp(entry, log, known?.source.sha || entry.source.sha);
       } catch (e) {
         log(`  ${key} : releve impossible (${(e as Error).message})`);
         continue;
@@ -2225,8 +2335,15 @@ async function main() {
       // La quarantaine survit au releve, sinon chaque passage la leverait et on
       // retenterait indefiniment une cible qui echoue. Elle tombe en revanche si
       // l'app a atteint la cible entre-temps, quel qu'en soit le moyen.
+      // adoptApp ne releve pas les sauvegardes, qui ne se lisent pas sur l'app :
+      // les ecraser par null faisait perdre le point de restauration, c'est-a-dire
+      // ce dont on a besoin precisement quand une migration a mal tourne.
       const reached = targetReached(real, targetOf(entry));
-      lock.apps[key] = { ...real, quarantine: reached ? null : (known?.quarantine ?? null) };
+      lock.apps[key] = {
+        ...real,
+        backup: known?.backup ?? null,
+        quarantine: reached ? null : (known?.quarantine ?? null),
+      };
     }
     // Sans cette precision, "Aucune derive." precedait la derive d'une app en
     // pause, annoncee juste apres dans l'application.

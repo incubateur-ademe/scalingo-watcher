@@ -15,6 +15,12 @@
  * vaut "success" a defaut.
  * DENIED=1 fait refuser par le proxy tout appel qui passe par lui, faute de scope,
  * hormis la liste des apps.
+ *
+ * Un deploiement est accepte et conclu du premier coup, au statut de REAL.
+ * CRASH=1 fait apparaitre un redemarrage en erreur dans les evenements de l'app
+ * a partir du deuxieme releve, soit pendant la fenetre de garde et non avant,
+ * ce qui est le scenario que la fenetre existe pour attraper.
+ * STOPPED=1 eteint l'app une fois son deploiement declenche.
  */
 
 import { appendFileSync } from "node:fs";
@@ -27,6 +33,10 @@ const real = JSON.parse(process.env.REAL ?? "{}") as Record<
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+const AT = "2026-10-01T00:00:00Z";
+let eventReads = 0;
+let deployTriggered = false;
 
 globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   const u = String(url);
@@ -58,7 +68,12 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   }
   if (m === "GET" && (r = /^https:\/\/api\.([^/]+)\.scalingo\.com\/v1\/apps\/([^/?]+)(\/.*)?$/.exec(u))) {
     const [, region, app, route = ""] = r;
-    if (route === "") return json({ app: { name: app, status: "running", stack_id: "st-24" } });
+    if (route === "") {
+      // STOPPED=1 : l'app s'eteint apres son deploiement, et pas avant, sinon
+      // le garde-fou des etats non deployables l'ecarterait en amont.
+      const status = process.env.STOPPED && deployTriggered ? "stopped" : "running";
+      return json({ app: { name: app, status, stack_id: "st-24" } });
+    }
     const state = real[`${region}/${app}`];
     if (!state) return json({ error: "appel imprevu" }, 500);
     if (route === "/variables") return json({ variables: [{ id: "var-1", name: "METABASE_VERSION", value: state.version }] });
@@ -69,9 +84,35 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
         ],
       });
     }
+    if (route === `/deployments/dep-${app}`) {
+      return json({ deployment: { id: `dep-${app}`, status: state.status ?? "success", created_at: AT } });
+    }
     if (route === `/deployments/dep-${app}/output`) {
       return new Response("-----> Downloading Buildpack: https://github.com/Scalingo/metabase-buildpack\n", { status: 200 });
     }
+    if (route === "/events?from=1") {
+      eventReads++;
+      const fallen = process.env.CRASH && eventReads > 1;
+      return json({
+        events: [
+          ...(fallen ? [{ id: "ev-crash", type: "restart", created_at: AT, type_data: { reason: "unexpected_failure" } }] : []),
+          // Deja la avant la fenetre : un releve qui le compterait refuserait
+          // tous les deploiements.
+          { id: "ev-deploiement", type: "deployment", created_at: AT },
+        ],
+      });
+    }
+  }
+
+  // Ecritures sur une app : variable de version et declenchement du deploiement.
+  if ((m === "POST" || m === "PATCH") && (r = /^https:\/\/api\.([^/]+)\.scalingo\.com\/v1\/apps\/([^/?]+)(\/.+)$/.exec(u))) {
+    const [, region, app, route] = r;
+    if (!real[`${region}/${app}`]) return json({ error: "appel imprevu" }, 500);
+    if (route === "/deployments") {
+      deployTriggered = true;
+      return json({ deployment: { id: `dep-${app}` } });
+    }
+    if (/^\/variables(\/.+)?$/.test(route)) return json({ variable: { id: "var-1" } });
   }
   if (m === "GET" && (r = /\/api\/databases\/([^/~]+)~([^/]+)$/.exec(u))) {
     const v = versions[`${r[1]}/${r[2]}`];
