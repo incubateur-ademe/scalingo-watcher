@@ -3,11 +3,12 @@
   "description": "Versioning de Metabase et fusion de ses versions dans le manifeste, selon defaults.policy : correctifs fusionnes seuls et montees fonctionnelles en PR quand la politique est absente.",
   "packageRules": [
     {
-      "description": "Metabase publie 0.x pour l'OSS et 1.x pour l'EE : ce sont deux lignes distinctes, jamais comparables entre elles. Le groupe compatibility les isole. Consequence sur les updateTypes : major = 2e chiffre (0.63 -> 0.64, montee fonctionnelle), minor = 3e chiffre (0.63.15 -> 0.63.16, correctif).",
+      "description": "Metabase publie 0.x pour l'OSS et 1.x pour l'EE : ce sont deux lignes distinctes, jamais comparables entre elles. Le groupe compatibility les isole. Consequence sur les updateTypes : major = 2e chiffre (0.63 -> 0.64, montee fonctionnelle), minor = 3e chiffre (0.63.15 -> 0.63.16, correctif).\n\nallowedVersions borne la veille a la ligne 0.64, qui est la LTS courante (fin de vie 2027-12-01). C'est le prix de la source github-tags : les tags exposent la ligne 0.65, non-LTS et en fin de vie le 2027-01-01, que les releases GitHub n'exposaient pas. Sans cette borne, Renovate ouvrirait une pull request permanente demandant de quitter la LTS pour une ligne plus courte. A editer au prochain changement de LTS. La forme predicat regex est voulue : `<0.65` tomberait dans le repli npm-semver, isVersion(\"0.65\") etant faux sous ce versioning.",
       "matchPackageNames": [
         "metabase/metabase"
       ],
       "versioning": "regex:^v?(?<compatibility>\\d+)\\.(?<major>\\d+)\\.(?<minor>\\d+)(?:\\.(?<patch>\\d+))?$",
+      "allowedVersions": "/^v?0\\.64\\./",
       "commitMessageTopic": "Metabase"
     },
     {
@@ -17,9 +18,6 @@
       ],
       "matchPackageNames": [
         "metabase/metabase"
-      ],
-      "matchDatasources": [
-        "github-releases"
       ],
       "matchUpdateTypes": [
         "minor",
@@ -35,9 +33,6 @@
       ],
       "matchPackageNames": [
         "metabase/metabase"
-      ],
-      "matchDatasources": [
-        "github-releases"
       ],
       "matchDepTypes": [
         "/\\bminor=pr\\b/"
@@ -56,9 +51,6 @@
       "matchPackageNames": [
         "metabase/metabase"
       ],
-      "matchDatasources": [
-        "github-releases"
-      ],
       "matchUpdateTypes": [
         "major"
       ],
@@ -72,9 +64,6 @@
       ],
       "matchPackageNames": [
         "metabase/metabase"
-      ],
-      "matchDatasources": [
-        "github-releases"
       ],
       "matchDepTypes": [
         "/\\bmajor=auto\\b/"

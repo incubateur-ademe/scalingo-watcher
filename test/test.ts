@@ -398,10 +398,11 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
     [[4, ["outil minor= major="]], { minor: undefined, major: undefined }],
   );
 
-  const metabase = (policy: string) =>
+  const metabaseVia = (policy: string, datasource: string) =>
     ["patch", "minor", "major"].map((updateType) =>
-      ruleValue(RULES, { manager: "custom.regex", packageName: "metabase/metabase", datasource: "github-releases", depType: `outil ${policy}`, updateType }, "automerge"),
+      ruleValue(RULES, { manager: "custom.regex", packageName: "metabase/metabase", datasource, depType: `outil ${policy}`, updateType }, "automerge"),
     );
+  const metabase = (policy: string) => metabaseVia(policy, "github-tags");
   check(
     "la politique decide de l'automerge des versions de Metabase, correctifs seuls par defaut",
     ["minor= major=", "minor=auto major=pr", "minor=pr major=pr", "minor=auto major=auto", "minor=pr major=auto"].map((p) => [p, metabase(p)]),
@@ -411,6 +412,17 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
       ["minor=pr major=pr", [false, false, false]],
       ["minor=auto major=auto", [true, true, true]],
       ["minor=pr major=auto", [false, false, true]],
+    ],
+  );
+
+  // Les regles de Metabase ne filtrent plus la datasource : un parc dont le
+  // manifeste porte encore `github-releases` garde sa politique apres la bascule.
+  check(
+    "la politique de Metabase ne depend pas de la source des versions",
+    ["github-tags", "github-releases"].map((d) => metabaseVia("minor=auto major=pr", d)),
+    [
+      [true, true, false],
+      [true, true, false],
     ],
   );
 
@@ -1488,7 +1500,7 @@ try {
   check(
     "chaque version generee est lue par Renovate, avec l'amont de l'outil",
     extract(versionManager, generated.src).map((g) => [g.depName, g.datasource, g.packageName, g.currentValue]),
-    generatedApps.map((a) => [a.app, "github-releases", upstreamOf(a.tool)?.repo, a.tool.version]),
+    generatedApps.map((a) => [a.app, "github-tags", upstreamOf(a.tool)?.repo, a.tool.version]),
   );
   check(
     "la politique et le $schema generes sont relus par Renovate",
