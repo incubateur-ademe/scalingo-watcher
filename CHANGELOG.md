@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.1.2...v1.2.0) (2026-10-30)
+
+
+### Nouveautés
+
+* **apply:** verifier un deploiement, refuser une descente, tenir la quarantaine ([#30](https://github.com/incubateur-ademe/scalingo-watcher/issues/30)) ([919f926](https://github.com/incubateur-ademe/scalingo-watcher/commit/919f926f1e7e3b754aaa3e4a28357e6df1548c3c))
+
 ## [1.1.2](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.1.1...v1.1.2) (2026-10-30)
 
 
