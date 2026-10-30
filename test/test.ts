@@ -32,10 +32,10 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import { parse, parseDocument } from "yaml";
 import {
   backupAddon,
+  describeAdvisoryProposal,
   describeProposal,
   describeTools,
   loadLock,
-  pinnedVersion,
   policyReadByRenovate,
   readManifest,
   RENAMED_FIELDS,
@@ -49,7 +49,7 @@ import { renderManifest } from "../src/init.ts";
 import { compose, matrixPayload, slackPayload, teamsPayload } from "../src/notify.ts";
 import { apiScopes, backupScopes, deniedByProxy } from "../src/fgp-scopes.ts";
 import { DEFAULT_FGP_URL, flagValue, flagValues, outFile, resolvePaths } from "../src/options.ts";
-import { compareLines, toolName, upstreamOf } from "../src/upstream.ts";
+import { compareLines, judgeAdvisories, pinnedVersion, readRange, toolName, upstreamOf } from "../src/upstream.ts";
 
 const SRC = join(import.meta.dirname, "..", "src");
 const FIXTURES = join(import.meta.dirname, "fixtures");
@@ -212,6 +212,15 @@ const markers = [...apply.matchAll(/<!-- etat: \$\{[^}]+\} -->/g)].length;
 check("le rapport pose un marqueur d'etat", markers, 1);
 const action = readFileSync(join(import.meta.dirname, "..", "actions", "signaler", "action.yml"), "utf8");
 check("l'action lit ce marqueur", /<!-- etat: sain -->/.test(action), true);
+
+// Le parc de test porte toujours une echeance de base, qui leve le marqueur a
+// elle seule : la contribution des avis amont se verifie donc ici, dans les
+// termes du marqueur, et non sur le rapport rendu.
+const markerTerms = apply.slice(
+  apply.indexOf("const nothingToReport ="),
+  apply.indexOf("const lines: string[] = await describeTools"),
+);
+check("une faille corrigeable leve le marqueur", /fixable\.length === 0/.test(markerTerms), true);
 
 // Le pied est reecrit a chaque passage et retire avant de comparer. Renommer
 // une de ses lignes d'un cote seulement ne casse rien de visible : le tableau
@@ -1007,6 +1016,146 @@ const annotated = fixtureSrc.replace("      version: 16.15.0-1\n", '      versio
 check("la forme du manifeste de test est reproduite", writeOptions(fixtureSrc), { indent: 2, indentSeq: true, lineWidth: 0 });
 check("une indentation a quatre espaces est reconnue", writeOptions(indented4)?.indent, 4);
 check("une liste non indentee est reconnue", writeOptions(flatList)?.indentSeq, false);
+
+console.log("\nAvis de securite de l'amont");
+
+// Chaque cas vient d'une forme reellement publiee par Metabase. Les avis du
+// depot sont la seule source qui porte l'information pour un outil hors
+// ecosysteme de paquets : ni Dependabot ni les alertes OSV de Renovate ne le
+// voient, et ni le CVE ni le score CVSS ne peuvent servir de cle, la majorite
+// des avis du depot n'en portant aucun.
+const advisory = (
+  ghsa: string,
+  ranges: Array<[string, string]>,
+  extra: Record<string, unknown> = {},
+) =>
+  ({
+    ghsa_id: ghsa,
+    cve_id: null,
+    severity: "critical",
+    summary: `avis ${ghsa}`,
+    html_url: `https://github.com/metabase/metabase/security/advisories/${ghsa}`,
+    published_at: "2026-10-28T00:00:00Z",
+    withdrawn_at: null,
+    vulnerabilities: ranges.map(([vulnerable_version_range, patched_versions]) => ({
+      vulnerable_version_range,
+      patched_versions,
+    })),
+    ...extra,
+  }) as never;
+
+/** Ce qu'un verdict dit, ramene a trois valeurs comparables. */
+const judge = (advisories: unknown[], version: string, line = 1) => {
+  const v = judgeAdvisories(advisories as never, version, line);
+  return v ? [v.hits.map((h) => h.ghsa), v.fix, v.unreadable.map((u) => u.range)] : null;
+};
+
+// GHSA-v44v-x8x4-mvcw, critique, publiee le 2026-10-28, sans CVE ni score CVSS.
+// Son `x` litteral designe l'edition : substitue par celle de la version jugee,
+// sinon aucune plage ne correspond jamais et tout le parc passe pour indemne.
+const CRITICAL = advisory("GHSA-v44v-x8x4-mvcw", [[">= x.64.0, < x.64.3.4", "x.64.3.4"]]);
+check("le x litteral de l'edition est substitue", judge([CRITICAL], "v0.64.1.0"), [["GHSA-v44v-x8x4-mvcw"], "v0.64.3.4", []]);
+check("la version corrigee en sort indemne", judge([CRITICAL], "v0.64.4.2"), [[], null, []]);
+check("la version juste avant le correctif est couverte", judge([CRITICAL], "v0.64.3.3"), [["GHSA-v44v-x8x4-mvcw"], "v0.64.3.4", []]);
+// Le quatrieme nombre compte : 0.64.3 est sous 0.64.3.4, pas a egalite.
+check("une version a trois nombres se compare a une a quatre", judge([CRITICAL], "v0.64.3"), [["GHSA-v44v-x8x4-mvcw"], "v0.64.3.4", []]);
+
+// Les deux lignes d'edition, 0.x pour l'OSS et 1.x pour l'Enterprise, ne sont
+// jamais comparables : v1.52.2 date de 2024 quand v0.63.16 date de 2026.
+check("le meme avis vise l'autre edition dans sa ligne", judge([CRITICAL], "v1.64.1.0"), [["GHSA-v44v-x8x4-mvcw"], "v1.64.3.4", []]);
+const ENTERPRISE = advisory("GHSA-cwxq-fmxq-jv8h", [[">= 1.55.0, < 1.58.16", "1.58.16"]]);
+check("un avis dont les numeros sont d'une autre edition ne concerne pas celle-ci", judge([ENTERPRISE], "v0.63.18"), [[], null, []]);
+check("et concerne bien la sienne", judge([ENTERPRISE], "v1.57.0"), [["GHSA-cwxq-fmxq-jv8h"], "v1.58.16", []]);
+
+// Une version flottante n'est comparable a rien : il n'y a pas de verdict a
+// rendre, et surement pas "indemne".
+check("une version flottante ne se juge pas", judge([CRITICAL], "latest"), null);
+// Un alias glissant ne designe pas la version servie : lu comme 0.64.0 il
+// tomberait dans toute plage ouverte en debut de ligne.
+check("une version glissante non plus", judge([CRITICAL], "v0.64.x"), null);
+check("un avis retire est ignore", judge([advisory("GHSA-retire", [[">= x.63.0, < x.63.20", "x.63.20"]], { withdrawn_at: "2026-10-29T00:00:00Z" })], "v0.63.18"), [[], null, []]);
+
+// Metabase publie des plages qu'aucune lecture ne devine : des disjonctions de
+// lignes, des bornes basses sans operateur, de la prose. Une borne ignoree en
+// silence ferait passer une version affectee pour indemne.
+for (const form of [
+  "<x.44.5,<x.43.7,<x.42.6,<x.41.9",
+  "<x.42.3 <x.41.6, <x.40.7",
+  "<= 0.48.6, <= 1.48.6",
+  "0.63.0, < 0.63.20",
+  "All enterprise versions < 0.63.x",
+  "< 0.63.20, >= 0.63.30",
+]) {
+  check(`la plage ${JSON.stringify(form)} est illisible`, readRange(form, [0, 63, 18]), null);
+}
+for (const [form, read] of [
+  [">= 0.63.0, < 0.63.20", { startIncl: "0.63.0", endExcl: "0.63.20" }],
+  ["< x.63.20", { endExcl: "0.63.20" }],
+  [" >= 0.63.0, <= 0.63.20", { startIncl: "0.63.0", endIncl: "0.63.20" }],
+  ["> 0.63.0", { startExcl: "0.63.0" }],
+  ["= 0.63.18", { startIncl: "0.63.18", endIncl: "0.63.18" }],
+] as const) {
+  check(`la plage ${JSON.stringify(form)} est lue`, readRange(form, [0, 63, 18]), read);
+}
+
+// Une plage illisible ne vaut ni affectation ni innocence. Sans correctif
+// annonce au-dela, elle se dit : c'est le faux negatif silencieux qu'on evite.
+const BLIND = advisory("GHSA-illisible", [["<x.63.20,<x.62.30", ""]]);
+check("une plage illisible est signalee, non tenue pour indemne", judge([BLIND], "v0.63.18"), [[], null, ["<x.63.20,<x.62.30"]]);
+// Mais le correctif que l'avis annonce lui-meme la tranche : au-dela, l'amont
+// dit que la faille est corrigee, quelle que soit la forme de ses plages. Sans
+// ce recours, les vieux avis de Metabase produisaient trente plages illisibles
+// a chaque passage sur un parc dont aucune version n'etait affectee.
+const OLD = advisory("GHSA-ancien", [["<x.44.5,<x.43.7", "0.44.5,1.44.5,0.43.7,1.43.7"]]);
+check("un correctif annonce plus bas tranche la plage illisible", judge([OLD], "v0.63.18"), [[], null, []]);
+check("et ne la tranche pas en dessous de lui", judge([OLD], "v0.42.0"), [[], null, ["<x.44.5,<x.43.7"]]);
+
+// Une faille connue sans correctif atteignable : elle est constatee, et rien
+// n'est propose. Il n'existe pas toujours de version corrigee le jour ou on
+// l'apprend.
+const NO_FIX = advisory("GHSA-sans-correctif", [[">= x.63.0, < x.64.0", ""]]);
+check("une faille sans correctif annonce ne propose rien", judge([NO_FIX], "v0.63.18"), [["GHSA-sans-correctif"], null, []]);
+// Le correctif annonce peut aussi exister mais sortir de la ligne : monter
+// d'edition n'est pas un correctif.
+const CROSS = advisory("GHSA-autre-edition", [[">= x.63.0, < x.64.0", "1.64.0"]]);
+check("un correctif hors de la ligne n'est pas atteignable", judge([CROSS], "v0.63.18"), [["GHSA-autre-edition"], null, []]);
+
+// Le correctif doit sortir de TOUS les avis : une faille apparue apres la
+// version en service rattrape la version visee, et la pull request proposerait
+// une montee vers un etat encore vulnerable.
+const FIRST = advisory("GHSA-premier", [[">= x.63.0, < x.63.10", "x.63.10"]]);
+const LATER = advisory("GHSA-suivant", [[">= x.63.8, < x.63.15", "x.63.15"]]);
+check("le correctif remonte au-dela d'un avis plus recent", judge([FIRST, LATER], "v0.63.5"), [["GHSA-premier"], "v0.63.15", []]);
+check("les deux avis sont nommes quand ils couvrent tous deux", judge([FIRST, LATER], "v0.63.9"), [["GHSA-premier", "GHSA-suivant"], "v0.63.15", []]);
+
+// Le prefixe v fait partie de la valeur chez Metabase : le buildpack la
+// concatene telle quelle dans l'URL de telechargement.
+check("le prefixe v de la version en service est conserve", judge([CRITICAL], "v0.64.1.0")?.[1], "v0.64.3.4");
+check("et son absence aussi", judge([CRITICAL], "0.64.1.0")?.[1], "0.64.3.4");
+
+console.log("\nPull request de montee de securite");
+
+const upgrade2 = (app: string, to: string, tool = "Metabase") => ({ app, tool, from: "v0.63.18", to, advisories: ["GHSA-x"] });
+check(
+  "une seule app : l'outil, l'app et sa cible",
+  describeAdvisoryProposal([upgrade2("alpha-metabase", "v0.63.20")]).title,
+  "Monter Metabase de alpha-metabase en v0.63.20, avis de securite",
+);
+check(
+  "une cible commune est nommee une fois",
+  describeAdvisoryProposal([upgrade2("alpha-metabase", "v0.63.20"), upgrade2("gamma-metabase", "v0.63.20")]).title,
+  "Monter Metabase en v0.63.20 sur 2 apps, avis de securite : alpha-metabase, gamma-metabase",
+);
+check(
+  "un titre de plus de 100 caracteres ne garde que le compte",
+  describeAdvisoryProposal(["a", "b", "c", "d", "e"].map((x, i) => upgrade2(`${x.repeat(20)}-metabase`, `v0.63.2${i}`))).title,
+  "Monter Metabase sur 5 app(s), avis de securite",
+);
+check(
+  "le corps dit pourquoi ce releve ne vit pas dans Renovate",
+  /ecosysteme de paquets/.test(describeAdvisoryProposal([upgrade2("alpha-metabase", "v0.63.20")]).body),
+  true,
+);
 
 console.log("\nSauvegarde, contre un fetch simule");
 
@@ -1861,6 +2010,260 @@ try {
     releves: 2,
     vague: true,
   });
+  console.log("\nReleve des avis amont, contre un fetch simule");
+
+  // Le parc de test est en v0.63.18 : cet avis la couvre et annonce v0.63.20.
+  // L'avis du depot amont est la seule source qui le dise, aucune datasource de
+  // paquets n'exposant un outil installe par un buildpack.
+  const COVERS_FLEET = JSON.stringify([
+    {
+      ghsa_id: "GHSA-parc-test",
+      cve_id: null,
+      severity: "critical",
+      summary: "faille du parc de test",
+      html_url: "https://github.com/metabase/metabase/security/advisories/GHSA-parc-test",
+      published_at: "2026-10-28T00:00:00Z",
+      withdrawn_at: null,
+      vulnerabilities: [{ vulnerable_version_range: ">= x.63.0, < x.63.20", patched_versions: "x.63.20" }],
+    },
+  ]);
+
+  const quiet = sandbox();
+  const quietRun = run(quiet, "apply.ts", ["--dry-run", ...FLEET]);
+  check(
+    "un amont sans avis le dit, plutot que de se taire",
+    [quietRun.status, /Aucun avis amont ne porte sur les versions en service\. 0 avis confrontes sur 1 depot\(s\)\./.test(quietRun.output)],
+    [0, true],
+  );
+
+  const exposed = sandbox();
+  const exposedRun = run(exposed, "apply.ts", [...FLEET, "--out-dir", "../sortie"], {
+    SCALINGO_API_TOKEN: "faux",
+    REAL: JSON.stringify({ "osc-fr1/beta-metabase": { version: "v0.63.18", sha: "a".repeat(40) } }),
+    ADVISORIES: COVERS_FLEET,
+  });
+  if (exposedRun.status !== 0) console.log(exposedRun.output);
+  check(
+    "la version en service couverte par un avis est signalee, avec son correctif",
+    [
+      exposedRun.status,
+      /osc-fr1\/alpha-metabase : v0\.63\.18 est affectee par 1 avis \(GHSA-parc-test\), corrigee en v0\.63\.20/.test(exposedRun.output),
+      /--propose-security` ouvre la pull request qui porte la montee/.test(exposedRun.output),
+    ],
+    [0, true, true],
+  );
+  // Un appel par couple depot et version, et non par application : les quatre
+  // apps du parc partagent le meme amont a la meme version.
+  check(
+    "un seul appel aux avis pour tout le parc",
+    exposedRun.calls.filter((l) => l.includes("/security-advisories")).length,
+    1,
+  );
+  const exposedDashboard = readFileSync(join(exposed.outDir, "incident.md"), "utf8");
+  check(
+    "le tableau de bord porte l'avis, son correctif et l'etat",
+    [
+      /^\| \[alpha-metabase\]\S+ \| \[v0\.63\.18\]\S+ \| critique, \[GHSA-parc-test\]\S+ \| \[v0\.63\.20\]\S+ \| affectée \|$/m.test(exposedDashboard),
+      /### Avis de sécurité amont\n\n- \*\*osc-fr1\/alpha-metabase\*\* : v0\.63\.18 vers v0\.63\.20\n  - \[GHSA-parc-test\]\S+, critique : faille du parc de test\n/.test(exposedDashboard),
+    ],
+    [true, true],
+  );
+
+  // Sans avis, le tableau le dit app par app : une colonne vide se lirait comme
+  // une absence de releve.
+  const indemne = sandbox();
+  run(indemne, "apply.ts", [...FLEET, "--out-dir", "../sortie"], { SCALINGO_API_TOKEN: "faux", REAL: JSON.stringify({ "osc-fr1/beta-metabase": { version: "v0.63.18", sha: "a".repeat(40) } }) });
+  const indemneDashboard = readFileSync(join(indemne.outDir, "incident.md"), "utf8");
+  check(
+    "sans avis, le tableau dit indemne et ne demande rien",
+    [
+      /^\| \[alpha-metabase\]\S+ \| \[v0\.63\.18\]\S+ \| aucun \|\s*\| indemne \|$/m.test(indemneDashboard),
+      /### Avis de sécurité amont/.test(indemneDashboard),
+    ],
+    [true, false],
+  );
+
+  console.log("\nProposition de montee de securite, contre un fetch simule");
+
+  const secured = sandbox();
+  const securedRun = run(secured, "apply.ts", ["--propose-security", ...FLEET, "--out-dir", "../sortie"], {
+    ADVISORIES: COVERS_FLEET,
+  });
+  if (securedRun.status !== 0) console.log(securedRun.output);
+  // Aucun acces a Scalingo : les avis de l'amont et le manifeste suffisent a
+  // rendre le verdict, et c'est le manifeste seul qui est edite. L'hote est
+  // ancre : en sous-chaine, "https://ailleurs.test/api.github.com/" passerait.
+  const ADVISORY_CALL = /^GET https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/security-advisories\?/;
+  check(
+    "la proposition n'interroge que l'amont, jamais Scalingo",
+    [securedRun.status, securedRun.calls.filter((l) => !ADVISORY_CALL.test(l))],
+    [0, []],
+  );
+  const securedSrc = readFileSync(join(secured.fleet, "manifest.yaml"), "utf8");
+  check(
+    "les versions montent dans le manifeste, sauf celle de l'app en pause",
+    (parse(securedSrc) as typeof fixture).apps.map((a) => [a.app, (a.tool as { version: string }).version]),
+    [
+      ["alpha-metabase", "v0.63.20"],
+      ["beta-metabase", "v0.63.18"],
+      ["gamma-metabase", "v0.63.20"],
+      ["delta-metabase", "v0.63.20"],
+    ],
+  );
+  check("rien d'autre que les versions ne change", securedSrc, fixtureSrc.replaceAll("version: v0.63.18", "version: v0.63.20").replace("version: v0.63.20\n\n  - app: gamma", "version: v0.63.18\n\n  - app: gamma"));
+  check("le lock n'est pas reecrit", readFileSync(join(secured.fleet, "lock.json"), "utf8"), lockFixture);
+  check("rien n'est ecrit dans le repertoire courant", listDir(secured.cwd), []);
+  check("la proposition est deposee dans --out-dir", listDir(secured.outDir), ["pr-body.md", "pr-title.txt", "security-proposal.json"]);
+  check(
+    "le titre nomme l'outil et le nombre d'apps",
+    readFileSync(join(secured.outDir, "pr-title.txt"), "utf8"),
+    "Monter Metabase sur 3 app(s), avis de securite\n",
+  );
+  check(
+    "le corps liste chaque montee et l'avis qui la motive",
+    readFileSync(join(secured.outDir, "pr-body.md"), "utf8").split("\n").filter((l) => l.startsWith("- `")),
+    [
+      "- `alpha-metabase` : Metabase v0.63.18 vers v0.63.20 (GHSA-parc-test)",
+      "- `gamma-metabase` : Metabase v0.63.18 vers v0.63.20 (GHSA-parc-test)",
+      "- `delta-metabase` : Metabase v0.63.18 vers v0.63.20 (GHSA-parc-test)",
+    ],
+  );
+
+  const dryProposeSecurity = run(sandbox(), "apply.ts", ["--propose-security", "--dry-run", ...FLEET, "--out-dir", "../sortie"], {
+    ADVISORIES: COVERS_FLEET,
+  });
+  check(
+    "en plan, elle annonce les montees sans rien ecrire",
+    [dryProposeSecurity.status, /3 montee\(s\) de securite a proposer \(plan/.test(dryProposeSecurity.output)],
+    [0, true],
+  );
+
+  // Une faille sans correctif atteignable est constatee et rien n'est propose :
+  // il n'existe pas toujours de version corrigee le jour ou on l'apprend, et la
+  // reclamer a chaque passage en ferait l'alerte permanente qu'on ignore.
+  const NO_FIX_FLEET = JSON.stringify(
+    (JSON.parse(COVERS_FLEET) as Array<{ vulnerabilities: Array<Record<string, string>> }>).map((a) => ({
+      ...a,
+      vulnerabilities: [{ vulnerable_version_range: ">= x.63.0, < x.64.0", patched_versions: "" }],
+    })),
+  );
+  const stuck = sandbox();
+  const stuckRun = run(stuck, "apply.ts", [...FLEET, "--out-dir", "../sortie"], {
+    SCALINGO_API_TOKEN: "faux",
+    REAL: JSON.stringify({ "osc-fr1/beta-metabase": { version: "v0.63.18", sha: "a".repeat(40) } }),
+    ADVISORIES: NO_FIX_FLEET,
+  });
+  const stuckDashboard = readFileSync(join(stuck.outDir, "incident.md"), "utf8");
+  check(
+    "sans correctif atteignable : constatee au tableau, hors de ce qui demande une intervention",
+    [
+      stuckRun.status,
+      /aucun correctif atteignable dans sa ligne/.test(stuckRun.output),
+      /\| aucun atteignable dans sa ligne \| affectée \|$/m.test(stuckDashboard),
+      /### Avis de sécurité amont/.test(stuckDashboard),
+    ],
+    [0, true, true, false],
+  );
+  const stuckPropose = run(sandbox(), "apply.ts", ["--propose-security", ...FLEET, "--out-dir", "../sortie"], { ADVISORIES: NO_FIX_FLEET });
+  check(
+    "et rien n'est propose",
+    [stuckPropose.status, /Aucune montee de securite a proposer/.test(stuckPropose.output)],
+    [0, true],
+  );
+
+  // Une app en pause est constatee et jamais proposee : rien n'y est deploye.
+  // Le tableau la designait pourtant dans ce qui demande une intervention, en
+  // renvoyant vers une commande qui l'ecarte : le marqueur restait leve sur une
+  // faille que rien dans le watcher ne pouvait refermer.
+  //
+  // Le parc est amene a un etat ou seule l'app en pause est affectee : les
+  // autres sont montees en v0.63.20 au manifeste comme au lock, donc conformes
+  // et jamais deployees par ce passage.
+  const ONLY_PAUSED_SRC = fixtureSrc
+    .replaceAll("version: v0.63.18", "version: v0.63.20")
+    .replace(/(- app: beta-metabase[\s\S]*?)version: v0\.63\.20/, "$1version: v0.63.18");
+  const pausedLock = JSON.parse(lockFixture) as { apps: Record<string, { tool: { version: string } }> };
+  for (const [key, entry] of Object.entries(pausedLock.apps)) {
+    if (!key.endsWith("/beta-metabase")) entry.tool.version = "v0.63.20";
+  }
+  const pausedOnly = sandbox();
+  writeFileSync(join(pausedOnly.fleet, "manifest.yaml"), ONLY_PAUSED_SRC);
+  writeFileSync(join(pausedOnly.fleet, "lock.json"), JSON.stringify(pausedLock, null, 2) + "\n");
+  // Le montage se verifie lui-meme : seule l'app en pause doit rester en
+  // v0.63.18. Pose par une expression sur le texte du manifeste, il se defait
+  // sans bruit a la moindre retouche de la fixture, et le test continuerait de
+  // passer en n'eprouvant plus rien.
+  check(
+    "seule l'app en pause est laissee sous l'avis",
+    (parse(ONLY_PAUSED_SRC) as typeof fixture).apps.map((a) => [a.app, a.paused === true, (a.tool as { version: string }).version]),
+    [
+      ["alpha-metabase", false, "v0.63.20"],
+      ["beta-metabase", true, "v0.63.18"],
+      ["gamma-metabase", false, "v0.63.20"],
+      ["delta-metabase", false, "v0.63.20"],
+    ],
+  );
+  const pausedRun = run(pausedOnly, "apply.ts", [...FLEET, "--out-dir", "../sortie"], {
+    SCALINGO_API_TOKEN: "faux",
+    REAL: JSON.stringify({ "osc-fr1/beta-metabase": { version: "v0.63.18", sha: "a".repeat(40) } }),
+    ADVISORIES: COVERS_FLEET,
+  });
+  const pausedDashboard = readFileSync(join(pausedOnly.outDir, "incident.md"), "utf8");
+  check(
+    "une app en pause affectee est constatee, jamais portee en intervention",
+    [
+      pausedRun.status,
+      /beta-metabase : v0\.63\.18 est affectee par 1 avis \(GHSA-parc-test\), corrigee en v0\.63\.20, non proposee car en pause/.test(pausedRun.output),
+      /\| \[v0\.63\.20\]\S+ \(en pause, non proposé\) \| en pause, affectée \|$/m.test(pausedDashboard),
+      /### Avis de sécurité amont/.test(pausedDashboard),
+      /ouvre la pull request qui porte la montee/.test(pausedRun.output),
+    ],
+    [0, true, true, false, false],
+  );
+  const pausedPropose = run(pausedOnly, "apply.ts", ["--propose-security", ...FLEET, "--out-dir", "../sortie2"], { ADVISORIES: COVERS_FLEET });
+  check(
+    "et rien n'est propose pour elle",
+    [pausedPropose.status, /Aucune montee de securite a proposer/.test(pausedPropose.output), readFileSync(join(pausedOnly.fleet, "manifest.yaml"), "utf8") === ONLY_PAUSED_SRC],
+    [0, true, true],
+  );
+
+  // Deux instances homonymes dans deux regions : `init` en ecrit de telles
+  // entrees, le schema ne contraint pas l'unicite du nom et --validate ne la
+  // verifie pas. Designees par le nom seul, elles rendaient le meme rang dans le
+  // document : la seconde se faisait ecarter sur un message faux et sa montee
+  // n'etait jamais proposee, le passage sortant en succes.
+  const HOMONYMS_SRC = fixtureSrc.replace("- app: alpha-metabase", "- app: metabase").replace("- app: gamma-metabase", "- app: metabase");
+  const homonyms = sandbox();
+  writeFileSync(join(homonyms.fleet, "manifest.yaml"), HOMONYMS_SRC);
+  const homonymsRun = run(homonyms, "apply.ts", ["--propose-security", ...FLEET, "--out-dir", "../sortie"], {
+    ADVISORIES: COVERS_FLEET,
+  });
+  check(
+    "deux apps homonymes dans deux regions montent toutes les deux",
+    [
+      homonymsRun.status,
+      /introuvable dans le manifeste/.test(homonymsRun.output),
+      (parse(readFileSync(join(homonyms.fleet, "manifest.yaml"), "utf8")) as typeof fixture).apps.map((a) => [a.region, a.app, (a.tool as { version: string }).version]),
+    ],
+    [
+      0,
+      false,
+      [
+        ["osc-fr1", "metabase", "v0.63.20"],
+        ["osc-fr1", "beta-metabase", "v0.63.18"],
+        ["osc-secnum-fr1", "metabase", "v0.63.20"],
+        ["osc-secnum-fr1", "delta-metabase", "v0.63.20"],
+      ],
+    ],
+  );
+
+  // Les deux propositions ecrivent pr-title.txt et pr-body.md au meme endroit.
+  const bothProposals = run(sandbox(), "apply.ts", ["--propose-db", "--propose-security", ...FLEET]);
+  check(
+    "les deux propositions ensemble sont refusees",
+    [bothProposals.status, /un passage par proposition/.test(bothProposals.output), bothProposals.calls],
+    [1, true, []],
+  );
 
   console.log("\nPremier manifeste par init, contre un fetch simule");
 

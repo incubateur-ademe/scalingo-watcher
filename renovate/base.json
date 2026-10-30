@@ -2,12 +2,12 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "description": [
     "Veille du manifeste scalingo-watcher : version de l'outil et commit du depot applicatif de chaque app, lus dans les annotations # renovate: du manifeste.",
-    "Le fuseau, le planning et les textes du tableau de bord restent dans la configuration du depot consommateur."
+    "Le fuseau, le planning et les textes du tableau de bord restent dans la configuration du depot consommateur.",
+    "Aucune veille de securite sur la version de l'outil : un outil installe par un buildpack depuis une variable d'environnement n'est une dependance d'aucun ecosysteme de paquets. osvVulnerabilityAlerts a ete retire pour cette raison, ses alertes ne couvrant qu'une dizaine de datasources de paquets, aucune de celles que ce preset suit. C'est le watcher qui releve les avis de securite du depot amont de l'outil, et qui ouvre la pull request de montee : voir --propose-security."
   ],
   "minimumReleaseAge": "5 days",
   "internalChecksFilter": "strict",
   "prConcurrentLimit": 0,
-  "osvVulnerabilityAlerts": true,
   "customManagers": [
     {
       "description": "Depot applicatif deploye par chaque app. Le nom de l'app sert de depName pour que le tableau de bord et les PR disent de quelle instance il s'agit, le depot n'etant lui qu'un detail de provenance partage par presque toutes.",
@@ -50,8 +50,7 @@
     }
   ],
   "vulnerabilityAlerts": {
-    "description": "Une faille connue passe devant le delai de quarantaine des nouvelles releases. Pas d'automerge ici. Renovate impose ce bloc a toutes les dependances, y compris scalingo-watcher lui-meme chez un consommateur, par-dessus les packageRules. Les correctifs du manifeste restent fusionnes seuls par le preset de l'outil.",
-    "minimumReleaseAge": null,
+    "description": "Etiquette les montees que la plateforme rattache a une alerte de vulnerabilite, et leve pour elles le delai de quarantaine, qui est deja le defaut de ce bloc. Ne vaut que pour ce que la plateforme sait voir : les workflows appelants et les presets, donc scalingo-watcher lui-meme chez un consommateur. La version de l'outil portee par le manifeste n'en releve pas, n'etant une dependance d'aucun ecosysteme de paquets : aucune alerte ne l'atteint, et c'est le watcher qui releve les avis de son depot amont. Pas d'automerge ici ; les correctifs du manifeste restent fusionnes seuls par le preset de l'outil.",
     "labels": [
       "securite"
     ]

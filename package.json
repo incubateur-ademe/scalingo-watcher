@@ -17,6 +17,7 @@
     "prune": "node src/apply.ts --prune",
     "validate": "node src/apply.ts --validate",
     "propose-db": "node src/apply.ts --propose-db",
+    "propose-security": "node src/apply.ts --propose-security",
     "init": "node src/init.ts",
     "fgp:blobs": "node src/fgp-blobs.ts",
     "test": "node test/test.ts",

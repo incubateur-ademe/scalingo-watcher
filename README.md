@@ -59,6 +59,7 @@ la racine de l'outil :
 | `prune` | `src/apply.ts --prune` | Retire du lock les apps sorties du manifeste |
 | `validate` | `src/apply.ts --validate` | Schéma, annotations Renovate et lock orphelin |
 | `propose-db` | `src/apply.ts --propose-db` | Avance d'un cran les bases pilotées, dans le manifeste |
+| `propose-security` | `src/apply.ts --propose-security` | Monte les versions que les avis de l'amont couvrent, dans le manifeste |
 | `init` | `src/init.ts` | Écrit un premier manifeste depuis l'état réel |
 | `fgp:blobs` | `src/fgp-blobs.ts` | Génère `fgp.json` pour le proxy FGP |
 | `test` | `test/test.ts` | Tests hors ligne |
@@ -80,15 +81,20 @@ Communes à toutes les commandes :
 | `--out-dir <chemin>` | `$RUNNER_TEMP/scalingo-watcher` si `RUNNER_TEMP` existe, sinon un répertoire privé `scalingo-watcher-XXXXXX` du répertoire temporaire du système, nouveau à chaque passage et affiché à sa création. Créé au besoin. |
 
 `--out-dir` reçoit les sorties d'un passage, jamais commitées : `incident.md`
-(état du parc lu par l'action `signaler`), `db-proposal.json`, `pr-title.txt` et
-`pr-body.md` (écrits par `--propose-db` seulement quand il modifie le
+(état du parc lu par l'action `signaler`), `db-proposal.json`,
+`security-proposal.json`, `pr-title.txt` et `pr-body.md` (écrits par
+`--propose-db` ou `--propose-security` seulement quand ils modifient le
 manifeste), et la copie `fgp.json.bak` faite par `fgp-blobs`.
+
+Les deux propositions écrivent `pr-title.txt` et `pr-body.md` au même endroit et
+poussent sur deux branches distinctes : un passage ne peut pas porter les deux.
 
 Par commande :
 
 - `apply.ts` : `--dry-run`, `--app <fragment>`, `--force` (redéploie une app
   conforme, exige `--app`), `--reconcile`, `--prune`, `--validate`, `--adopt`
-  (amorce le lock depuis l'état réel, sans déployer), `--propose-db`.
+  (amorce le lock depuis l'état réel, sans déployer), `--propose-db`,
+  `--propose-security`.
 - `audit.ts` : `--app <fragment>`, `--region <nom>` (répétable, prime sur les
   régions du manifeste), `--json` (inventaire complet sur la sortie standard),
   `--no-build-log`.
@@ -108,7 +114,8 @@ Deux modes, au choix :
   détail est dans [fgp.md](fgp.md).
 
 Le proxy l'emporte quand `FGP_KEY` et `fgp.json` sont présents. `--dry-run`,
-`--validate` et `--prune` fonctionnent sans aucun accès.
+`--validate`, `--prune` et `--propose-security` fonctionnent sans aucun accès :
+ce dernier rend son verdict avec les avis de l'amont et le manifeste.
 
 `GITHUB_TOKEN`, facultatif, évite la limitation de débit de l'API GitHub.
 
@@ -126,19 +133,22 @@ l'action `setup`.
 | `apply.yml` | Application à la demande, en plan seul par défaut | `contents: write`, `issues: write` |
 | `validate.yml` | Valide le manifeste, publie le plan en commentaire de pull request | `contents: read`, `pull-requests: write` |
 | `propose-db.yml` | Ouvre la pull request de montée de version des bases | `contents: write`, `pull-requests: write` |
+| `propose-security.yml` | Ouvre la pull request de montée des versions couvertes par un avis amont | `contents: write`, `pull-requests: write` |
 
 Inputs :
 
 | Input | Workflows | Défaut |
 |---|---|---|
 | `environment` | `reconcile`, `apply`, `propose-db` | requis |
-| `manifest-path`, `lock-path`, `fgp-path` | tous | `manifest.yaml`, `lock.json`, `fgp.json` |
+| `manifest-path`, `lock-path` | tous | `manifest.yaml`, `lock.json` |
+| `fgp-path` | tous sauf `propose-security` | `fgp.json` |
 | `dry_run` | `reconcile`, `apply` | `false` pour `reconcile`, `true` pour `apply` |
 | `app`, `force` | `apply` | `""`, `false` |
 | `dashboard-label`, `dashboard-title` | `reconcile`, `apply` | `etat-parc`, `Parc Scalingo : etat de la convergence` |
 | `matrix-homeserver`, `matrix-room-id` | `reconcile`, `apply` | `""` (notification Matrix désactivée) |
 | `lock-commit-message` | `reconcile`, `apply` | `chore(lock): etat du parc apres reconciliation` (ou `apres deploiement`) |
 | `branch`, `commit-message` | `propose-db` | `montee-base`, `chore(base): proposer la montee de version des bases` |
+| `branch`, `commit-message` | `propose-security` | `montee-securite`, `fix(securite): monter les versions couvertes par un avis amont` |
 
 Secrets, tous facultatifs : `SCALINGO_API_TOKEN` ou `FGP_KEY` pour l'accès,
 `TEAMS_WEBHOOK`, `SLACK_WEBHOOK` et `MATRIX_ACCESS_TOKEN` pour les
@@ -153,8 +163,9 @@ non mappé arrive vide. `secrets: inherit` aurait le même effet, mais ne
 fonctionne qu'au sein d'une même organisation.
 
 `reconcile` et `apply` partagent le groupe de concurrence
-`scalingo-apply` et n'annulent jamais un passage en cours. `propose-db`
-a son propre groupe.
+`scalingo-apply` et n'annulent jamais un passage en cours. Chaque proposition a
+son propre groupe. `propose-security` ne déclare aucun `environment` : il n'a
+besoin d'aucun accès à Scalingo, et ne peut donc pas lire la clé du proxy.
 
 Appelant minimal :
 

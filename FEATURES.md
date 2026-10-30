@@ -43,11 +43,19 @@ publie `0.x` pour l'OSS et `1.x` pour l'Enterprise, ce sont deux lignes
 distinctes qu'il n'y a aucun sens à comparer. Le nombre de composants qui forment
 une ligne est déclaré par outil.
 
-**[fait]** Neuf types de constats : variable de version absente, variable
-flottante (`*` ou `latest`), buildpack non épinglé, retard dans la ligne
-majeure, ligne majeure en retard, ligne majeure absente des releases amont,
-dernier déploiement en échec, application dormante au-delà de 180 jours, source
-de releases inconnue.
+**[fait]** Quinze types de constats : version couverte par un avis de sécurité de
+son dépôt amont, avis dont la plage de versions n'a pas pu être lue, variable de
+version absente, variable flottante (`*` ou `latest`), buildpack non épinglé,
+retard dans la ligne majeure, ligne majeure en retard, ligne majeure absente des
+releases amont, base de données montable, dernier déploiement en échec,
+application jamais déployée, application arrêtée ou en échec, application
+dormante au-delà de 180 jours, source de releases inconnue, erreur de collecte.
+Les deux premiers sont rendus en tête, étant ce que l'audit a de plus urgent à
+dire. L'énumération en annonçait neuf, pour une table qui en portait treize.
+
+**[fait]** L'audit rend le même verdict de sécurité que la convergence, par le
+même relevé des avis du dépôt amont, et sur la version qu'il vient de lire sur
+l'application. Les détails de ce relevé sont en section 8.
 
 **[fait]** Le constat de buildpack non épinglé est agrégé par buildpack et non
 par paire application-buildpack, sinon il produit des dizaines de lignes
@@ -646,6 +654,12 @@ sur chaque pull request du consommateur : une annotation Renovate désignant un
 autre dépôt que le champ `repo`, une annotation absente, une entrée de lock sans
 application correspondante.
 
+**[fait]** Le relevé des avis amont est couvert par ses cas réels : le `x`
+littéral de l'édition, une plage illisible, une plage illisible que le correctif
+annoncé tranche, une faille sans correctif atteignable, un correctif qui sort de
+la ligne d'édition, un correctif rattrapé par un avis plus récent. Chaque forme
+de plage éprouvée a réellement été publiée par Metabase.
+
 **[fait]** Les tests ont été vérifiés en cassant volontairement chacun des
 invariants, pour s'assurer qu'ils échouent quand ils le doivent.
 
@@ -798,10 +812,126 @@ chose quand il se déclenche.
 l'exécution. Il n'existe pas toujours de version corrigée le jour où on
 l'apprend, et un parc rouge en permanence cesse d'être lu.
 
-**[fait]** Une version glissante (`v0.63.x`) n'est pas confrontée aux failles.
-Elle ne désigne pas la version servie, et lue comme `0.63.0` elle tomberait dans
-toute plage ouverte en début de ligne. Seule une version épinglée déclenche une
-alerte.
+**[fait]** Une version glissante (`v0.63.x`) n'est confrontée ni aux failles
+exploitées ni aux avis de l'amont. Elle ne désigne pas la version servie, et lue
+comme `0.63.0` elle tomberait dans toute plage ouverte en début de ligne. Seule
+une version épinglée déclenche une alerte.
+
+**[fait]** Relevé des avis de sécurité du dépôt amont. Les versions en service
+sont confrontées aux avis que publie le dépôt d'où sort l'outil
+(`GET /repos/{owner}/{repo}/security-advisories`). C'est la seule source qui
+porte l'information pour un outil hors écosystème de paquets, et le relevé est
+générique par construction : l'amont est déjà déclaré pour chaque outil, par la
+table `UPSTREAM` ou par `tool.upstream`.
+
+**[fait]** Renovate ne peut pas tenir ce rôle, pour la raison exacte qui lui
+interdit de suivre les versions de bases Scalingo. Un outil qu'un buildpack
+installe depuis une variable d'environnement n'est une dépendance d'aucun
+écosystème de paquets. Une alerte Dependabot exige un avis revu, rattaché à l'un
+des écosystèmes supportés, et une dépendance visible dans le graphe de
+dépendances : `manifest.yaml` n'est pas un manifeste reconnu. Les alertes OSV de
+Renovate ne couvrent qu'une dizaine de datasources de paquets. Le preset `base`
+annonçait donc depuis le départ une veille que la plateforme ne peut pas produire
+sur cet axe : son `osvVulnerabilityAlerts` a été retiré et la description de son
+`vulnerabilityAlerts` corrigée, ce bloc ne valant que pour ce que la plateforme
+sait voir, les workflows appelants et les presets.
+
+**[fait]** Ni le CVE ni le score CVSS ne servent de clé. Sur les 45 avis du dépôt
+Metabase au 2026-10-30, 17 n'ont aucun CVE et 29 aucun score. Le plus récent,
+GHSA-v44v-x8x4-mvcw, critique, n'a ni l'un ni l'autre et est absent de la base
+globale GitHub comme d'OSV. Seules les plages `vulnerable_version_range` et
+`patched_versions` de l'avis sont lues.
+
+**[fait]** L'édition écrite en `x` littéral est substituée par celle de la
+version jugée. Les plages de Metabase s'écrivent `>= x.64.0, < x.64.3.4` pour
+couvrir d'un seul avis la ligne OSS et la ligne Enterprise. Ce n'est pas du
+semver : sans cette substitution aucune plage ne correspond jamais et tout le
+parc passe pour indemne. Elle maintient de surcroît la comparaison dans la ligne
+de la version jugée, les deux éditions n'étant jamais comparables entre elles.
+
+**[fait]** Une plage dont la forme n'est pas celle qu'on sait lire ne vaut ni
+affectation ni innocence : elle est tranchée par le correctif que l'avis annonce
+lui-même. Au-delà du plus haut correctif qu'il nomme dans la ligne, la faille y
+est corrigée quelle que soit la forme de ses plages ; en dessous, l'avis est
+signalé comme non concluant plutôt que tenu pour indemne. L'amont en écrit
+beaucoup et de plusieurs sortes : des disjonctions de lignes
+`<x.44.5,<x.43.7,<x.42.6`, des bornes basses sans opérateur `1.55.0, < 1.55.23`,
+de la prose `All enterprise versions < 1.59.x`. Sur les 104 plages des 45 avis du
+dépôt Metabase, 30 ne se lisent pas. Le premier jet les signalait toutes, à
+chaque passage, sur un parc dont aucune version n'était affectée : l'alerte
+permanente qu'on apprend à ignorer. Deux règles les ramènent à zéro sur la ligne
+`0.x`, le correctif annoncé en écartant 18 et la règle de ligne ci-dessous les 12
+autres. Il en reste 6 sur la ligne `1.x`, qu'aucune des deux ne tranche.
+
+**[fait]** Un avis qui ne nomme aucune version de la ligne en service ne la
+concerne pas. Les avis qui portent sur les deux éditions s'écrivent en `x`
+littéral : un avis dont tous les numéros sont d'une autre édition est un avis de
+cette autre édition. Limite connue, quelques vieux avis écrivent leurs numéros
+sans édition, `<55.13` pour `<0.55.13`, et passent ainsi pour étrangers à la
+ligne ; ils portent sur des versions corrigées depuis des années.
+
+**[fait]** Une application en pause n'entre jamais dans ce qui demande une
+intervention, son correctif fût-il atteignable. Rien n'y est déployé et
+`--propose-security` l'écarte : le tableau de bord désignerait une pull request
+qui ne sera jamais ouverte, et le marqueur d'état resterait levé sur une faille
+que rien dans le watcher ne peut refermer. Elle reste constatée au tableau, son
+correctif nommé et dit non proposé, comme la montée de base d'une application en
+pause.
+
+**[fait]** Une application est désignée dans le manifeste par sa région et son
+nom, y compris par les deux propositions quand elles l'éditent. Le nom seul ne
+suffit pas et rien n'en garantit l'unicité : `init` écrit une entrée par région
+et par application sans dédoublonner les noms, le schéma ne contraint pas
+l'unicité et `--validate` ne la vérifie pas. Sur le nom seul, deux instances
+homonymes dans deux régions rendaient le même rang dans le document : la seconde
+était écartée sur un message faux, « version introuvable dans le manifeste », sa
+montée n'était jamais proposée et le passage sortait en succès.
+
+**[fait]** Un appel réseau par couple dépôt amont et version en service, et non
+par application : sept instances du même outil à la même version donneraient sept
+fois la même requête. Le verdict se rend en revanche par application, contre le
+lock : le parc n'est pas homogène, six instances en v0.64.4.2 et une en v0.63.16
+sont deux situations de sécurité distinctes.
+
+**[fait]** Le correctif retenu est la version la plus basse de la ligne en
+service qu'aucun avis ne couvre, et non la borne haute de la plage : les deux
+diffèrent régulièrement, `>= x.58.0, < x.58.23` est corrigée en `x.58.24`. Il est
+confronté à tous les avis et pas seulement à ceux qui couvrent la version en
+service, sinon une faille apparue après elle rattraperait la version visée et la
+pull request proposerait une montée vers un état encore vulnérable.
+
+**[fait]** Une faille sans correctif atteignable dans sa ligne est constatée au
+tableau de bord et n'y demande pas d'intervention. Il n'existe pas toujours de
+version corrigée le jour où on l'apprend, et la réclamer à chaque passage en
+ferait là encore une alerte permanente, exactement le travers de la montée de
+base volontairement retenue. Monter d'édition n'est pas un correctif mais une
+montée fonctionnelle, qui ne se décide pas sous la pression d'un avis.
+
+**[fait]** La décision de monter passe par une pull request, `--propose-security`,
+second et dernier endroit du projet où le watcher en ouvre une. Elle juge la
+version du manifeste et non celle du lock : le manifeste est l'intention, et
+c'est la seule chose que cette commande édite. Le constat du tableau de bord,
+lui, juge bien ce qui tourne.
+
+**[fait]** `--propose-security` n'a besoin d'aucun accès à Scalingo, les avis de
+l'amont et le manifeste suffisant à rendre le verdict. Son workflow ne déclare
+donc pas d'`environment` et ne peut pas lire la clé du proxy. Les applications en
+pause sont écartées, comme pour les bases, rien n'y étant jamais déployé. Les
+deux propositions refusent de tourner dans le même passage : elles écrivent
+`pr-title.txt` et `pr-body.md` au même endroit et poussent sur deux branches
+distinctes.
+
+**[fait]** Aucun champ pour désactiver le relevé, ni par outil ni par
+application. Il ne lit que des avis publics et n'écrit rien sans pull request :
+un interrupteur ne servirait qu'à taire une faille connue, et cette décision n'a
+pas sa place dans un fichier versionné. Une application qu'on ne veut pas voir
+bouger se met en pause, ce qui la laisse constatée sans rien proposer. Un faux
+positif se corrige par `tool.upstream`, qui désigne le bon dépôt.
+
+**[fait]** Une surveillance muette dit qu'elle a regardé : le passage annonce le
+nombre d'avis confrontés et sur combien de dépôts. Sans ce décompte, un amont qui
+ne publie rien sur les versions en service et un relevé en panne rendent
+exactement le même silence.
 
 **[fait]** Surveillance des stacks. Chaque application est confrontée à la liste
 des stacks de sa région, qui portent une date de dépréciation. Un stack en fin de
@@ -894,10 +1024,11 @@ besoin en attendant.
 une URL signée temporaire via l'API GitHub avant de la transmettre à Scalingo.
 
 **[fait]** Le tableau de bord porte un tableau par chose surveillée : l'outil,
-sous son nom, les bases, les buildpacks. Chacun donne la version en service, ce
-qui est disponible en amont, et l'état. Les versions lient vers leur annonce :
-les releases GitHub du dépôt amont de l'outil, le changelog Scalingo pour les
-bases, avec son ancre par version.
+sous son nom, les avis de sécurité de son amont, les bases, les buildpacks.
+Chacun donne la version en service, ce qui est disponible en amont, et l'état.
+Les versions lient vers leur annonce : les releases GitHub du dépôt amont de
+l'outil, le changelog Scalingo pour les bases, avec son ancre par version. Le
+tableau des avis lie chaque avis vers sa page `security/advisories`.
 
 **[fait]** Chaque tableau porte une légende de sa colonne `État`, juste en
 dessous. Les valeurs ne veulent pas dire la même chose d'un tableau à l'autre :
@@ -972,11 +1103,15 @@ Terraform de Scalingo a une ressource dédiée, plutôt que de réécrire l'aler
 ## 9. Distribution
 
 **[fait]** Workflows réutilisables (`on: workflow_call`) pour la réconciliation,
-l'application, la validation et la proposition des montées de base. Le dépôt
-consommateur ne déclare que les déclencheurs, le cron, les permissions et le
-mappage des secrets. Les chemins des fichiers du parc, le label et le titre du
-tableau de bord, les messages de commit et la branche de proposition sont des
-inputs.
+l'application, la validation et les deux propositions, montées de base et
+montées de sécurité. Le dépôt consommateur ne déclare que les déclencheurs, le
+cron, les permissions et le mappage des secrets. Les chemins des fichiers du
+parc, le label et le titre du tableau de bord, les messages de commit et les
+branches de proposition sont des inputs.
+
+**[à faire]** Appelant de `propose-security.yml` dans le dépôt starter. Le
+workflow voyage avec l'outil dès maintenant, mais le starter ne pourra l'épingler
+qu'une fois cette version publiée, comme pour tout ce que l'outil ajoute.
 
 **[fait]** Le job appelé récupère le dépôt consommateur, puis l'outil au sha du
 workflow appelé, et installe Node et pnpm aux versions déclarées par l'outil
