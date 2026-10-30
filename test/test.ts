@@ -44,6 +44,7 @@ import {
 import { upstreamKey, upstreamsDeclared } from "../src/audit.ts";
 import { renderManifest } from "../src/init.ts";
 import { compose, matrixPayload, slackPayload, teamsPayload } from "../src/notify.ts";
+import { apiScopes, backupScopes, deniedByProxy } from "../src/fgp-scopes.ts";
 import { DEFAULT_FGP_URL, flagValue, flagValues, outFile, resolvePaths } from "../src/options.ts";
 import { compareLines, toolName, upstreamOf } from "../src/upstream.ts";
 
@@ -179,7 +180,7 @@ check(
 check("le refus de sauvegarde concurrente est rattrape", /a backup is running/i.test(srcBackupAddon), true);
 
 // Ce rattrapage lit le corps de la reponse, que req() ecrasait dans son message.
-check("req expose le corps d'un refus", /\{ status: res\.status, body \}/.test(apply), true);
+check("req expose le corps d'un refus", /\{ status: res\.status, body\b/.test(apply), true);
 
 console.log("\nEclaireur");
 
@@ -750,6 +751,49 @@ check("a defaut, de la variable", toolName("OPENSEARCH_DASHBOARDS_VERSION"), "Op
 check("v0.63 et v1.52 sont sur deux lignes", compareLines([0, 63, 18], [1, 52, 2], 1) < 0, true);
 check("v0.63 et v0.64 sont sur la meme ligne", compareLines([0, 63, 18], [0, 64, 0], 1), 0);
 check("une ligne de deux composants separe 0.63 de 0.64", compareLines([0, 63, 18], [0, 64, 0], 2) < 0, true);
+
+console.log("\nScopes des blobs du proxy");
+
+{
+  const scopes = apiScopes([{ app: "beta" }, { app: "alpha", paused: true }]);
+  const methodsOf = (s: string) => s.slice(0, s.indexOf(":")).split("|");
+  const pathOf = (s: string) => s.slice(s.indexOf(":") + 1);
+  const about = (app: string) => scopes.filter((s) => pathOf(s).startsWith(`/v1/apps/${app}`));
+  const writes = (list: string[]) => list.filter((s) => methodsOf(s).some((m) => m !== "GET"));
+
+  check("une app normale peut deployer et poser ses variables", writes(about("beta")), [
+    "GET|POST:/v1/apps/beta/variables",
+    "PATCH:/v1/apps/beta/variables/*",
+    "GET|POST:/v1/apps/beta/deployments",
+  ]);
+  check("une app en pause n'a que des GET", [about("alpha").length > 0, writes(about("alpha"))], [true, []]);
+  check(
+    "chaque route d'app nomme son app, aucun joker a la place du nom",
+    scopes.filter((s) => pathOf(s).startsWith("/v1/apps/") && !/^\/v1\/apps\/(alpha|beta)(\/|$)/.test(pathOf(s))),
+    [],
+  );
+  check("hors des apps, seules deux lectures globales", scopes.filter((s) => !pathOf(s).startsWith("/v1/apps/")), [
+    "GET:/v1/apps",
+    "GET:/v1/features/stacks",
+  ]);
+  check("aucun DELETE", scopes.filter((s) => methodsOf(s).includes("DELETE")), []);
+  check(
+    "les scopes ne dependent pas de l'ordre du manifeste",
+    apiScopes([{ app: "alpha", paused: true }, { app: "beta" }]),
+    scopes,
+  );
+  check("une base en pause est en lecture seule", writes(backupScopes(true)), []);
+  check("une base active garde sauvegarde et montee de version", writes(backupScopes(false)), [
+    "GET|POST:/api/databases/*/backups",
+    "POST:/api/databases/*/upgrade",
+  ]);
+
+  const answer = (status: number, source: string | null, body: unknown) =>
+    deniedByProxy(new Response(null, { status, headers: source ? { "X-FGP-Source": source } : {} }), JSON.stringify(body));
+  check("un scope_denied du proxy est reconnu", answer(403, "proxy", { error: "scope_denied" }), true);
+  check("un 403 de Scalingo n'est pas un refus du proxy", answer(403, "upstream", { error: "scope_denied" }), false);
+  check("un autre refus du proxy non plus", answer(403, "proxy", { error: "target_forbidden" }), false);
+}
 
 console.log("\nChemins des donnees et des sorties");
 
@@ -1386,6 +1430,60 @@ try {
     "dans un clone, le depot vient du remote origin",
     [fromRemote.status, fromRemote.output.includes("--repo exemple/depuis-git")],
     [0, true],
+  );
+
+  const scoped = sandbox();
+  const requests = join(scoped.root, "generate.jsonl");
+  const scopedRun = run(scoped, "fgp-blobs.ts", ["--manifest", "../parc/manifest.yaml", "--fgp", "../parc/fgp.json", "--out-dir", "../sortie"], {
+    ...BLOBS_ENV,
+    GENERATED: requests,
+  });
+  const sent = new Map(
+    readFileSync(requests, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { name: string; scopes: string[] })
+      .map((r) => [r.name, r.scopes]),
+  );
+  const appsNamed = (scopes: string[] = []) =>
+    [...new Set(scopes.flatMap((s) => /:\/v1\/apps\/([^/]+)/.exec(s)?.slice(1) ?? []))].sort();
+  check(
+    "fgp-blobs ne nomme dans chaque blob d'API que les apps du manifeste de sa region",
+    [scopedRun.status, appsNamed(sent.get("api osc-fr1")), appsNamed(sent.get("api osc-secnum-fr1"))],
+    [0, ["alpha-metabase", "beta-metabase"], ["delta-metabase", "gamma-metabase"]],
+  );
+  check(
+    "l'app en pause du manifeste n'a que des lectures, son blob de base aussi",
+    [
+      (sent.get("api osc-fr1") ?? []).filter((s) => s.includes("/beta-metabase") && !s.startsWith("GET:")),
+      sent.has("sauvegarde beta-metabase"),
+      (sent.get("sauvegarde beta-metabase") ?? []).filter((s) => !s.startsWith("GET:")),
+    ],
+    [[], true, []],
+  );
+  check(
+    "les autres apps gardent l'ecriture sur leur nom seul",
+    (sent.get("api osc-fr1") ?? []).filter((s) => !s.startsWith("GET:")),
+    ["GET|POST:/v1/apps/alpha-metabase/variables", "PATCH:/v1/apps/alpha-metabase/variables/*", "GET|POST:/v1/apps/alpha-metabase/deployments"],
+  );
+
+  const denied = sandbox();
+  const deniedEnv = { FGP_KEY: "cle-factice-des-tests", DENIED: "1" };
+  const deniedPlan = run(denied, "apply.ts", ["--dry-run", ...FLEET, "--fgp", join(FIXTURES, "fgp.json"), "--out-dir", "../sortie"], deniedEnv);
+  check(
+    "un refus de scope du proxy pointe la regeneration de fgp.json",
+    /refus du proxy sur GET \S+\/v1\/apps\/alpha-metabase : appel hors des scopes de fgp\.json, a regenerer avec fgp-blobs\.ts/.test(deniedPlan.output),
+    true,
+  );
+  const deniedAudit = run(denied, "audit.ts", ["--fgp", join(FIXTURES, "fgp.json"), "--manifest", "../parc/manifest.yaml"], deniedEnv);
+  check(
+    "l'audit ignore les apps hors manifeste que le proxy refuse, et signale celles du manifeste",
+    [
+      deniedAudit.status,
+      deniedAudit.output.includes("3 app(s) hors du manifeste"),
+      /alpha-metabase.*hors des scopes de fgp\.json/.test(deniedAudit.output),
+    ],
+    [0, true, true],
   );
 
   console.log("\nPremier manifeste par init, contre un fetch simule");

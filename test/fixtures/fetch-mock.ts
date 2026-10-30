@@ -5,8 +5,11 @@
  * Chaque appel est note dans le fichier TRACE. Les bases repondent depuis
  * VERSIONS (region/app -> version), toujours conformes au manifeste et avec une
  * version suivante dans la meme majeure. Le proxy rend un blob factice a chaque
- * generation. Tout autre appel repond 500.
+ * generation, et note sa demande dans le fichier GENERATED s'il est donne.
+ * Tout autre appel repond 500.
  * OUTAGE=1 fait echouer la liste des addons, comme un proxy injoignable.
+ * DENIED=1 fait refuser par le proxy tout appel qui passe par lui, faute de scope,
+ * hormis la liste des apps.
  */
 
 import { appendFileSync } from "node:fs";
@@ -23,7 +26,19 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   let r: RegExpExecArray | null;
 
   if (m === "POST" && u === "https://auth.scalingo.com/v1/tokens/exchange") return json({ token: "porteur" });
-  if (m === "POST" && u.endsWith("/api/generate")) return json({ blob: "blob-factice" });
+  if (m === "POST" && u.endsWith("/api/generate")) {
+    if (process.env.GENERATED) appendFileSync(process.env.GENERATED, `${String(init.body)}\n`);
+    return json({ blob: "blob-factice" });
+  }
+  if (process.env.DENIED && u === "https://fgp.exemple.test/v1/apps") {
+    return json({ apps: [{ id: "a1", name: "alpha-metabase" }, { id: "a2", name: "hors-manifeste" }] });
+  }
+  if (process.env.DENIED && u.startsWith("https://fgp.exemple.test/")) {
+    return new Response(JSON.stringify({ error: "scope_denied", message: "Insufficient permissions for this action" }), {
+      status: 403,
+      headers: { "Content-Type": "application/json", "X-FGP-Source": "proxy" },
+    });
+  }
   if (m === "GET" && (r = /^https:\/\/api\.([^/]+)\.scalingo\.com\/v1\/apps\/([^/]+)\/addons$/.exec(u))) {
     if (process.env.OUTAGE) return json({ error: "injoignable" }, 503);
     return json({ addons: [{ id: `${r[1]}~${r[2]}`, addon_provider: { id: "postgresql" } }] });
