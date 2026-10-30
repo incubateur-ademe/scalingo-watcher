@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.1.1...v1.1.2) (2026-10-30)
+
+
+### Corrections
+
+* **cve:** une version glissante .x n'est plus lue comme x.y.0 face aux failles ([#27](https://github.com/incubateur-ademe/scalingo-watcher/issues/27)) ([2e9dbb1](https://github.com/incubateur-ademe/scalingo-watcher/commit/2e9dbb1c5d138bc874384b4b34e6e07d27ae78fc))
+
 ## [1.1.1](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.1.0...v1.1.1) (2026-10-30)
 
 
