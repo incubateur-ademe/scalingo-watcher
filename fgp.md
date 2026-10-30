@@ -38,8 +38,24 @@ Relancer le script régénère tout, ce qu'il faut faire pour changer de clé.
 
 Il faut un blob d'API par région du manifeste, et un blob de sauvegarde par
 application qui a une base, le mode `scalingo-addon` figeant l'app et l'addon
-dans le blob. Ajouter une application au manifeste demande donc de relancer le
-script.
+dans le blob.
+
+Le blob d'API d'une région nomme chacune de ses applications du manifeste, et
+n'ouvre l'écriture qu'à celles qui ne sont pas en pause. Le blob de base d'une
+application en pause est en lecture seule. **Ajouter une application au manifeste
+ou lever une pause demande donc de relancer le script** : sans cela, le proxy
+refuse les appels de cette application en `403 scope_denied`, et le watcher
+l'annonce par une erreur qui renvoie à `fgp-blobs.ts`. Mettre une application en
+pause sans régénérer reste sûr, le watcher n'y écrivant plus, mais la clé
+garde ses droits d'écriture sur elle jusqu'à la régénération.
+
+Un `fgp.json` généré par une version précédente, avec des jokers à la place des
+noms d'application, reste lisible et fonctionne tel quel. Le régénérer suffit à
+passer aux scopes par application.
+
+Le proxy plafonne un blob à 4096 caractères. Le blob d'API grossit avec le
+nombre d'applications de la région, et un dépassement fait échouer la génération
+en `blob_too_large`.
 
 La clé va ensuite en secret de l'environment que déclarent les workflows. Le
 script affiche la commande, qui vise le dépôt du remote `origin` :
@@ -60,28 +76,44 @@ export FGP_KEY='<ta cle>'
 export TK='tk-us-xxxxxxxx'
 ```
 
-Un blob par région pour l'API principale :
+Un blob par région pour l'API principale, qui nomme chaque application du
+manifeste dans cette région. Chez FGP, `*` couvre n'importe quelle suite de
+caractères, `/` compris : un joker à la place du nom ouvrirait la route à toutes
+les applications du compte. Ici `alpha-metabase` est pilotée et `beta-metabase`
+en pause, donc en lecture seule :
 
 ```bash
-for region in osc-fr1 osc-secnum-fr1; do
-  curl -sX POST "$FGP/api/generate" -H 'Content-Type: application/json' -d "{
-    \"token\": \"$TK\",
-    \"target\": \"https://api.$region.scalingo.com\",
-    \"auth\": \"scalingo-exchange\",
-    \"key\": \"$FGP_KEY\",
-    \"ttl\": 0,
-    \"name\": \"api $region\",
-    \"scopes\": [
-      \"GET:/v1/apps\",
-      \"GET:/v1/apps/*\",
-      \"GET:/v1/features/stacks\",
-      \"POST:/v1/apps/*/deployments\",
-      \"POST:/v1/apps/*/variables\",
-      \"PATCH:/v1/apps/*/variables/*\"
-    ]
-  }" | node -e "let s = ''; process.stdin.on('data', (d) => (s += d)).on('end', () => { let b; try { b = JSON.parse(s).blob; } catch {} if (b) console.log('$region', b); else { console.error('$region', s); process.exitCode = 1; } })"
-done
+region=osc-fr1
+curl -sX POST "$FGP/api/generate" -H 'Content-Type: application/json' -d "{
+  \"token\": \"$TK\",
+  \"target\": \"https://api.$region.scalingo.com\",
+  \"auth\": \"scalingo-exchange\",
+  \"key\": \"$FGP_KEY\",
+  \"ttl\": 0,
+  \"name\": \"api $region\",
+  \"scopes\": [
+    \"GET:/v1/apps\",
+    \"GET:/v1/features/stacks\",
+    \"GET:/v1/apps/alpha-metabase\",
+    \"GET|POST:/v1/apps/alpha-metabase/variables\",
+    \"PATCH:/v1/apps/alpha-metabase/variables/*\",
+    \"GET|POST:/v1/apps/alpha-metabase/deployments\",
+    \"GET:/v1/apps/alpha-metabase/deployments/*\",
+    \"GET:/v1/apps/alpha-metabase/addons\",
+    \"GET:/v1/apps/alpha-metabase/scm_repo_link\",
+    \"GET:/v1/apps/beta-metabase\",
+    \"GET:/v1/apps/beta-metabase/variables\",
+    \"GET:/v1/apps/beta-metabase/deployments\",
+    \"GET:/v1/apps/beta-metabase/deployments/*\",
+    \"GET:/v1/apps/beta-metabase/addons\",
+    \"GET:/v1/apps/beta-metabase/scm_repo_link\"
+  ]
+}" | node -e "let s = ''; process.stdin.on('data', (d) => (s += d)).on('end', () => { let b; try { b = JSON.parse(s).blob; } catch {} if (b) console.log('$region', b); else { console.error('$region', s); process.exitCode = 1; } })"
 ```
+
+Les deux lectures globales servent à l'audit et à `init`, qui listent les
+applications, et au suivi des échéances de stacks. `deployments/*` couvre le
+détail d'un déploiement et son journal de build.
 
 Un blob par application pour ses bases, le mode `scalingo-addon` liant le blob
 à une base précise :
@@ -108,6 +140,9 @@ curl -sX POST "$FGP/api/generate" -H 'Content-Type: application/json' -d "{
   ]
 }" | node -e "let s = ''; process.stdin.on('data', (d) => (s += d)).on('end', () => { let b; try { b = JSON.parse(s).blob; } catch {} if (b) console.log(b); else { console.error(s); process.exitCode = 1; } })"
 ```
+
+Pour une application en pause, ne garder que les lectures : `GET:/api/databases/*`,
+`GET:/api/database_type_versions/*` et `GET:/api/operations/*`.
 
 L'identifiant d'addon se lit avec `scalingo --region <region> --app <app> addons`.
 
@@ -154,9 +189,15 @@ archiver.
 
 Aucun `DELETE`, donc ni application, ni addon, ni variable supprimables. Pas de
 création d'application, pas de changement de stack ni de renommage, pas de
-scale, pas de redémarrage. Une clé qui fuite permet de lire, de poser une
-variable de version, de déployer, de sauvegarder une base et de la monter d'une
-version, rien d'autre.
+scale, pas de redémarrage. Une clé qui fuite permet de lister les applications
+du compte et de lire celles du manifeste. Sur celles qui ne sont pas en pause,
+elle permet aussi de poser une variable, de déployer, de sauvegarder une base et
+de la monter d'une version, rien d'autre. Les applications hors du manifeste lui
+sont fermées.
+
+Derrière le proxy, l'audit et `init` ne relèvent donc que les applications du
+manifeste et comptent les autres à part. Relever tout le compte demande
+`SCALINGO_API_TOKEN`.
 
 ## Durée de vie
 

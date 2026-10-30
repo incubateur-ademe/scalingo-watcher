@@ -429,10 +429,31 @@ sortie JSON.
 
 **[fait]** Accès par un proxy fine-grained, au choix. Le dépôt ne détient alors
 pas de jeton Scalingo mais une clé, et chaque blob borne ce qu'elle autorise à une
-méthode et un chemin. Une clé qui fuite permet de lire, de poser une variable de
+méthode et un chemin. Une clé qui fuite permet de lire les applications du
+manifeste et, sur celles qui ne sont pas en pause, de poser une variable de
 version, de déployer, de sauvegarder une base et de la monter d'une version :
 aucun `DELETE`, aucune création d'application, aucun changement de stack, aucun
 scale, aucun redémarrage.
+
+**[fait]** Les blobs d'API nomment chaque application du manifeste au lieu d'un
+joker. Chez FGP, `*` couvre aussi les `/` : l'ancien `POST:/v1/apps/*/deployments`
+laissait la clé déployer et réécrire les variables de n'importe quelle
+application visible du compte. Chaque blob de région ne porte plus que deux
+lectures globales, la liste des applications et celle des stacks, puis les routes
+lues par le moteur pour chaque application de la région. L'écriture
+(déploiement, variables) n'est ouverte qu'aux applications sans `paused: true`,
+et le blob de base d'une application en pause est en lecture seule, sans
+sauvegarde ni montée de version. Ajouter une application ou lever une pause
+demande donc de régénérer `fgp.json`. Un appel que le proxy refuse faute de scope
+(`403 scope_denied`, `X-FGP-Source: proxy`) le dit dans l'erreur, au lieu d'un
+`403` muet. Un `fgp.json` généré avant reste lisible et fonctionne tel quel, avec
+ses jokers, jusqu'à sa régénération.
+
+**[fait]** Derrière le proxy, l'audit et `init` ne voient plus que les
+applications du manifeste. Les autres applications de la région sont refusées
+par le proxy et comptées à part, sans erreur. Une application du manifeste
+refusée reste une erreur de collecte, puisque c'est `fgp.json` qui est en retard.
+Relever tout le compte demande `SCALINGO_API_TOKEN`.
 
 **[fait]** Le renouvellement des jetons est délégué au proxy, y compris le jeton
 d'addon des sauvegardes qui ne vit qu'une heure et que le watcher ne voit plus
