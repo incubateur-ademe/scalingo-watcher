@@ -54,6 +54,9 @@
         },
         "backup": {
           "$ref": "#/$defs/backupValue"
+        },
+        "settle": {
+          "$ref": "#/$defs/settle"
         }
       }
     },
@@ -73,6 +76,31 @@
       ],
       "default": "required",
       "description": "`required` : le job declenche une sauvegarde de la base et attend qu'elle soit disponible avant de deployer. Si elle echoue, il ne deploie pas. C'est le seul filet reel, parce qu'une montee de version migre le schema de la base applicative et qu'un retour arriere ne se fait pas en redeployant l'ancienne version : il faut restaurer.\n\n`not-available` : l'app n'a pas d'addon sauvegardable, ou sa sauvegarde n'est pas pilotable par l'API. Le deploiement se fait sans filet. Cette valeur se pose consciemment au moment d'ajouter l'app, apres verification, jamais par defaut."
+    },
+    "settle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "window"
+      ],
+      "description": "Fenetre de garde apres un deploiement que Scalingo a conclu reussi. Pendant ce temps, les evenements de l'application sont relus, et le succes n'est consigne dans le lock que si rien ne l'a fait redemarrer.\n\nLe statut `success` ne dit qu'une chose : le conteneur a repondu sur son port. Metabase ouvre Jetty AVANT de migrer sa base. Le port repond en quelques secondes, Scalingo conclut, puis la migration tourne. Si elle echoue, le processus sort en code 1 alors que le lock porte deja `deployed` et que l'eclaireur a donne son feu vert aux suivantes, qui partent a trois de front. La fenetre existe pour que ce feu vert dise quelque chose.\n\nLe controle ne connait rien de l'outil deploye : il relit `GET /v1/apps/<app>/events` et refuse un evenement `crash`, `repeated_crash`, ou `restart` de raison `unexpected_failure`. Ce n'est pas une sonde sur l'application, qu'une instance derriere un oauth2-proxy rendrait muette, le wrapper prenant $PORT a la place de l'outil, et ce n'est pas une lecture des journaux applicatifs, dont l'URL vit hors de l'hote d'API et dont la plateforme jette des lignes au-dela de son debit d'ingestion.\n\nCe que la fenetre prouve est borne : non pas que l'outil a fini de demarrer, mais qu'il n'est pas tombe dans le temps qu'on lui a laisse. Le statut d'application est relu une derniere fois a la fin, ce qui attrape une instance eteinte, mais pas une boucle de redemarrage : la plateforme ne marque `crashed` qu'au treizieme crash consecutif, soit plusieurs heures.\n\nDeux pieges. Le champ se surcharge en bloc et non cle par cle : une application qui declare `settle` ignore entierement `defaults.settle`. Et la fenetre de l'eclaireur retarde toute la vague, puisqu'il est deploye seul avant les autres.\n\nEn acces par proxy, la route des evenements doit figurer dans les scopes : un `fgp.json` genere avant l'apparition de ce champ est a regenerer, sinon le proxy refuse l'appel et le passage s'interrompt.",
+      "examples": [
+        {
+          "window": 180
+        }
+      ],
+      "properties": {
+        "window": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1800,
+          "default": 0,
+          "description": "Duree de la fenetre, en secondes.\n\n`0`, la valeur par defaut, est le comportement d'avant ce champ : le statut du deploiement conclut seul, rien n'est relu, aucun appel supplementaire n'est emis. C'est aussi le seul moyen de retirer a une application une fenetre posee dans `defaults`, faute de pouvoir ne pas heriter d'un objet.\n\nLa compter sur la migration la plus longue observee, pas sur la plus courante : une fenetre trop courte ne signale rien et donne l'illusion d'un controle, ce qui est pire que pas de controle du tout. Elle coute une lecture toutes les dix secondes, et autant de minutes a la vague.\n\nLe plafond de 1800 attrape une valeur donnee en millisecondes, qui autrement figerait la vague des heures sous le verrou que la reconciliation suivante attend.",
+          "examples": [
+            180
+          ]
+        }
+      }
     },
     "app": {
       "type": "object",
@@ -104,6 +132,9 @@
         },
         "backup": {
           "$ref": "#/$defs/backupValue"
+        },
+        "settle": {
+          "$ref": "#/$defs/settle"
         },
         "source": {
           "type": "object",
@@ -235,7 +266,10 @@
           "minor": "auto",
           "major": "pr"
         },
-        "backup": "required"
+        "backup": "required",
+        "settle": {
+          "window": 180
+        }
       },
       "apps": [
         {
@@ -255,6 +289,9 @@
           "app": "beta-metabase",
           "region": "osc-secnum-fr1",
           "backup": "not-available",
+          "settle": {
+            "window": 0
+          },
           "source": {
             "repo": "exemple/metabase-scalingo",
             "branch": "master",

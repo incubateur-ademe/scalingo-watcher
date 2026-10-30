@@ -132,6 +132,15 @@ l'accès n'est que collaborateur.
 **[fait]** Mode de sauvegarde par application : `required` ou `not-available`.
 Cette seconde valeur se pose consciemment après vérification, jamais par défaut.
 
+**[fait]** Fenêtre de garde par application, `settle: {window: <secondes>}`,
+posable aussi dans `defaults`. Déclarée, elle fait relire l'application pendant
+ce temps après un déploiement conclu réussi, et le succès n'est consigné que si
+rien ne l'a fait redémarrer. Absente, ou à `window: 0`, le statut du déploiement
+conclut seul et aucun appel supplémentaire n'est émis : c'est le comportement
+d'avant ce champ. La surcharge se fait en bloc, un objet ne s'héritant pas clé
+par clé, donc `window: 0` est le seul moyen de retirer à une application une
+fenêtre posée dans `defaults`.
+
 **[fait]** Chaque application déclare son dépôt applicatif et sa branche
 indépendamment : deux applications d'un même parc peuvent suivre deux dépôts
 différents.
@@ -330,6 +339,29 @@ oauth2-proxy devant Metabase : la redéployer depuis `master` exposerait
 l'instance sans authentification, sans que le statut du déploiement le signale.
 Rien n'est tenté dans ce cas.
 
+**[fait]** Un troisième contrôle, sur le sens de l'écart et non plus sur sa
+cohérence. Une cible du manifeste strictement antérieure à la version que porte
+la variable de l'application est refusée au lieu d'être déployée. Le manifeste
+dit l'intention, pas la vérité : une application montée à la main avant que le
+manifeste ne suive se ferait redescendre au passage suivant, sur une base portant
+déjà les migrations de la version supérieure, que l'ancien binaire refuse de
+démarrer. C'est arrivé le 2026-10-30, et seule une fusion dans la fenêtre l'a
+évité. Le message nomme la variable et les deux versions, et renvoie à l'un des
+deux gestes : aligner le manifeste sur ce qui tourne, ou restaurer la base puis
+forcer la descente par `--force --app`.
+
+**[fait]** Ce contrôle ne s'applique qu'à une version qu'un déploiement réussi
+accompagne dans le lock. Après un échec, la variable porte déjà la cible ratée
+sans que le binaire ait changé : refuser le retour en arrière serait refuser la
+seule réaction sensée.
+
+**[fait]** La comparaison est purement numérique, sans égard pour les lignes de
+publication. Une descente de majeure est donc refusée comme une autre, et chez
+Metabase un passage de l'édition Enterprise à l'OSS l'est aussi, puisque son
+numéro est inférieur. Écarter les lignes entre elles inversait les risques : la
+descente la plus destructrice, de 12.1 à 11.6, passait quand 12.1.3 vers 12.1.0
+était refusée.
+
 **[fait]** Déploiement par archive via `POST /deployments`, avec une URL
 d'archive GitHub que Scalingo télécharge lui-même. Aucune clé SSH, aucun dépôt à
 héberger, aucun artefact intermédiaire.
@@ -342,6 +374,45 @@ déploiement.
 
 **[fait]** Attente du statut final avec un délai maximal de 20 minutes, en
 reconnaissant les six statuts terminaux de Scalingo.
+
+**[fait]** Fenêtre de garde après un déploiement conclu réussi, quand
+l'application la déclare. Le statut `success` ne dit qu'une chose : le conteneur
+a répondu sur son port. Metabase ouvre Jetty avant de migrer sa base, donc le
+port répond en quelques secondes, Scalingo conclut, puis la migration tourne. Si
+elle échoue, le processus sort en code 1 alors que le lock porte déjà `deployed`
+et que l'éclaireur a donné son feu vert aux suivantes, parties à trois de front.
+Pendant la fenêtre, les événements de l'application sont relus toutes les dix
+secondes, et un `crash`, un `repeated_crash` ou un `restart` de raison
+`unexpected_failure` met l'application en quarantaine comme un échec de
+déploiement : le lock ne porte pas la nouvelle version, et l'échec sur
+l'éclaireur arrête la vague.
+
+**[fait]** Seuls comptent les événements apparus après le déploiement. Ceux déjà
+là sont relevés d'abord et écartés, ce qui évite de comparer notre horloge à
+celle de la plateforme.
+
+**[fait]** Le contrôle ne connaît rien de l'outil déployé : aucun marqueur, aucun
+chemin HTTP, rien qu'une route de la plateforme déjà parlée par le moteur. Il ne
+prouve pas que l'outil a fini de démarrer, il constate qu'il n'est pas tombé dans
+le temps qu'on lui a laissé.
+
+**[fait]** Le statut de l'application est relu une dernière fois en fin de
+fenêtre, et seuls `crashed` et `stopped` comptent. Il ne pouvait pas porter le
+contrôle à lui seul : la plateforme ne marque `crashed` qu'au treizième crash
+consécutif, soit plus de quatre heures d'attentes cumulées, et l'application se
+lit `running` pendant toute la boucle. Les états transitoires, `booting`,
+`restarting` et `scaling`, ne prouvent rien : refuser dessus aurait mis en
+quarantaine une application que quelqu'un redimensionne pendant la fenêtre.
+
+**[fait]** Le filtre des événements est étroit par construction : un événement
+d'un type inattendu est ignoré, donc une erreur sur les noms surveillés ne peut
+que faire manquer un échec, jamais refuser un déploiement sain. En revanche une
+réponse sans liste d'événements interrompt, plutôt que de passer pour une
+surveillance qui ne regarde rien.
+
+**[fait]** Une lecture impossible pendant la fenêtre interrompt au lieu de mettre
+en quarantaine. C'est par là qu'arrive le refus du proxy quand `fgp.json` précède
+ce champ, et son message renvoie à la régénération des blobs.
 
 **[fait]** Relevé des buildpacks réellement utilisés après un déploiement réussi,
 consigné dans le lock à titre d'observation.
@@ -433,6 +504,24 @@ produit ne la redéclenche pas.
 **[fait]** La quarantaine survit au relevé, sinon chaque passage la lèverait et
 la même cible serait retentée indéfiniment. Elle tombe en revanche si
 l'application a atteint la cible entre-temps, quel qu'en soit le moyen.
+
+**[fait]** Atteindre la cible demande un déploiement réussi, et pas seulement le
+bon couple version-commit. Sur échec, la variable porte déjà la nouvelle version,
+que le moteur ne remet pas, et le déploiement raté a pour `git_ref` le commit de
+la cible : le relevé concluait donc que la cible était atteinte, levait la
+quarantaine, et la réconciliation suivante retentait la même cible avec une
+sauvegarde fraîche, toutes les heures. C'est exactement ce que la quarantaine
+existe pour éviter.
+
+**[fait]** Quand le `git_ref` du dernier déploiement n'est pas un commit, ce que
+rend un déploiement déclenché depuis le dashboard, le relevé se replie sur le sha
+du lock et non sur celui du manifeste. Prendre celui du manifeste fabriquait
+l'égalité qui fait conclure que la cible est atteinte.
+
+**[fait]** Le relevé conserve la dernière sauvegarde connue. Il ne la relève pas,
+puisqu'elle ne se lit pas sur l'application, et l'écraser par rien faisait perdre
+le point de restauration, c'est-à-dire ce dont on a besoin précisément quand une
+migration a mal tourné.
 
 **[fait]** Le même verrou de concurrence est partagé entre l'application et la
 réconciliation, et aucune des deux n'annule celle qui tourne : elle peut être au
@@ -595,9 +684,78 @@ donne un binaire ancien face à un schéma récent. Le retour arrière réel pas
 la restauration de la sauvegarde, ou par la commande `migrate down` exécutée avec
 le binaire de la version supérieure.
 
-**Aucune sonde HTTP après déploiement.** La vérification s'arrête au statut du
-déploiement. Interroger l'application elle-même ne fonctionnerait pas partout :
-une instance derrière un oauth2-proxy bloquerait la sonde.
+**Aucune sonde HTTP après déploiement.** Interroger l'application elle-même ne
+fonctionnerait pas partout : derrière un oauth2-proxy, c'est le wrapper qui prend
+`$PORT`, donc sa disponibilité ne dit plus rien de l'outil déployé, et son
+authentification arrête la sonde avant l'outil. La vérification reste donc
+extérieure à l'application : le statut du déploiement, puis la fenêtre de
+garde de `settle` quand elle est déclarée.
+
+**Les journaux applicatifs ne sont pas lus.** Y chercher un marqueur de fin
+d'initialisation serait le signal le plus direct, c'est même ainsi que le succès
+a été établi à la main le 2026-10-30. Trois raisons de ne pas le faire. Leur URL
+vit sur un autre hôte que l'API, hors de portée d'un blob du proxy, et elle porte
+son jeton en clair, ce qui défait la promesse du mode proxy. La plateforme jette
+des lignes au-delà de son débit d'ingestion, donc un marqueur absent serait
+indiscernable d'un échec. Et le marqueur appartient à l'outil, là où le moteur
+n'en connaît aucun.
+
+**La fenêtre de garde ne prouve pas le démarrage.** Elle constate qu'aucun
+redémarrage en erreur n'est survenu dans le temps déclaré. Trois choses lui
+échappent. Une migration plus longue que la fenêtre, qui échoue après coup sans
+que rien ne le dise au passage : la fenêtre se compte sur la migration la plus
+longue observée, pas sur la plus courante. Un démarrage bloqué sans crash, un
+verrou de migration ou une requête qui pend, qui ne produit aucun événement et
+laisse l'application `running`. Et rien n'est rejoué au passage suivant : le lock
+porte un déploiement réussi, donc la cible est tenue pour atteinte.
+
+**Deux des trois événements surveillés ne sont pas documentés.** La page des
+événements de l'API ne décrit que `restart`, dont une raison possible est
+`unexpected_failure`. Les types `crash` et `repeated_crash` apparaissent dans le
+client Go de Scalingo et dans ses notifications, pas dans cette page. Ils sont
+surveillés par précaution : s'ils n'existaient pas sous ce nom, la fenêtre
+retomberait sur le seul `restart`, donc sur le comportement d'avant ce champ, et
+jamais sur un refus à tort.
+
+**La fenêtre se paie en temps de passage.** L'éclaireur est déployé seul, donc sa
+fenêtre s'ajoute entière, puis une fenêtre par vague de trois. Six applications à
+rattraper avec une fenêtre de dix minutes coûtent une demi-heure, sous un verrou
+que la réconciliation suivante attend sans annuler celle qui tourne.
+
+**Un déploiement fait hors du watcher est cru sur la parole de Scalingo.** La
+fenêtre de garde ne tourne que sur les déploiements du moteur. Le relevé, lui, ne
+rejoue aucune fenêtre : un redéploiement déclenché depuis le dashboard suffit
+donc à lever une quarantaine, même si l'outil est à terre derrière son port qui
+répond.
+
+**Personne n'expose la version du binaire en service.** La variable dit la
+version du prochain build. Une variable changée à la main sans déploiement fait
+donc refuser une cible que l'application servait déjà. Le refus est assumé : les
+deux cas se résolvent du même geste, regarder pourquoi le réel et le manifeste ne
+disent pas la même chose, et le refus ne déploie rien tandis que l'erreur inverse
+met l'application à terre.
+
+**Après un échec de montée, le retour arrière demande `--force`.** Si l'échec a
+été suivi d'un redéploiement réussi de la même cible, hors du watcher, le lock la
+porte avec un déploiement réussi et le contrôle de descente refuse de revenir en
+arrière. C'est cohérent avec la limite précédente sur les migrations : un retour
+arrière réel passe par la restauration de la sauvegarde, et `--force --app` le
+dit.
+
+**Un refus ne change pas le code de sortie.** Comme les deux autres contrôles de
+référence, une descente refusée sort en 0 : elle est portée par le rapport
+d'incident et par le marqueur du tableau de bord, pas par l'intégration continue.
+
+**`--adopt` oublie la quarantaine.** L'amorçage réécrit chaque entrée depuis
+l'état réel, quarantaine comprise, et ne le signale pas. C'est un ré-étalonnage
+demandé à la main, mais lancé sur un parc où une application est gelée, il la
+remet en piste au passage suivant.
+
+**Le tableau de bord n'a pas d'état pour un déploiement non abouti.** Il écrit
+`conforme` dès que le couple version-commit du lock correspond au manifeste et
+qu'aucune quarantaine ne traîne. Une application dont le dernier déploiement a
+échoué hors du watcher s'y lit donc conforme, là où la quarantaine aurait pris
+le dessus si l'échec était passé par le moteur.
 
 **Renovate ne relance jamais une application en quarantaine.** Il lit le
 manifeste, pas le lock. Une fois la pull request fusionnée, le sujet est clos

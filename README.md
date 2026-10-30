@@ -263,7 +263,7 @@ watcher. `--prune` retire les entrées des apps sorties du manifeste.
 `fgp.json` liste les blobs du proxy. Ils ne sont exploitables qu'avec la clé, ce
 qui permet de les versionner.
 
-## Deux points à connaître avant de s'en servir
+## Trois points à connaître avant de s'en servir
 
 **L'ordre des applications dans le manifeste est l'ordre de déploiement.** La
 première sert d'éclaireur : si son déploiement échoue, la vague s'arrête. Range
@@ -273,8 +273,19 @@ s'arrête qu'après deux éclaireurs interrompus.
 
 **Une montée de version migre la base applicative.** Revenir en arrière ne se
 fait pas en redéployant l'ancienne version, il faut restaurer la sauvegarde.
-C'est pour ça que `backup: required` est le défaut et que l'apply refuse de
-déployer si la sauvegarde échoue.
+C'est pour ça que `backup: required` est le défaut, que l'apply refuse de
+déployer si la sauvegarde échoue, et qu'il refuse aussi une cible antérieure à
+la version que porte l'application : sans ce contrôle, un manifeste en retard
+sur le réel redescendrait l'application sur une base déjà migrée, que l'ancien
+binaire ne sait pas démarrer.
+
+**Un déploiement conclu réussi ne dit pas que l'outil tourne.** Scalingo conclut
+dès que le conteneur répond sur son port, et un outil qui migre sa base au
+démarrage le fait après. Déclarer `settle: {window: <secondes>}`, par application
+ou dans `defaults`, fait relire l'application pendant ce temps et met en
+quarantaine si elle redémarre en erreur. Sans ce champ, le comportement est
+inchangé. En accès par proxy, il faut régénérer `fgp.json` : la fenêtre lit une
+route de plus.
 
 ## Développement
 
