@@ -17,37 +17,20 @@
  *
  * Relancer le script regenere tout : c'est ce qu'il faut faire pour changer de
  * cle, puisque la revocation consiste a rendre les anciens blobs inutilisables.
+ *
+ * Les blobs nomment chaque app du manifeste, et n'ouvrent l'ecriture qu'aux apps
+ * qui ne sont pas en pause : ajouter une app ou lever une pause demande donc de
+ * relancer le script.
  */
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { readManifest } from "./apply.ts";
+import { apiScopes, backupScopes } from "./fgp-scopes.ts";
 import { DEFAULT_FGP_URL, flagValue, outFile, readFgpFile, resolvePaths, shown } from "./options.ts";
 
-// Ce que le watcher fait, et rien de plus. Notamment aucun DELETE, aucune
-// creation d'app, aucun changement de stack, aucun scale.
-const API_SCOPES = [
-  "GET:/v1/apps",
-  "GET:/v1/apps/*",
-  // Les stacks portent leur date de depreciation : c'est ce qui permet de voir
-  // venir une echeance plutot que de la subir.
-  "GET:/v1/features/stacks",
-  "POST:/v1/apps/*/deployments",
-  "POST:/v1/apps/*/variables",
-  "PATCH:/v1/apps/*/variables/*",
-];
-const BACKUP_SCOPES = [
-  "GET|POST:/api/databases/*/backups",
-  "GET:/api/databases/*",
-  // Montee de version, decidee par une pull request qui bump le manifeste. Le
-  // scope reste borne a cette route : ni suppression, ni changement de plan.
-  "POST:/api/databases/*/upgrade",
-  "GET:/api/database_type_versions/*",
-  "GET:/api/operations/*",
-];
-
-type App = { app: string; region: string };
+type App = { app: string; region: string; paused?: boolean };
 
 const dryRun = process.argv.includes("--dry-run");
 // La capture ne porte que sur le body des requetes, jamais sur les reponses :
@@ -150,7 +133,12 @@ async function generate(proxy: string, target: string, auth: unknown, scopes: st
       logs: { enabled: logs, detailed: logs },
     }),
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text().catch(() => "")}`);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    // Le blob grossit avec le nombre d'apps de la region, et le proxy le plafonne.
+    const hint = /blob_too_large/.test(text) ? " : trop d'apps pour un seul blob dans cette region" : "";
+    throw new Error(`${res.status} ${text}${hint}`);
+  }
   return ((await res.json()) as { blob: string }).blob;
 }
 
@@ -172,10 +160,12 @@ async function main() {
 
   for (const region of regions) {
     const target = `https://api.${region}.scalingo.com`;
+    const apps = manifest.apps.filter((a) => a.region === region);
     out.api[region] = dryRun
       ? "<blob>"
-      : await generate(proxy, target, "scalingo-exchange", API_SCOPES, `api ${region}`);
-    console.log(`  api ${region.padEnd(16)} ${target}`);
+      : await generate(proxy, target, "scalingo-exchange", apiScopes(apps), `api ${region}`);
+    const paused = apps.filter((a) => a.paused).length;
+    console.log(`  api ${region.padEnd(16)} ${target}, ${apps.length} app(s)${paused ? ` dont ${paused} en pause, en lecture seule` : ""}`);
   }
 
   console.log("");
@@ -200,10 +190,10 @@ async function main() {
             addonId,
             apiUrl: `https://api.${app.region}.scalingo.com`,
           },
-          BACKUP_SCOPES,
+          backupScopes(app.paused),
           `sauvegarde ${app.app}`,
         );
-    console.log(`  ${key2.padEnd(44)} ${addonId}`);
+    console.log(`  ${key2.padEnd(44)} ${addonId}${app.paused ? ", en pause, en lecture seule" : ""}`);
   }
 
   if (dryRun) {

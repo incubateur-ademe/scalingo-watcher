@@ -23,6 +23,8 @@
  * Acces : SCALINGO_API_TOKEN, ou FGP_KEY et le fichier de --fgp. Derriere le
  * proxy, la version d'une base ne se lit qu'avec le blob de sauvegarde de son
  * app : sans lui, la base reste hors du manifeste, surveillee sans etre pilotee.
+ * Les blobs ne couvrant que les apps du manifeste, le proxy refuse les autres :
+ * elles sont comptees a part, et seul le jeton de compte les releve.
  *
  * SECRETS : /variables rend tout l'environnement de l'app en clair. Seule la
  * variable de l'outil en est retenue.
@@ -62,7 +64,7 @@ export type InitEntry = AppRef & {
 };
 
 type Described = InitEntry & { notes: string[] };
-type Outcome = { found: Described } | { skipped: string } | { failed: string } | null;
+type Outcome = { found: Described } | { skipped: string } | { failed: string } | { outside: true } | null;
 type RepoLink = { owner: string; repo: string; branch: string | null; scm_type: string };
 
 const CONCURRENCY = 5;
@@ -298,7 +300,11 @@ async function main() {
     outcomes.push(
       ...(await pool(refs, CONCURRENCY, async (ref) => ({
         ref,
-        outcome: await describeApp(ref, accountId).catch((e: Error): Outcome => ({ failed: e.message.slice(0, 160) })),
+        // Les blobs ne nomment que les apps du manifeste : le proxy refuse les
+        // autres, qu'un jeton de compte permettrait seul de relever.
+        outcome: await describeApp(ref, accountId).catch((e: Error & { outOfScope?: boolean }): Outcome =>
+          e.outOfScope ? { outside: true } : { failed: e.message.slice(0, 160) },
+        ),
       }))),
     );
   }
@@ -323,6 +329,7 @@ async function main() {
     outcome && "skipped" in outcome ? [{ ref, reason: outcome.skipped }] : [],
   );
   const withoutTool = outcomes.filter(({ outcome }) => outcome === null).length;
+  const outside = outcomes.filter(({ outcome }) => outcome && "outside" in outcome).length;
 
   const key = (ref: AppRef) => `${ref.region}/${ref.app}`;
   log(`\nRetenues : ${found.length}`);
@@ -342,6 +349,9 @@ async function main() {
     for (const { ref, reason } of failed) log(`  ${key(ref)} : ${reason}`);
   }
   if (withoutTool > 0) log(`\n${withoutTool} app(s) sans variable d'outil connu, ignoree(s).`);
+  if (outside > 0) {
+    log(`\n${outside} app(s) hors des blobs du proxy, ignoree(s) : SCALINGO_API_TOKEN sans FGP_KEY les releve.`);
+  }
 
   if (found.length === 0) fail(`\nAucune app a decrire : ${shown(paths.manifest)} n'est pas ecrit.`);
 

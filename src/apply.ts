@@ -25,6 +25,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isMap, isScalar, isSeq, parse, parseDocument, type Document, type ToStringOptions } from "yaml";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { accessModes, flagValue, outFile, readFgpFile, resolvePaths, shown, type Fgp, type Paths } from "./options.ts";
+import { deniedByProxy, REGENERATE_HINT } from "./fgp-scopes.ts";
 import { compareLines, toolName, upstreamOf, type ToolDeclaration, type Upstream } from "./upstream.ts";
 
 type Policy = { minor?: "auto" | "pr"; major?: "auto" | "pr" };
@@ -171,12 +172,17 @@ async function req<T>(url: string, token: string, init: RequestInit = {}): Promi
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
+    const outOfScope = deniedByProxy(res, body);
     // Le message reste la seule chose que la plupart des appelants lisent, mais
     // un refus se distingue parfois d'un autre par son corps seul : Scalingo ne
     // rend aucun code d'erreur sur les sauvegardes concurrentes.
     throw Object.assign(
-      new Error(`${res.status} ${res.statusText} sur ${init.method ?? "GET"} ${url}${body ? ` :: ${body.slice(0, 300)}` : ""}`),
-      { status: res.status, body },
+      new Error(
+        outOfScope
+          ? `refus du proxy sur ${init.method ?? "GET"} ${url} : ${REGENERATE_HINT}`
+          : `${res.status} ${res.statusText} sur ${init.method ?? "GET"} ${url}${body ? ` :: ${body.slice(0, 300)}` : ""}`,
+      ),
+      { status: res.status, body, outOfScope },
     );
   }
   if (res.status === 204) return undefined as T;
@@ -1618,6 +1624,7 @@ async function upgradeDatabase(
   });
   if (!launched.ok) {
     const body = await launched.text().catch(() => "");
+    if (deniedByProxy(launched, body)) throw new Error(`refus du proxy sur POST ${base}/upgrade : ${REGENERATE_HINT}`);
     throw new Error(`${launched.status} sur POST ${base}/upgrade${body ? ` :: ${body.slice(0, 200)}` : ""}`);
   }
   const location = launched.headers.get("location");

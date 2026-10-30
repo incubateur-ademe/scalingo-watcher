@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { resolveAliases } from "./apply.ts";
+import { deniedByProxy, REGENERATE_HINT } from "./fgp-scopes.ts";
 import { accessModes, flagValue, flagValues, readFgpFile, resolvePaths, shown, type Fgp } from "./options.ts";
 import { compareLines, lineLabel, upstreamOf, type ToolDeclaration, type Upstream } from "./upstream.ts";
 
@@ -33,7 +34,8 @@ import { compareLines, lineLabel, upstreamOf, type ToolDeclaration, type Upstrea
 
 /**
  * Comme apply.ts : par le proxy si fgp.json et FGP_KEY sont la, en direct sinon.
- * L'audit ne lit que des routes GET, couvertes par les scopes du blob d'API.
+ * L'audit ne lit que des routes GET, couvertes par les scopes du blob d'API
+ * pour les seules apps du manifeste.
  */
 let fgp: Fgp | null = null;
 let fgpKey = "";
@@ -141,6 +143,7 @@ type AppReport = {
   lastDeployment: { id: string; status: string; createdAt: string; gitRef: string | null } | null;
   databases: Array<{ version: string; upgradable: boolean }>;
   errors: string[];
+  outOfScope?: boolean;
 };
 
 type ProductReport = {
@@ -176,6 +179,9 @@ async function httpJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
+    if (deniedByProxy(res, body)) {
+      throw Object.assign(new Error(`refus du proxy sur ${url} : ${REGENERATE_HINT}`), { outOfScope: true });
+    }
     throw new Error(`${res.status} ${res.statusText} on ${url}${body ? ` :: ${body.slice(0, 300)}` : ""}`);
   }
   return (await res.json()) as T;
@@ -467,6 +473,9 @@ async function collectApp(app: ScalingoApp, region: Region, token: string): Prom
       else report.versionEnv[v.name] = v.value;
     }
   } catch (e) {
+    // Les blobs ne nomment que les apps du manifeste : les autres apps de la
+    // region sont refusees par le proxy, ce n'est pas une erreur de collecte.
+    if ((e as { outOfScope?: boolean }).outOfScope) return { ...report, outOfScope: true };
     report.errors.push(`variables: ${(e as Error).message}`);
   }
 
@@ -788,7 +797,16 @@ async function main() {
   }
 
   log(`Collecte sur ${targets.length} app(s)...`);
-  const all = await pool(targets, CONCURRENCY, (t) => collectApp(t.app, t.region, token));
+  const collected = await pool(targets, CONCURRENCY, (t) => collectApp(t.app, t.region, token));
+  // Une app du manifeste refusee reste dans le rapport, en erreur de collecte :
+  // c'est fgp.json qui est en retard sur le manifeste.
+  const declared = new Set((fleet?.apps ?? []).map((a) => `${a.region}/${a.app}`));
+  for (const r of collected) {
+    if (r.outOfScope && declared.has(`${r.region}/${r.name}`)) r.errors.push(`variables: ${REGENERATE_HINT}`);
+  }
+  const all = collected.filter((r) => !r.outOfScope || declared.has(`${r.region}/${r.name}`));
+  const outside = collected.length - all.length;
+  if (outside > 0) log(`  ${outside} app(s) hors du manifeste, que les blobs du proxy ne couvrent pas, ignoree(s)`);
   await collectDatabases(all, token);
 
   log("Croisement buildpacks / variables de version...");
