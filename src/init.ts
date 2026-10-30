@@ -150,7 +150,7 @@ export function renderManifest(entries: readonly InitEntry[], schema: string): s
       `      sha: ${e.source.sha}`,
       "    tool:",
       `      env: ${e.tool.env}`,
-      `      # renovate: datasource=github-releases depName=${e.tool.upstream}`,
+      `      # renovate: datasource=github-tags depName=${e.tool.upstream}`,
       `      version: ${scalar(e.tool.version)}`,
     );
   });

@@ -198,7 +198,27 @@ manifeste hors de la racine.
 condensat : la branche sert de valeur courante, le SHA de condensat courant.
 Renovate propose le nouveau SHA quand la branche avance.
 
-**[fait]** Suivi de la version de l'outil via `github-releases`.
+**[fait]** Suivi de la version de l'outil via `github-tags`. Les releases GitHub ne
+suffisent pas : Metabase n'en publie que pour les versions à trois nombres, si bien
+que `v0.64.3.4` et `v0.64.4.2` existent en tags et se téléchargent tout en restant
+invisibles de `github-releases`. Un parc épinglé sur une version à quatre nombres ne
+recevait alors plus aucune proposition, la plus haute release connue étant inférieure
+à sa version en service, et ce silence ressemblait à « rien à faire ». Les tags sont
+un sur-ensemble des releases, et le versionnage sur mesure écarte seul les
+préversions et les étiquettes mobiles.
+
+**[fait]** La veille de Metabase est bornée à sa ligne de support long par
+`allowedVersions`. C'est le prix de `github-tags` : les tags exposent la ligne
+suivante, que les releases n'exposaient pas, et celle-ci peut être hors support long
+avec une fin de vie plus proche que la ligne en service. Sans cette borne, le tableau
+de bord porterait une montée permanente invitant à quitter le support long, soit
+exactement l'alerte qu'on apprend à ignorer. La borne s'édite à la main au changement
+de ligne, environ une fois l'an.
+
+**[fait]** Les règles de Metabase ne filtrent pas la source des versions, seulement
+le nom du paquet. Un parc dont le manifeste porte encore l'ancienne annotation garde
+donc sa politique, et déplacer la source une nouvelle fois ne demandera pas de
+retoucher ces règles.
 
 **[fait]** Versionnage sur mesure pour Metabase, dans le preset `metabase`, avec
 un groupe `compatibility` qui isole les lignes OSS et Enterprise. Effet de bord
