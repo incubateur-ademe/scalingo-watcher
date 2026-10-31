@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.2.0...v1.2.1) (2026-10-31)
+
+
+### Corrections
+
+* **lock:** deux ecritures concurrentes s'arbitrent par la date du releve ([#32](https://github.com/incubateur-ademe/scalingo-watcher/issues/32)) ([ce7811c](https://github.com/incubateur-ademe/scalingo-watcher/commit/ce7811c6292ae329c415b0bce93b98508bab000b))
+
 ## [1.2.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.1.2...v1.2.0) (2026-10-30)
 
 
