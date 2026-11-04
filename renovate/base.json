@@ -10,19 +10,22 @@
   "prConcurrentLimit": 0,
   "customManagers": [
     {
-      "description": "Depot applicatif deploye par chaque app. Le nom de l'app sert de depName pour que le tableau de bord et les PR disent de quelle instance il s'agit, le depot n'etant lui qu'un detail de provenance partage par presque toutes.",
+      "description": "Depot applicatif deploye par chaque app. Le nom de l'app sert de depName pour que le tableau de bord et les PR disent de quelle instance il s'agit, le depot n'etant lui qu'un detail de provenance partage par presque toutes. La premiere expression isole le bloc de l'app : ses lignes qui ne commencent pas par un tiret, le schema n'ayant aucune liste dans une app. La deuxieme y releve paused, que le depType porte.",
       "customType": "regex",
       "managerFilePatterns": [
         "/(^|/)manifest\\.yaml$/"
       ],
       "matchStrings": [
-        "- app: (?<depName>\\S+)[\\s\\S]*?branch:\\s*[\"']?(?<currentValue>[^\"'\\s]+)[\"']?\\s*\\n\\s*# renovate: datasource=(?<datasource>\\S+) depName=(?<repo>\\S+)\\s*\\n\\s*sha:\\s*(?<currentDigest>[0-9a-f]{40})"
+        "- app: (?<depName>\\S+)[^\\r\\n]*(?:\\r?\\n(?:[ \\t]*[^-\\s][^\\r\\n]*|[ \\t]*))*",
+        "^(?:[\\s\\S]*?\\n[ \\t]+paused:[ \\t]*(?<paused>true)[ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n|$))?[\\s\\S]*$",
+        "branch:\\s*[\"']?(?<currentValue>[^\"'\\s]+)[\"']?\\s*\\n\\s*# renovate: datasource=(?<datasource>\\S+) depName=(?<repo>\\S+)\\s*\\n\\s*sha:\\s*(?<currentDigest>[0-9a-f]{40})"
       ],
       "packageNameTemplate": "https://github.com/{{{repo}}}",
-      "depTypeTemplate": "source"
+      "depTypeTemplate": "source{{#if paused}} en pause{{/if}}",
+      "matchStringsStrategy": "recursive"
     },
     {
-      "description": "Version de l'outil installe par le buildpack, portee par la variable d'environnement de l'app. Les deux premieres expressions couvrent tout le fichier et y relisent defaults.policy, presente ou non : le depType porte la politique du manifeste (outil minor=auto major=pr), que le preset de chaque outil traduit en automerge.",
+      "description": "Version de l'outil installe par le buildpack, portee par la variable d'environnement de l'app. Les deux premieres expressions couvrent tout le fichier et y relisent defaults.policy, presente ou non : le depType porte la politique du manifeste (outil minor=auto major=pr), que le preset de chaque outil traduit en automerge. Les deux suivantes isolent le bloc de chaque app et y relevent paused, comme pour le depot applicatif.",
       "customType": "regex",
       "managerFilePatterns": [
         "/(^|/)manifest\\.yaml$/"
@@ -31,9 +34,11 @@
       "matchStrings": [
         "^(?:[\\s\\S]*?\\r?\\n[ \\t]+policy:[ \\t]*(?:#[^\\r\\n]*)?\\r?\\n(?:[ \\t]*(?:#[^\\r\\n]*)?\\r?\\n|[ \\t]+major:[^\\r\\n]*\\r?\\n)*[ \\t]+minor:[ \\t]*[\"']?(?<minorPolicy>auto|pr)[\"']?[ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n|$))?[\\s\\S]*$",
         "^(?:[\\s\\S]*?\\r?\\n[ \\t]+policy:[ \\t]*(?:#[^\\r\\n]*)?\\r?\\n(?:[ \\t]*(?:#[^\\r\\n]*)?\\r?\\n|[ \\t]+minor:[^\\r\\n]*\\r?\\n)*[ \\t]+major:[ \\t]*[\"']?(?<majorPolicy>auto|pr)[\"']?[ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n|$))?[\\s\\S]*$",
-        "- app: (?<depName>\\S+)[\\s\\S]*?# renovate: datasource=(?<datasource>\\S+) depName=(?<packageName>\\S+)\\s*\\n\\s*version:\\s*[\"']?(?<currentValue>[^\"'\\s]+)[\"']?"
+        "- app: (?<depName>\\S+)[^\\r\\n]*(?:\\r?\\n(?:[ \\t]*[^-\\s][^\\r\\n]*|[ \\t]*))*",
+        "^(?:[\\s\\S]*?\\n[ \\t]+paused:[ \\t]*(?<paused>true)[ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n|$))?[\\s\\S]*$",
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<packageName>\\S+)\\s*\\n\\s*version:\\s*[\"']?(?<currentValue>[^\"'\\s]+)[\"']?"
       ],
-      "depTypeTemplate": "outil minor={{{minorPolicy}}} major={{{majorPolicy}}}"
+      "depTypeTemplate": "outil minor={{{minorPolicy}}} major={{{majorPolicy}}}{{#if paused}} en pause{{/if}}"
     }
   ],
   "packageRules": [
@@ -47,6 +52,13 @@
       "groupName": "depots applicatifs",
       "commitMessageTopic": "le depot applicatif {{depName}}, branche {{currentValue}},",
       "commitMessageExtra": "en {{newDigestShort}}"
+    },
+    {
+      "description": "Une app en pause est lue et jamais ecrite : sa version et son commit suivent le reel, aucune montee ne la vise. Sans cette regle, une montee fusionnee seule reecrirait son manifeste sans rien deployer, et le manifeste ne dirait plus ce qui tourne.",
+      "matchDepTypes": [
+        "/ en pause$/"
+      ],
+      "enabled": false
     }
   ],
   "vulnerabilityAlerts": {

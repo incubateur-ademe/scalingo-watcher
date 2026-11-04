@@ -127,7 +127,8 @@ reprise le plan part d'un état juste. Ni déploiement, ni variable, ni
 sauvegarde, ni montée ou proposition de montée de base, ni quarantaine. Un écart
 avec le manifeste est affiché dans le plan et le tableau de bord (`en pause, en
 écart`), sans action. Usage visé : suivre une application dont le compte de
-l'accès n'est que collaborateur.
+l'accès n'est que collaborateur. Renovate ne propose aucune montée pour elle :
+lever la pause lui rend ses montées au passage suivant.
 
 **[fait]** Mode de sauvegarde par application : `required` ou `not-available`.
 Cette seconde valeur se pose consciemment après vérification, jamais par défaut.
@@ -161,8 +162,8 @@ avertissement au `--validate` et au plan. Les deux noms présents et en
 désaccord sont refusés. Aucun renommage n'est en vigueur à ce jour : le
 mécanisme existe pour qu'une montée de l'outil ne casse aucun manifeste.
 Les champs que Renovate, `--validate` et `--propose-db` relisent dans le texte
-brut (`app`, `source.branch`, `source.sha`, `tool.version`, `database.version`
-et leurs parents) en sont exclus : le moteur refuse un alias sur eux.
+brut (`app`, `paused`, `source.branch`, `source.sha`, `tool.version`,
+`database.version` et leurs parents) en sont exclus : le moteur refuse un alias sur eux.
 
 ---
 
@@ -231,6 +232,15 @@ manifeste hors de la racine.
 **[fait]** Suivi du dépôt applicatif via la source `git-refs` avec épinglage de
 condensat : la branche sert de valeur courante, le SHA de condensat courant.
 Renovate propose le nouveau SHA quand la branche avance.
+
+**[fait]** Une application en pause n'est visée par aucune montée. Chaque
+gestionnaire isole d'abord le bloc de l'application, ses lignes qui ne
+commencent pas par un tiret, puis y relève `paused: true`. Le `depType` reçoit
+alors ` en pause` (`source en pause`, `outil minor=auto major=pr en pause`), et
+une règle du preset `base` désactive ces dépendances. Sans elle, une montée
+fusionnée seule réécrirait le manifeste sans rien déployer. `--validate` refuse
+une pause que ces expressions ne relisent pas (`paused: True`, un alias) et un
+bloc qu'une ligne en tiret couperait.
 
 **[fait]** Suivi de la version de l'outil via `github-tags`. Les releases GitHub ne
 suffisent pas : Metabase n'en publie que pour les versions à trois nombres, si bien
