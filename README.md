@@ -12,6 +12,11 @@ chaque application, une sauvegarde de ses bases précédant chaque déploiement.
 qui a réellement été déployé est consigné dans un lock commité à côté du
 manifeste.
 
+Elle confronte au passage les versions en service aux avis de sécurité de leur
+dépôt amont et à la fin de support de leur ligne de versions, pour qu'un parc soit
+prévenu avant que sa ligne cesse de recevoir des correctifs et quand une nouvelle
+ligne de support long est désignée.
+
 Le périmètre éprouvé est Metabase. Le moteur prend en charge tout outil dont le
 buildpack lit sa version dans une variable d'environnement.
 

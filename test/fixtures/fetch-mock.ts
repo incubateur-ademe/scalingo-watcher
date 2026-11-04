@@ -17,6 +17,10 @@
  * hormis la liste des apps.
  * ADVISORIES, liste d'avis de depot, repond a l'API des avis de securite ; sans
  * elle, l'amont n'en publie aucun.
+ * LIFECYCLE, liste de lignes de versions, repond a la source de fin de vie ;
+ * sans elle, la ligne en service est de support long et loin de sa fin, soit
+ * le cas ou cette veille n'a rien a dire.
+ * EOL_OUTAGE=1 fait echouer cette source, comme un editeur injoignable.
  *
  * Un deploiement est accepte et conclu du premier coup, au statut de REAL.
  * CRASH=1 fait apparaitre un redemarrage en erreur dans les evenements de l'app
@@ -40,6 +44,9 @@ const real = JSON.parse(process.env.REAL ?? "{}") as Record<
   { version: string; sha: string; status?: string }
 >;
 const advisories = JSON.parse(process.env.ADVISORIES ?? "[]") as unknown[];
+const lifecycle = JSON.parse(
+  process.env.LIFECYCLE ?? '[{"name":"0.63","isLts":true,"isEol":false,"eolFrom":"2099-01-01"}]',
+) as unknown[];
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -60,6 +67,10 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   // Tout vient de la premiere page, les suivantes sont vides.
   if (m === "GET" && /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/security-advisories\?/.test(u)) {
     return json(u.includes("page=1") ? advisories : []);
+  }
+  if (m === "GET" && (r = /^https:\/\/endoflife\.date\/api\/v1\/products\/([^/?]+)$/.exec(u))) {
+    if (process.env.EOL_OUTAGE) return json({ error: "injoignable" }, 503);
+    return json({ result: { name: r[1], releases: lifecycle } });
   }
   if (m === "POST" && u.endsWith("/api/generate")) {
     if (process.env.GENERATED) appendFileSync(process.env.GENERATED, `${String(init.body)}\n`);

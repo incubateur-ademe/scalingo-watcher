@@ -51,7 +51,18 @@ import { renderManifest } from "../src/init.ts";
 import { compose, matrixPayload, slackPayload, teamsPayload } from "../src/notify.ts";
 import { apiScopes, backupScopes, deniedByProxy } from "../src/fgp-scopes.ts";
 import { DEFAULT_FGP_URL, flagValue, flagValues, outFile, resolvePaths } from "../src/options.ts";
-import { compareLines, judgeAdvisories, pinnedVersion, readRange, toolName, upstreamOf } from "../src/upstream.ts";
+import {
+  compareLines,
+  EOL_WARNING_DAYS,
+  judgeAdvisories,
+  judgeLifecycle,
+  lifecycleDue,
+  pinnedVersion,
+  readRange,
+  toolName,
+  upstreamOf,
+  type Line,
+} from "../src/upstream.ts";
 
 const SRC = join(import.meta.dirname, "..", "src");
 const FIXTURES = join(import.meta.dirname, "fixtures");
@@ -902,12 +913,28 @@ check(
 
 console.log("\nOutils et depots amont");
 
-check("Metabase est connu de la table", upstreamOf({ env: "METABASE_VERSION" }), { repo: "metabase/metabase", line: 1 });
+check("Metabase est connu de la table", upstreamOf({ env: "METABASE_VERSION" }), {
+  repo: "metabase/metabase",
+  line: 1,
+  lifecycle: "metabase",
+});
 check("un outil hors table n'a pas d'amont", upstreamOf({ env: "NGINX_VERSION" }), null);
 check(
   "le manifeste surcharge la table, en gardant sa ligne",
   upstreamOf({ env: "METABASE_VERSION", upstream: { repo: "exemple/metabase" } }),
-  { repo: "exemple/metabase", line: 1 },
+  { repo: "exemple/metabase", line: 1, lifecycle: "metabase" },
+);
+// Un depot complete par le manifeste n'apporte pas de nom chez la source de fin
+// de vie : la veille se tait sur cet outil plutot que de deviner ce nom.
+check(
+  "un amont complete par le manifeste n'a pas de fin de vie",
+  upstreamOf({ env: "NGINX_VERSION", upstream: { repo: "nginx/nginx" } }),
+  { repo: "nginx/nginx", line: 1 },
+);
+check(
+  "le manifeste peut nommer l'outil chez la source de fin de vie",
+  upstreamOf({ env: "NGINX_VERSION", upstream: { repo: "nginx/nginx", lifecycle: "nginx" } }),
+  { repo: "nginx/nginx", line: 1, lifecycle: "nginx" },
 );
 check(
   "le manifeste complete la table",
@@ -925,6 +952,175 @@ check("un alias * non plus", pinnedVersion("0.63.*"), null);
 check("v0.63 et v1.52 sont sur deux lignes", compareLines([0, 63, 18], [1, 52, 2], 1) < 0, true);
 check("v0.63 et v0.64 sont sur la meme ligne", compareLines([0, 63, 18], [0, 64, 0], 1), 0);
 check("une ligne de deux composants separe 0.63 de 0.64", compareLines([0, 63, 18], [0, 64, 0], 2) < 0, true);
+
+console.log("\nFin de vie de la ligne en service");
+
+{
+  const TODAY = Date.parse("2026-11-04T00:00:00Z");
+  const inDays = (n: number) => new Date(TODAY + n * 86400000).toISOString().slice(0, 10);
+
+  // Les lignes de Metabase au 2026-11-04, telles qu'endoflife.date les rend, et
+  // une ligne 1.64 que la source ne porte pas : elle n'existe ici que pour
+  // verifier qu'une edition ne se juge jamais contre l'autre.
+  const LINES: Line[] = [
+    { name: "0.65", isLts: false, isEol: false, eolFrom: "2027-01-01" },
+    { name: "0.64", isLts: true, isEol: false, eolFrom: "2027-12-01" },
+    { name: "0.63", isLts: false, isEol: true, eolFrom: "2026-11-01" },
+    { name: "0.58", isLts: true, isEol: false, eolFrom: "2027-02-17" },
+    { name: "1.64", isLts: true, isEol: false, eolFrom: "2027-12-01" },
+  ];
+  const judge = (version: string, lines = LINES, line = 1) => judgeLifecycle(lines, version, line, TODAY);
+
+  check("la ligne en service est celle qui prefixe la version", judge("v0.63.18"), {
+    cycle: "0.63",
+    lts: false,
+    eol: "2026-11-01",
+    unreadableEol: null,
+    days: -3,
+    ended: true,
+    nextLts: { cycle: "0.64", eol: "2027-12-01" },
+  });
+  // Le cas qui a motive cette veille : la 0.65 est plus recente, donc tentante,
+  // mais elle quitte le support long et meurt onze mois avant la 0.64.
+  check("une ligne hors support long qui meurt bientot est une echeance", judge("v0.65.3.1"), {
+    cycle: "0.65",
+    lts: false,
+    eol: "2027-01-01",
+    unreadableEol: null,
+    days: 58,
+    ended: false,
+    nextLts: null,
+  });
+  check("la ligne en service est le dernier support long : rien a dire", judge("v0.64.5.1"), {
+    cycle: "0.64",
+    lts: true,
+    eol: "2027-12-01",
+    unreadableEol: null,
+    days: 392,
+    ended: false,
+    nextLts: null,
+  });
+  check("et son echeance n'est pas encore atteinte", lifecycleDue(judge("v0.64.5.1")!), false);
+  check("celle d'une ligne morte l'est", lifecycleDue(judge("v0.63.18")!), true);
+
+  // Chez Metabase le premier chiffre designe l'edition. Sans le filtre de ligne,
+  // la 1.64 de l'Enterprise passerait pour un support long plus recent que la
+  // 0.64 de l'OSS, quand c'est un changement d'edition.
+  check("une edition ne se juge jamais contre l'autre", judge("v1.64.2")?.nextLts, null);
+  // Une version flottante se lirait 0.63.0 et tomberait dans la ligne 0.63
+  // quelle que soit celle qui tourne.
+  check("une version flottante ne tranche rien", judge("v0.63.x"), null);
+  check("une version qu'aucune ligne ne porte non plus", judge("v0.50.1"), null);
+  // Le rapprochement est numerique. Le danger est la ligne courte : en chaine,
+  // "0.65.3" commence par "0.6", et cette ligne porterait une version qui n'est
+  // pas la sienne. L'inverse, une version courte face a une ligne longue, ne
+  // trompe aucune des deux lectures et ne protegeait donc rien.
+  const COURTE: Line[] = [{ name: "0.6", isLts: true, isEol: false, eolFrom: "2028-01-01" }];
+  check("une ligne courte ne porte pas une version d'une autre", judge("v0.65.3", COURTE), null);
+
+  const DEAD_LTS: Line[] = [
+    { name: "0.63", isLts: false, isEol: true, eolFrom: "2026-11-01" },
+    { name: "0.64", isLts: true, isEol: true, eolFrom: "2026-10-01" },
+  ];
+  check("un support long deja mort n'est pas une issue", judge("v0.63.18", DEAD_LTS)?.nextLts, null);
+
+  // C'est le travers meme que cette veille existe pour eviter, un cran plus
+  // haut : un numero plus recent dont le support s'arrete plus tot.
+  const LTS_PLUS_COURTE: Line[] = [
+    { name: "0.58", isLts: true, isEol: false, eolFrom: "2027-12-01" },
+    { name: "0.64", isLts: true, isEol: false, eolFrom: "2027-06-01" },
+  ];
+  check(
+    "un support long qui meurt avant la ligne en service n'est pas une issue",
+    judge("v0.58.38.2", LTS_PLUS_COURTE)?.nextLts,
+    null,
+  );
+  // Entre deux candidates valables, la plus recente ; celle qui regresse est
+  // ecartee avant le choix, et ne masque donc pas la bonne.
+  const DEUX_LTS: Line[] = [
+    { name: "0.58", isLts: true, isEol: false, eolFrom: "2027-12-01" },
+    { name: "0.60", isLts: true, isEol: false, eolFrom: "2028-06-01" },
+    { name: "0.64", isLts: true, isEol: false, eolFrom: "2027-06-01" },
+  ];
+  check(
+    "la plus recente des candidates qui ne regressent pas",
+    judge("v0.58.38.2", DEUX_LTS)?.nextLts,
+    { cycle: "0.60", eol: "2028-06-01" },
+  );
+
+  // Elastic n'annonce aucune date de fin : une ligne sans date n'est pas une
+  // ligne sans fin, mais il n'y a aucune echeance a annoncer.
+  const NO_DATE: Line[] = [{ name: "9.5", isLts: false, isEol: false, eolFrom: null }];
+  check("une ligne sans date annoncee ne porte pas d'echeance", judge("9.5.6", NO_DATE), {
+    cycle: "9.5",
+    lts: false,
+    eol: null,
+    unreadableEol: null,
+    days: null,
+    ended: false,
+    nextLts: null,
+  });
+  check("et elle n'est pas due", lifecycleDue(judge("9.5.6", NO_DATE)!), false);
+  // Une date hors forme rendrait NaN, et NaN <= seuil est faux : la ligne
+  // passerait pour supportee sans que rien ne le dise. Elle se retient telle
+  // quelle, sinon un changement de forme de la source serait indiscernable d'une
+  // absence de date, et plus rien ne le signalerait.
+  const ILLISIBLE: Line[] = [{ name: "9.5", isLts: false, isEol: false, eolFrom: "bientot" }];
+  check(
+    "une date illisible ne se lit pas comme une echeance lointaine",
+    [judge("9.5.6", ILLISIBLE)?.eol, judge("9.5.6", ILLISIBLE)?.days, judge("9.5.6", ILLISIBLE)?.unreadableEol],
+    [null, null, "bientot"],
+  );
+  // La version 0 de l'API ecrivait cette borne en booleen. Si la source y
+  // revenait, c'est la seule chose qui le dirait.
+  check(
+    "une borne qui n'est pas une date du tout se retient aussi",
+    judge("9.5.6", [{ name: "9.5", isLts: false, isEol: false, eolFrom: true as unknown as string }])?.unreadableEol,
+    "true",
+  );
+
+  // Ces trois dates passent la forme `\d{4}-\d{2}-\d{2}` et ne designent aucun
+  // jour. Les deux premieres rendaient NaN, soit le faux "supporte" exact que le
+  // garde dit empecher ; la troisieme roulait au 3 mars, et comptait les jours
+  // depuis une date que personne n'avait annoncee.
+  for (const impossible of ["2026-13-01", "2026-11-32", "2026-02-31"]) {
+    const v = judge("9.5.6", [{ name: "9.5", isLts: false, isEol: false, eolFrom: impossible }]);
+    check(`${impossible} n'est pas une date et se retient telle quelle`, [v?.eol, v?.days, v?.unreadableEol], [
+      null,
+      null,
+      impossible,
+    ]);
+  }
+
+  const at = (day: string): Line[] => [{ name: "0.64", isLts: true, isEol: false, eolFrom: day }];
+  check("le seuil est atteint le jour dit", lifecycleDue(judge("v0.64.5.1", at(inDays(EOL_WARNING_DAYS)))!), true);
+  check("et pas la veille", lifecycleDue(judge("v0.64.5.1", at(inDays(EOL_WARNING_DAYS + 1)))!), false);
+  // La borne vaut minuit UTC : une passe de l'apres-midi voyait 91 jours pleins
+  // comme 90 et declenchait le seuil un jour trop tot. Le seuil ne doit pas
+  // dependre de l'heure a laquelle la reconciliation tourne.
+  {
+    const APRES_MIDI = Date.parse("2026-11-04T14:00:00Z");
+    const veille = at(new Date(APRES_MIDI + (EOL_WARNING_DAYS + 1) * 86400000).toISOString().slice(0, 10));
+    const jour = at(new Date(APRES_MIDI + EOL_WARNING_DAYS * 86400000).toISOString().slice(0, 10));
+    check(
+      "l'heure du passage ne deplace pas le seuil",
+      [
+        judgeLifecycle(veille, "v0.64.5.1", 1, APRES_MIDI)?.days,
+        lifecycleDue(judgeLifecycle(veille, "v0.64.5.1", 1, APRES_MIDI)!),
+        lifecycleDue(judgeLifecycle(jour, "v0.64.5.1", 1, APRES_MIDI)!),
+      ],
+      [EOL_WARNING_DAYS + 1, false, true],
+    );
+  }
+
+  // Une source qui publierait une ligne large et une ligne fine : c'est la plus
+  // fine qui porte la version.
+  const NESTED: Line[] = [
+    { name: "0", isLts: false, isEol: true, eolFrom: "2026-01-01" },
+    { name: "0.64", isLts: true, isEol: false, eolFrom: "2027-12-01" },
+  ];
+  check("la ligne la plus precise l'emporte", judge("v0.64.5.1", NESTED)?.cycle, "0.64");
+}
 
 console.log("\nCible atteinte");
 
@@ -2354,6 +2550,248 @@ try {
       /### Avis de sécurité amont/.test(indemneDashboard),
     ],
     [true, false],
+  );
+
+  console.log("\nVeille de fin de vie de la ligne, contre un fetch simule");
+
+  // Le parc de test est en v0.63.18. Les lignes ci-dessous sont celles de
+  // Metabase au 2026-11-04 : la 0.63 est morte, la 0.64 est le support long, et
+  // la 0.65 est plus recente tout en mourant onze mois plus tot.
+  const LINES_REELLES = JSON.stringify([
+    { name: "0.65", isLts: false, isEol: false, eolFrom: "2027-01-01" },
+    { name: "0.64", isLts: true, isEol: false, eolFrom: "2027-12-01" },
+    { name: "0.63", isLts: false, isEol: true, eolFrom: "2026-11-01" },
+  ]);
+  // La meme source, a ceci pres que la ligne en service vit encore : il n'y a
+  // plus d'echeance, seulement un support long plus recent.
+  const LINES_VIVANTE = JSON.stringify([
+    { name: "0.64", isLts: true, isEol: false, eolFrom: "2027-12-01" },
+    { name: "0.63", isLts: false, isEol: false, eolFrom: "2027-06-01" },
+  ]);
+
+  const finDeVie = sandbox();
+  const finDeVieRun = run(finDeVie, "apply.ts", ["--dry-run", ...FLEET], { LIFECYCLE: LINES_REELLES });
+  check(
+    "une ligne en fin de support devient une echeance, qui nomme le support long en cours",
+    [
+      finDeVieRun.status,
+      /osc-fr1\/alpha-metabase : v0\.63\.18 est sur la ligne 0\.63, en fin de support depuis le 2026-11-01, 0\.64 est le support long en cours/.test(finDeVieRun.output),
+    ],
+    [0, true],
+  );
+  // L'echeance dit deja tout : la redire dans le constat de ligne ferait lire
+  // deux fois la meme chose a chaque passage.
+  check(
+    "et le constat de ligne ne la repete pas",
+    /au regard de la fin de vie de leur ligne/.test(finDeVieRun.output),
+    false,
+  );
+  // Un appel par outil, et non par application : les quatre apps du parc
+  // partagent le meme outil a la meme version.
+  check(
+    "un seul appel a la source pour tout le parc",
+    finDeVieRun.calls.filter((l) => l.includes("endoflife.date")).length,
+    1,
+  );
+
+  // Sur un parc homogene, la memoire du verdict par couple suffirait a ne faire
+  // qu'un appel : le compteur ci-dessus passerait sans le cache de lifecycleFor.
+  // Deux versions du meme outil separent les deux, l'une etant sur une ligne
+  // morte et l'autre sur le support long.
+  const heterogene = sandbox();
+  writeFileSync(
+    join(heterogene.fleet, "manifest.yaml"),
+    (() => {
+      const at = fixtureSrc.lastIndexOf("version: v0.63.18");
+      return `${fixtureSrc.slice(0, at)}version: v0.64.5.1${fixtureSrc.slice(at + "version: v0.63.18".length)}`;
+    })(),
+  );
+  const heterogeneLock = JSON.parse(lockFixture) as { apps: Record<string, { tool: { version: string } }> };
+  heterogeneLock.apps["osc-secnum-fr1/delta-metabase"].tool.version = "v0.64.5.1";
+  writeFileSync(join(heterogene.fleet, "lock.json"), JSON.stringify(heterogeneLock, null, 2));
+  const heterogeneRun = run(heterogene, "apply.ts", ["--dry-run", ...FLEET], { LIFECYCLE: LINES_REELLES });
+  check(
+    "deux versions du meme outil se jugent sur un seul appel",
+    [
+      heterogeneRun.status,
+      heterogeneRun.calls.filter((l) => l.includes("endoflife.date")).length,
+      /3 echeance\(s\) a prevoir/.test(heterogeneRun.output),
+      /delta-metabase : v0\.64\.5\.1/.test(heterogeneRun.output),
+    ],
+    [0, 1, true, false],
+  );
+
+  // Elastic n'annonce aucune date de fin, et Kibana comme Logstash sont dans la
+  // table avec un nom chez la source. Une fin que la source ne date pas ne peut
+  // etre ni proche ni lointaine : la taire ferait compter cette ligne parmi
+  // celles que rien ne menace, soit un "supporte" sans appui.
+  const sansDate = sandbox();
+  const sansDateRun = run(sansDate, "apply.ts", ["--dry-run", ...FLEET], {
+    LIFECYCLE: JSON.stringify([{ name: "0.63", isLts: false, isEol: false, eolFrom: null }]),
+  });
+  check(
+    "une fin que la source ne date pas se dit, et ne passe pas pour une ligne saine",
+    [
+      sansDateRun.status,
+      /osc-fr1\/alpha-metabase : v0\.63\.18 est sur la ligne 0\.63, dont metabase ne date aucune fin de support/.test(sansDateRun.output),
+      /Aucune ligne en service n'approche/.test(sansDateRun.output),
+      /echeance\(s\) a prevoir/.test(sansDateRun.output),
+    ],
+    [0, true, false, false],
+  );
+
+  // Une date hors forme est ramenee a une absence de date par le garde qui
+  // evite un NaN. Elle se dit telle quelle, sinon un changement de forme de la
+  // source ne se verrait nulle part.
+  const dateIllisible = sandbox();
+  const dateIllisibleRun = run(dateIllisible, "apply.ts", ["--dry-run", ...FLEET], {
+    LIFECYCLE: JSON.stringify([{ name: "0.63", isLts: false, isEol: false, eolFrom: "bientot" }]),
+  });
+  check(
+    "une date hors forme se dit telle quelle",
+    [
+      dateIllisibleRun.status,
+      /osc-fr1\/alpha-metabase : v0\.63\.18 est sur la ligne 0\.63, dont la fin de support s'annonce "bientot" et pas en date/.test(dateIllisibleRun.output),
+      /Aucune ligne en service n'approche/.test(dateIllisibleRun.output),
+    ],
+    [0, true, false],
+  );
+
+  const horsLts = sandbox();
+  const horsLtsRun = run(horsLts, "apply.ts", ["--dry-run", ...FLEET], { LIFECYCLE: LINES_VIVANTE });
+  check(
+    "un support long plus recent se constate, sans echeance",
+    [
+      horsLtsRun.status,
+      /osc-fr1\/alpha-metabase : v0\.63\.18 est sur la ligne 0\.63, supportee jusqu'au 2027-06-01, 0\.64 est de support long jusqu'au 2027-12-01/.test(horsLtsRun.output),
+      /Changer de ligne est une montee fonctionnelle, qui se decide en pull request\./.test(horsLtsRun.output),
+      /echeance\(s\) a prevoir/.test(horsLtsRun.output),
+    ],
+    [0, true, true, false],
+  );
+
+  // Une veille muette doit dire qu'elle a regarde : sans ce decompte, une ligne
+  // que rien ne menace et un releve en panne rendent le meme silence.
+  const surLts = sandbox();
+  const surLtsRun = run(surLts, "apply.ts", ["--dry-run", ...FLEET], {
+    LIFECYCLE: JSON.stringify([{ name: "0.63", isLts: true, isEol: false, eolFrom: "2028-01-01" }]),
+  });
+  check(
+    "une ligne que rien ne menace le dit, plutot que de se taire",
+    [
+      surLtsRun.status,
+      /Aucune ligne en service n'approche de sa fin de support\. 1 ligne\(s\) relevee\(s\) sur 1 produit\(s\)\./.test(surLtsRun.output),
+    ],
+    [0, true],
+  );
+
+  // Une version qu'aucune ligne de la source ne porte, l'edition Enterprise de
+  // Metabase par exemple : le constat dit qu'il n'y a pas de verdict, il ne se
+  // tait pas, un faux "supporte" etant pire qu'une fin de vie inconnue.
+  const horsSource = sandbox();
+  const horsSourceRun = run(horsSource, "apply.ts", ["--dry-run", ...FLEET], {
+    LIFECYCLE: JSON.stringify([{ name: "0.65", isLts: true, isEol: false, eolFrom: "2028-01-01" }]),
+  });
+  check(
+    "une version qu'aucune ligne ne porte est dite sans verdict",
+    [
+      horsSourceRun.status,
+      /osc-fr1\/alpha-metabase : v0\.63\.18 : aucune ligne de metabase ne la porte, aucun verdict/.test(horsSourceRun.output),
+      /Aucune ligne en service n'approche/.test(horsSourceRun.output),
+    ],
+    [0, true, false],
+  );
+
+  // Une version flottante et une version qu'aucune ligne ne porte rendent toutes
+  // deux un verdict nul, pour deux raisons differentes. Les dire sous la meme
+  // phrase rendrait la premiere fausse : la source porte bien la ligne 0.63,
+  // c'est la version qui ne designe rien.
+  const flottante = sandbox();
+  writeFileSync(join(flottante.fleet, "manifest.yaml"), fixtureSrc.replaceAll("version: v0.63.18", "version: v0.63.x"));
+  writeFileSync(join(flottante.fleet, "lock.json"), lockFixture.replaceAll('"version": "v0.63.18"', '"version": "v0.63.x"'));
+  const flottanteRun = run(flottante, "apply.ts", ["--dry-run", ...FLEET], { LIFECYCLE: LINES_REELLES });
+  check(
+    "une version flottante est dite illisible, et non absente de la source",
+    [
+      flottanteRun.status,
+      /osc-fr1\/alpha-metabase : v0\.63\.x : version illisible, aucun verdict/.test(flottanteRun.output),
+      /aucune ligne de metabase ne la porte/.test(flottanteRun.output),
+    ],
+    [0, true, false],
+  );
+
+  // Un outil que la table ne rapproche d'aucun produit de la source : la veille
+  // se tait sans interroger quoi que ce soit, plutot que de deviner son nom.
+  const inconnu = sandbox();
+  writeFileSync(
+    join(inconnu.fleet, "manifest.yaml"),
+    fixtureSrc.replaceAll("      env: METABASE_VERSION\n", "      env: NGINX_VERSION\n      upstream:\n        repo: nginx/nginx\n"),
+  );
+  const inconnuRun = run(inconnu, "apply.ts", ["--dry-run", ...FLEET], { LIFECYCLE: LINES_REELLES });
+  check(
+    "un outil hors de la table de fin de vie reste muet, et n'est pas interroge",
+    [
+      inconnuRun.status,
+      inconnuRun.calls.filter((l) => l.includes("endoflife.date")).length,
+      /fin de vie|support long|ligne en service/.test(inconnuRun.output),
+    ],
+    [0, 0, false],
+  );
+
+  // Une date que la forme accepte et que le calendrier refuse rendait NaN, et
+  // `NaN <= seuil` etant faux, la ligne passait pour saine. C'est le faux
+  // "supporte" exact que le garde dit empecher.
+  const dateImpossible = sandbox();
+  const dateImpossibleRun = run(dateImpossible, "apply.ts", ["--dry-run", ...FLEET], {
+    LIFECYCLE: JSON.stringify([{ name: "0.63", isLts: false, isEol: false, eolFrom: "2026-13-01" }]),
+  });
+  check(
+    "une date que le calendrier refuse ne passe pas pour une ligne saine",
+    [
+      dateImpossibleRun.status,
+      /osc-fr1\/alpha-metabase : v0\.63\.18 est sur la ligne 0\.63, dont la fin de support s'annonce "2026-13-01" et pas en date/.test(dateImpossibleRun.output),
+      /Aucune ligne en service n'approche/.test(dateImpossibleRun.output),
+    ],
+    [0, true, false],
+  );
+
+  // Un releve en panne n'est pas un parc sain. Sans echeance, warnings redevient
+  // vide, le rapport repasse en etat sain et l'action qui notifie annonce un
+  // retour a la normale sur un parc dont la ligne peut avoir cesse de recevoir
+  // des correctifs : un 503 chez la source suffirait a envoyer cette fausse
+  // bonne nouvelle. Meme garde que pour une liste de stacks illisible.
+  const sourceEnPanne = sandbox();
+  const sourceEnPanneRun = run(sourceEnPanne, "apply.ts", [...FLEET, "--out-dir", "../sortie"], {
+    SCALINGO_API_TOKEN: "faux",
+    REAL: JSON.stringify({ "osc-fr1/beta-metabase": { version: "v0.63.18", sha: "a".repeat(40) } }),
+    EOL_OUTAGE: "1",
+  });
+  const sourceEnPanneDashboard = readFileSync(join(sourceEnPanne.outDir, "incident.md"), "utf8");
+  check(
+    "une source de fin de vie injoignable laisse une echeance, et non un parc sain",
+    [
+      sourceEnPanneRun.status,
+      /Fin de vie illisible sur metabase : aucun verdict de ligne sur cet outil\./.test(sourceEnPanneRun.output),
+      /- \*\*metabase\*\* : fin de vie de metabase illisible, aucune echeance de ligne n'a pu etre verifiee/.test(sourceEnPanneDashboard),
+      /<!-- etat: sain -->/.test(sourceEnPanneDashboard),
+    ],
+    [0, true, true, false],
+  );
+
+  // L'echeance remonte dans l'issue d'etat du parc par le meme chemin que la
+  // depreciation d'un stack. Le constat de ligne, lui, reste au journal : il
+  // durerait des mois dans l'issue sans qu'aucune date ne tombe.
+  const issue = sandbox();
+  run(issue, "apply.ts", [...FLEET, "--out-dir", "../sortie"], {
+    SCALINGO_API_TOKEN: "faux",
+    REAL: JSON.stringify({ "osc-fr1/beta-metabase": { version: "v0.63.18", sha: "a".repeat(40) } }),
+    LIFECYCLE: LINES_REELLES,
+  });
+  const issueDashboard = readFileSync(join(issue.outDir, "incident.md"), "utf8");
+  check(
+    "l'issue d'etat porte l'echeance de fin de support",
+    /- \*\*osc-fr1\/alpha-metabase\*\* : v0\.63\.18 est sur la ligne 0\.63, en fin de support depuis le 2026-11-01/.test(issueDashboard),
+    true,
   );
 
   console.log("\nProposition de montee de securite, contre un fetch simule");

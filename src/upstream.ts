@@ -20,6 +20,13 @@ export type Upstream = {
    * version n'est comparee qu'aux releases de sa propre ligne.
    */
   line: number;
+  /**
+   * Nom de l'outil chez endoflife.date, qui dit la fin de support de chaque
+   * ligne et laquelle est de support long. Absent quand le rapprochement n'est
+   * pas verifie : la veille se tait alors, comme elle se tait sur un amont
+   * inconnu.
+   */
+  lifecycle?: string;
 };
 
 /** Cle : la variable de version lue par le buildpack, celle de tool.env. */
@@ -27,25 +34,35 @@ export const UPSTREAM: Record<string, Upstream & { name: string }> = {
   // Deux lignes publiees en parallele : v0.x pour l'edition OSS, v1.x pour
   // l'Enterprise. Le premier chiffre designe l'edition et non une version :
   // v1.52.2 date de 2024 quand v0.63.16 date de 2026.
-  METABASE_VERSION: { name: "Metabase", repo: "metabase/metabase", line: 1 },
-  GRAFANA_VERSION: { name: "Grafana", repo: "grafana/grafana", line: 1 },
-  LOGSTASH_VERSION: { name: "Logstash", repo: "elastic/logstash", line: 1 },
-  KIBANA_VERSION: { name: "Kibana", repo: "elastic/kibana", line: 1 },
-  PROMETHEUS_VERSION: { name: "Prometheus", repo: "prometheus/prometheus", line: 1 },
-  SONARQUBE_VERSION: { name: "SonarQube", repo: "SonarSource/sonarqube", line: 1 },
+  METABASE_VERSION: { name: "Metabase", repo: "metabase/metabase", line: 1, lifecycle: "metabase" },
+  GRAFANA_VERSION: { name: "Grafana", repo: "grafana/grafana", line: 1, lifecycle: "grafana" },
+  LOGSTASH_VERSION: { name: "Logstash", repo: "elastic/logstash", line: 1, lifecycle: "logstash" },
+  KIBANA_VERSION: { name: "Kibana", repo: "elastic/kibana", line: 1, lifecycle: "kibana" },
+  PROMETHEUS_VERSION: { name: "Prometheus", repo: "prometheus/prometheus", line: 1, lifecycle: "prometheus" },
+  // Le depot publie aujourd'hui la Community Build, numerotee 26.x, et non la
+  // SonarQube Server numerotee par annee : ce sont deux produits distincts chez
+  // endoflife.date, et les confondre daterait la fin de vie de l'autre.
+  SONARQUBE_VERSION: { name: "SonarQube", repo: "SonarSource/sonarqube", line: 1, lifecycle: "sonarqube-community" },
 };
 
 const DEFAULT_LINE = 1;
 
-export type ToolDeclaration = { env: string; upstream?: { repo: string; line?: number } };
+export type ToolDeclaration = {
+  env: string;
+  upstream?: { repo: string; line?: number; lifecycle?: string };
+};
 
 /** Amont d'un outil : celui que declare le manifeste, sinon celui de la table. */
 export function upstreamOf(tool: ToolDeclaration): Upstream | null {
   const known = UPSTREAM[tool.env];
   if (tool.upstream) {
-    return { repo: tool.upstream.repo, line: tool.upstream.line ?? known?.line ?? DEFAULT_LINE };
+    return {
+      repo: tool.upstream.repo,
+      line: tool.upstream.line ?? known?.line ?? DEFAULT_LINE,
+      lifecycle: tool.upstream.lifecycle ?? known?.lifecycle,
+    };
   }
-  return known ? { repo: known.repo, line: known.line } : null;
+  return known ? { repo: known.repo, line: known.line, lifecycle: known.lifecycle } : null;
 }
 
 /** Nom de l'outil dans le rapport : celui de la table, a defaut celui de sa variable. */
@@ -453,4 +470,202 @@ export async function advisoriesFor(
   }
   advisoryCache.set(repo, read);
   return read;
+}
+
+// ------------------------------------------------ fin de vie d'une ligne
+
+/**
+ * Une ligne de versions telle que l'API d'endoflife.date la rend
+ * (GET /api/v1/products/{nom}, champ result.releases).
+ *
+ * La v1 est preferee a la v0 pour une raison de forme : la v0 ecrit `eol` et
+ * `lts` tantot en booleen tantot en date, `"lts":"2026-10-28"` chez nodejs,
+ * `"eol":true` sur une ligne deja morte. Lire cette union demanderait de
+ * trancher a chaque champ ce qu'une valeur veut dire, et une erreur de lecture
+ * y rendrait "supportee" une ligne qui ne l'est plus. La v1 separe le drapeau
+ * de la date, `isEol` et `eolFrom`, `isLts` et `ltsFrom`, et porte un
+ * `schema_version`.
+ *
+ * `eolFrom` est la fin du support de securite, le dernier jour ou un correctif
+ * arrive. Il vaut null chez les outils dont l'editeur n'annonce aucune date,
+ * Kibana et Logstash par exemple : une ligne sans date n'est pas une ligne sans
+ * fin, c'est une fin qu'on ne sait pas dater.
+ */
+export type Line = {
+  name: string;
+  isLts: boolean;
+  isEol: boolean;
+  eolFrom: string | null;
+};
+
+export type LifecycleVerdict = {
+  /** Ligne de la version jugee, telle que la source la nomme. */
+  cycle: string;
+  /** Cette ligne est-elle de support long. */
+  lts: boolean;
+  /** Fin du support de securite, ou null quand la source n'en date aucune. */
+  eol: string | null;
+  /**
+   * Ce que la source annonce comme fin de support quand ce n'est pas une date,
+   * ou null quand elle n'annonce rien.
+   *
+   * Une absence de date et une date hors forme ne demandent pas la meme chose :
+   * la premiere est un fait de l'editeur, Elastic n'en publie aucune, la seconde
+   * dit que la source a change de forme et se corrige ici. Les confondre
+   * perdrait le seul signal de ce changement. C'est la distinction que le releve
+   * des avis fait deja entre une plage absente et une plage illisible.
+   */
+  unreadableEol: string | null;
+  /** Jours jusqu'a cette fin, negatif quand elle est passee. */
+  days: number | null;
+  /** La source declare la ligne en fin de support, datee ou non. */
+  ended: boolean;
+  /**
+   * Ligne de support long plus recente et encore supportee, dans la ligne de la
+   * version jugee, ou null.
+   */
+  nextLts: { cycle: string; eol: string | null } | null;
+};
+
+const DAY_MS = 86400000;
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Date d'une borne, ou null quand ce n'en est pas une.
+ *
+ * Une valeur hors forme rend null plutot que NaN : `NaN <= seuil` est faux, donc
+ * un NaN laisse passer la ligne pour supportee sans que rien ne le dise.
+ *
+ * La forme ne suffit pas, le calendrier est verifie avec. `2026-13-01` et
+ * `2026-11-32` la passent et rendent pourtant NaN a la lecture, ce qui est
+ * exactement le NaN ci-dessus ; `2026-02-31` ne rend pas NaN mais roule au 3
+ * mars, et compter les jours depuis une date que personne n'a annoncee est un
+ * autre faux. Le detour par toISOString attrape les deux : une date impossible
+ * n'en revient jamais a l'identique.
+ */
+const dayOf = (raw: string | null): string | null => {
+  if (!raw || !ISO_DAY.test(raw)) return null;
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) return null;
+  return at.toISOString().slice(0, 10) === raw ? raw : null;
+};
+
+/**
+ * Confronte une version a la fin de vie de sa ligne.
+ *
+ * Rend null quand rien ne se rapproche : version flottante, ou aucune ligne de
+ * la source qui porte la version en service. C'est la regle que la table des
+ * amonts s'impose deja : un outil que la source ne connait pas reste muet, un
+ * faux "supporte" etant pire qu'un "fin de vie inconnue".
+ *
+ * La ligne en service est celle dont les composants prefixent la version jugee,
+ * la plus longue quand plusieurs le font. La comparaison est numerique et non
+ * textuelle : `0.6` ne prefixe pas `0.65.3`, la ou la chaine le ferait croire.
+ *
+ * Les lignes retenues sont celles que `line` rend comparables a la version
+ * jugee. Chez Metabase le premier chiffre designe l'edition : sans ce filtre,
+ * une ligne 1.x de l'Enterprise passerait pour un support long plus recent que
+ * la 0.64 de l'OSS, quand c'est un changement d'edition. Limite assumee, chez un
+ * outil ou `line` designe bien la majeure, un support long de la majeure
+ * suivante n'est pas signale ; c'est la fin de support de la ligne en service
+ * qui l'est, et elle seule force la decision.
+ */
+export function judgeLifecycle(
+  lines: readonly Line[],
+  version: string,
+  line: number,
+  today: number,
+): LifecycleVerdict | null {
+  const judged = pinnedVersion(version);
+  if (!judged) return null;
+
+  const comparable = lines
+    .map((r) => ({ release: r, v: r && typeof r.name === "string" ? parseSemver(r.name) : null }))
+    .filter((c): c is { release: Line; v: Version } => c.v !== null && compareLines(c.v, judged, line) === 0);
+
+  const prefixes = (c: Version) => c.every((n, i) => judged[i] === n);
+  const current = comparable
+    .filter((c) => prefixes(c.v))
+    .reduce<{ release: Line; v: Version } | null>((best, c) => (!best || c.v.length > best.v.length ? c : best), null);
+  if (!current) return null;
+
+  // Lu tel quel et non par le type declare : si la source revenait a la forme de
+  // sa version 0, cette borne porterait un booleen, et c'est la seule chose qui
+  // le dirait.
+  const announced = current.release.eolFrom;
+  const eol = dayOf(announced);
+
+  /**
+   * Une ligne de support long deja morte ne resout rien, et une ligne qui meurt
+   * avant celle en service non plus : la nommer serait precisement se laisser
+   * attirer par un numero plus recent dont le support s'arrete plus tot, ce que
+   * cette veille existe pour eviter. Les dates etant validees, l'ordre des
+   * chaines est l'ordre des jours. Quand l'une des deux n'est pas datee, rien ne
+   * se compare : la ligne est nommee avec sa date, et c'est au lecteur de juger.
+   */
+  const outlives = (c: { release: Line }) => {
+    const until = dayOf(c.release.eolFrom);
+    return !eol || !until || until >= eol;
+  };
+  const next = comparable
+    .filter(
+      (c) => Boolean(c.release.isLts) && !c.release.isEol && cmpVersion(c.v, current.v) > 0 && outlives(c),
+    )
+    .reduce<{ release: Line; v: Version } | null>((best, c) => (!best || cmpVersion(c.v, best.v) > 0 ? c : best), null);
+  const written = announced === null || announced === undefined ? "" : String(announced).trim();
+  return {
+    cycle: current.release.name,
+    lts: Boolean(current.release.isLts),
+    eol,
+    unreadableEol: eol === null && written !== "" ? written : null,
+    // Arrondi au jour superieur et non au plus proche : la borne vaut minuit
+    // UTC, donc une passe de l'apres-midi voyait 91 jours pleins comme 90 et
+    // declenchait le seuil un jour trop tot, selon son heure.
+    days: eol ? Math.ceil((Date.parse(eol) - today) / DAY_MS) : null,
+    ended: Boolean(current.release.isEol),
+    nextLts: next ? { cycle: next.release.name, eol: dayOf(next.release.eolFrom) } : null,
+  };
+}
+
+/**
+ * Seuil a partir duquel la fin de support d'une ligne devient une echeance.
+ *
+ * La politique de Metabase garantit au moins soixante jours a une ligne
+ * ordinaire : un seuil cale dessus ne laisserait aucune marge sur une ligne
+ * courte. Un trimestre laisse le temps d'instruire la montee en pull request
+ * puis de la derouler sur le parc, ce qui est le delai reel entre le signal et
+ * le dernier deploiement.
+ */
+export const EOL_WARNING_DAYS = 90;
+
+/** Vrai quand la fin de support de cette ligne demande une decision maintenant. */
+export const lifecycleDue = (v: LifecycleVerdict): boolean =>
+  v.ended || (v.days !== null && v.days <= EOL_WARNING_DAYS);
+
+const LIFECYCLE_URL = "https://endoflife.date/api/v1/products";
+
+const lifecycleCache = new Map<string, Line[] | null>();
+
+/**
+ * Lignes publiees pour un outil, ou null quand la source ne les a pas rendues.
+ *
+ * Un appel par outil et non par application, comme pour les avis : sept
+ * instances du meme outil donneraient sept fois la meme requete. Un echec est
+ * memorise avec le reste, le relever a nouveau repeterait le meme echec.
+ *
+ * Un nom que la source ne connait pas rend une page d'erreur et non du JSON :
+ * c'est le lecteur, fourni par l'appelant, qui ecarte les reponses en erreur.
+ */
+export async function lifecycleFor(
+  product: string,
+  get: <T>(url: string) => Promise<T | null>,
+): Promise<Line[] | null> {
+  const cached = lifecycleCache.get(product);
+  if (cached !== undefined) return cached;
+  const body = await get<{ result?: { releases?: Line[] } }>(
+    `${LIFECYCLE_URL}/${encodeURIComponent(product)}`,
+  );
+  const releases = Array.isArray(body?.result?.releases) ? body.result.releases : null;
+  lifecycleCache.set(product, releases);
+  return releases;
 }

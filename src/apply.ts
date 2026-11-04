@@ -33,6 +33,9 @@ import {
   cmpVersion,
   compareLines,
   judgeAdvisories,
+  judgeLifecycle,
+  lifecycleDue,
+  lifecycleFor,
   parseSemver,
   pinnedVersion,
   toolName,
@@ -40,6 +43,7 @@ import {
   versionInRange,
   type AdvisoryHit,
   type AdvisoryVerdict,
+  type LifecycleVerdict,
   type Range,
   type ToolDeclaration,
   type Upstream,
@@ -146,6 +150,28 @@ type AppAdvisories = {
   paused: boolean;
 };
 const observedAdvisories = new Map<string, AppAdvisories>();
+
+/**
+ * Ce que la source de fin de vie dit de la ligne en service de chaque
+ * application.
+ *
+ * `missing` porte la raison quand il n'y a pas de verdict, comme pour les avis :
+ * une source illisible, une version qu'on ne sait pas lire et une version
+ * qu'aucune ligne ne porte sont trois ignorances distinctes, et les dire sous la
+ * meme phrase en rendrait deux fausses.
+ */
+type AppLifecycle = {
+  version: string;
+  product: string;
+  verdict: LifecycleVerdict | null;
+  missing: string | null;
+};
+const observedLifecycle = new Map<string, AppLifecycle>();
+
+// Comme pour les avis : un outil dont aucune ligne n'approche de sa fin et un
+// releve en panne rendent le meme silence. Le decompte les separe.
+const lifecycleRead = new Map<string, number>();
+const lifecycleUnread = new Set<string>();
 
 /**
  * Applications dont la version en service tombe sous un avis qu'une montee
@@ -2450,6 +2476,118 @@ async function checkAdvisories(targets: AppEntry[], lock: Lock): Promise<void> {
   }
 }
 
+/**
+ * Confronte la ligne de version en service a la fin de vie que son editeur
+ * annonce.
+ *
+ * Rien dans l'outil ne disait ce moment. La borne `allowedVersions` du preset
+ * Renovate tient la ligne suivie a la main, son commentaire dit "a editer au
+ * prochain changement de LTS", et personne n'etait prevenu de ce changement : il
+ * a fallu une recherche manuelle pour etablir que la 0.65, plus recente et donc
+ * tentante, sortait du support long et mourait onze mois avant la 0.64 en
+ * service.
+ *
+ * La veille ne deploie rien, ne propose rien et n'edite pas cette borne : la
+ * ligne suivie reste une decision humaine, portee par le preset. Elle signale,
+ * et c'est tout.
+ *
+ * Un appel reseau par outil, le cache de lifecycleFor s'en chargeant, et un
+ * verdict par couple outil, ligne et version : un parc heterogene juge chaque
+ * version qu'il porte sans relire la source. Un outil absent de la table de fin
+ * de vie est ecarte avant tout appel : la veille se tait sur lui, elle ne devine
+ * pas son nom chez la source.
+ */
+async function checkLifecycle(targets: AppEntry[], lock: Lock): Promise<void> {
+  const judged = new Map<string, { verdict: LifecycleVerdict | null; missing: string | null }>();
+  const today = Date.now();
+  for (const entry of targets) {
+    const key = keyOf(entry);
+    const upstream = upstreamOf(entry.tool);
+    if (!upstream?.lifecycle) continue;
+    const version = lock.apps[key]?.tool.version ?? entry.tool.version;
+    if (!version) continue;
+
+    const product = upstream.lifecycle;
+    const couple = `${product}#${upstream.line}#${version}`;
+    let seen = judged.get(couple);
+    if (!seen) {
+      const lines = await lifecycleFor(product, fetchJson);
+      if (!lines) {
+        // Un releve en panne n'est pas un parc sain. Sans cette echeance,
+        // warnings redevient vide, le rapport repasse en etat sain et l'action
+        // qui notifie annonce un retour a la normale sur un parc dont la ligne
+        // peut avoir cesse de recevoir des correctifs. Un 503 chez la source
+        // suffirait a envoyer cette fausse bonne nouvelle. Meme raison, et meme
+        // forme, qu'une liste de stacks illisible.
+        if (!lifecycleUnread.has(product)) {
+          warn(product, `fin de vie de ${product} illisible, aucune echeance de ligne n'a pu etre verifiee`);
+        }
+        lifecycleUnread.add(product);
+      } else {
+        lifecycleRead.set(product, lines.length);
+      }
+      const verdict = lines ? judgeLifecycle(lines, version, upstream.line, today) : null;
+      seen = {
+        verdict,
+        missing: verdict
+          ? null
+          : !lines
+            ? "fin de vie illisible"
+            : pinnedVersion(version)
+              ? `aucune ligne de ${product} ne la porte`
+              : "version illisible",
+      };
+      judged.set(couple, seen);
+    }
+    observedLifecycle.set(key, { version, product, ...seen });
+    // La fin de support est une date qui tombe, comme la depreciation d'un
+    // stack : elle part dans les echeances, donc au journal, dans l'issue d'etat
+    // et dans la notification. La ligne de support long plus recente n'est pas
+    // une date mais une decision a instruire, et resterait des mois dans l'issue
+    // a chaque passage : elle reste au journal, plus bas.
+    if (seen.verdict && lifecycleDue(seen.verdict)) warn(key, lifecycleDeadline(seen.verdict, version));
+  }
+}
+
+/** L'echeance que porte une ligne en fin de support, en une ligne. */
+function lifecycleDeadline(v: LifecycleVerdict, version: string): string {
+  const where = `${version} est sur la ${v.lts ? "ligne de support long" : "ligne"} ${v.cycle}`;
+  const when = v.ended
+    ? v.eol
+      ? `en fin de support depuis le ${v.eol}`
+      : v.unreadableEol
+        ? `en fin de support, annoncee "${v.unreadableEol}" et pas une date`
+        : `en fin de support, sans date annoncee`
+    : v.days !== null && v.days > 0
+      ? `fin de support dans ${v.days} jour(s), le ${v.eol}`
+      : `fin de support atteinte le ${v.eol}`;
+  const next = v.nextLts ? `, ${v.nextLts.cycle} est le support long en cours` : "";
+  return `${where}, ${when}${next}`;
+}
+
+/** Ce que le journal dit d'une ligne sur laquelle il reste quelque chose a dire. */
+const lifecycleLine = (l: AppLifecycle): string => {
+  if (!l.verdict) return `${l.version} : ${l.missing}, aucun verdict`;
+  const { cycle, lts, eol, unreadableEol, nextLts } = l.verdict;
+  // La fin de la ligne en service est dite avec celle qu'on propose : sans elle,
+  // le lecteur ne peut pas voir ce que la montee lui gagne, ni qu'elle ne lui
+  // gagne rien.
+  //
+  // Une fin que la source ne date pas ne peut etre ni proche ni lointaine : la
+  // taire laisserait le decompte muet plus bas affirmer qu'aucune ligne
+  // n'approche de sa fin, ce qui est un "supporte" sans appui.
+  const where = `${l.version} est sur la ${lts ? "ligne de support long" : "ligne"} ${cycle}`;
+  const until =
+    eol !== null
+      ? `, supportee jusqu'au ${eol}`
+      : unreadableEol !== null
+        ? `, dont la fin de support s'annonce "${unreadableEol}" et pas en date`
+        : `, dont ${l.product} ne date aucune fin de support`;
+  const after = nextLts?.eol ? ` jusqu'au ${nextLts.eol}` : "";
+  const next = nextLts ? `, ${nextLts.cycle} est de support long${after}` : "";
+  return `${where}${until}${next}`;
+};
+
 /** Ce que le journal et le rapport disent d'un verdict, en une ligne. */
 const advisoryLine = (a: AppAdvisories): string => {
   if (!a.verdict) return `${a.version} : ${a.missing}, aucun verdict`;
@@ -3014,6 +3152,7 @@ async function main() {
 
   await checkExploited(targets, lock);
   await checkAdvisories(targets, lock);
+  await checkLifecycle(targets, lock);
   await checkDatabases(targets, token);
 
   // Une surveillance silencieuse doit dire qu'elle a regarde, sinon son silence
@@ -3023,7 +3162,7 @@ async function main() {
     log(
       stacksSeen > 0
         ? `\nAucune echeance. ${stacksSeen} stack(s) confrontes sur ${stackCache.size} region(s), ${dbChecked} base(s) relevee(s).`
-        : `\nAucune echeance verifiee : aucun stack n'a pu etre lu.`,
+        : `\nAucune echeance de stack verifiee : aucun stack n'a pu etre lu.`,
     );
   }
 
@@ -3049,6 +3188,33 @@ async function main() {
   } else if (noticed.length === 0 && advisoriesRead.size > 0) {
     const total = [...advisoriesRead.values()].reduce((n, c) => n + c, 0);
     log(`\nAucun avis amont ne porte sur les versions en service. ${total} avis confrontes sur ${advisoriesRead.size} depot(s).`);
+  }
+
+  // Les fins de support proches sont deja parties dans les echeances, qui
+  // nomment elles-memes le support long en cours : les repeter ici dirait deux
+  // fois la meme chose. Ne restent donc que le support long plus recent sans
+  // echeance, qui n'est pas une date mais une decision a instruire, et les deux
+  // formes d'ignorance, une version qu'aucune ligne de la source ne porte et une
+  // ligne dont elle ne date pas la fin. Aucune des deux n'est un "supporte", et
+  // les taire les ferait compter parmi les lignes que rien ne menace.
+  const remarked = [...observedLifecycle].filter(([, l]) =>
+    l.verdict
+      ? (l.verdict.nextLts !== null || l.verdict.eol === null) && !lifecycleDue(l.verdict)
+      : lifecycleRead.has(l.product),
+  );
+  if (remarked.length > 0) {
+    log(`\n${remarked.length} application(s) au regard de la fin de vie de leur ligne :`);
+    for (const [key, l] of remarked) log(`  ${key} : ${lifecycleLine(l)}`);
+    if (remarked.some(([, l]) => l.verdict?.nextLts)) {
+      log(`Changer de ligne est une montee fonctionnelle, qui se decide en pull request.`);
+    }
+  }
+  const due = [...observedLifecycle.values()].filter((l) => l.verdict && lifecycleDue(l.verdict)).length;
+  if (lifecycleUnread.size > 0) {
+    log(`\nFin de vie illisible sur ${[...lifecycleUnread].join(", ")} : aucun verdict de ligne sur cet outil.`);
+  } else if (remarked.length === 0 && due === 0 && lifecycleRead.size > 0) {
+    const total = [...lifecycleRead.values()].reduce((n, c) => n + c, 0);
+    log(`\nAucune ligne en service n'approche de sa fin de support. ${total} ligne(s) relevee(s) sur ${lifecycleRead.size} produit(s).`);
   }
 
   if (warnings.length > 0) {
