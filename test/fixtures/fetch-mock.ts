@@ -20,9 +20,16 @@
  *
  * Un deploiement est accepte et conclu du premier coup, au statut de REAL.
  * CRASH=1 fait apparaitre un redemarrage en erreur dans les evenements de l'app
- * a partir du deuxieme releve, soit pendant la fenetre de garde et non avant,
- * ce qui est le scenario que la fenetre existe pour attraper.
+ * a partir du deuxieme releve suivant le deploiement, soit pendant la fenetre
+ * de garde et non avant, ce qui est le scenario que la fenetre existe pour
+ * attraper. CRASH_AFTER le fait apparaitre a partir d'un autre releve.
  * STOPPED=1 eteint l'app une fois son deploiement declenche.
+ * PS_DENIED=1 fait refuser la lecture des conteneurs, comme un fgp.json qui
+ * precede cette route.
+ * CONTAINER donne l'etat du conteneur web apres le deploiement, `running` a
+ * defaut. Une console one-off et deux conteneurs de la version d'avant,
+ * l'un supprime, l'autre seulement cree avant le deploiement, l'accompagnent
+ * toujours, dans un etat qui ferait echouer le controle s'il les comptait.
  */
 
 import { appendFileSync } from "node:fs";
@@ -38,6 +45,8 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 const AT = "2026-10-01T00:00:00Z";
+const BEFORE = "2026-09-01T00:00:00Z";
+const LATER = "2026-10-01T00:05:00Z";
 let eventReads = 0;
 let deployTriggered = false;
 
@@ -97,9 +106,20 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
     if (route === `/deployments/dep-${app}/output`) {
       return new Response("-----> Downloading Buildpack: https://github.com/Scalingo/metabase-buildpack\n", { status: 200 });
     }
+    if (route === "/ps") {
+      if (process.env.PS_DENIED) return json({ error: "scope_denied" }, 403);
+      return json({
+        containers: [
+          { id: "ct-web", type: "web", type_index: 1, state: process.env.CONTAINER ?? "running", created_at: LATER, deleted_at: null },
+          { id: "ct-console", type: "one-off", type_index: 1, state: "booting", created_at: LATER, deleted_at: null },
+          { id: "ct-supprime", type: "web", type_index: 1, state: "crashed", created_at: BEFORE, deleted_at: AT },
+          { id: "ct-ancien", type: "web", type_index: 2, state: "crashed", created_at: BEFORE, deleted_at: null },
+        ],
+      });
+    }
     if (route === "/events?from=1") {
-      eventReads++;
-      const fallen = process.env.CRASH && eventReads > 1;
+      if (deployTriggered) eventReads++;
+      const fallen = (process.env.CRASH || process.env.CRASH_AFTER) && eventReads > Number(process.env.CRASH_AFTER ?? 1);
       return json({
         events: [
           ...(fallen ? [{ id: "ev-crash", type: "restart", created_at: AT, type_data: { reason: "unexpected_failure" } }] : []),

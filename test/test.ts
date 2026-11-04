@@ -40,6 +40,8 @@ import {
   readManifest,
   RENAMED_FIELDS,
   resolveAliases,
+  runningVersionUnknown,
+  settleOf,
   targetGoesBack,
   targetReached,
   writeOptions,
@@ -786,7 +788,7 @@ check("un manifeste sans fenetre de garde reste valide", validate(fixture), true
 
 const settleOff = template();
 settleOff.apps[0].settle = { window: 0 };
-check("une fenetre nulle est acceptee, c'est l'extinction", validate(settleOff), true);
+check("une fenetre nulle est acceptee, elle retire l'attente", validate(settleOff), true);
 
 const settleEmpty = template();
 settleEmpty.apps[0].settle = {};
@@ -969,6 +971,25 @@ console.log("\nSens de l'ecart avec le manifeste");
   // Rien n'est compare au-dela des composants numeriques de tete : le filet a
   // ce trou, et la docstring le dit plutot que de le laisser surprendre.
   check("un suffixe non numerique n'est pas vu", targetGoesBack("1.27.4-2", "1.27.4-1"), false);
+
+  // Le 2026-11-04 : la variable portait `latest`, alors v0.65.2, et v0.64.4.3 est
+  // passee sur une base deja migree. Metabase a refuse de demarrer.
+  check("latest en service ne se compare pas", runningVersionUnknown("latest", "v0.64.4.3"), true);
+  check("un alias glissant en service non plus", runningVersionUnknown("v0.65.x", "v0.64.4.3"), true);
+  check("une cible inchangee ne pose pas la question", runningVersionUnknown("latest", "latest"), false);
+  check("une version epinglee en service se compare", runningVersionUnknown("v0.65.2", "v0.64.4.3"), false);
+  check("une app sans variable reste un etat d'amorcage", runningVersionUnknown(null, "v0.64.4.3"), false);
+}
+
+console.log("\nFenetre de garde par defaut");
+
+{
+  // Sans fenetre, le parc betagouv concluait sur le seul statut du deploiement.
+  check("une app qui ne declare rien recoit la fenetre du moteur", settleOf({}, {}), { window: 120 });
+  check("les defauts du manifeste priment", settleOf({}, { settle: { window: 300 } }), { window: 300 });
+  check("l'app prime sur les defauts, en bloc", settleOf({ settle: { window: 0 } }, { settle: { window: 300 } }), {
+    window: 0,
+  });
 }
 
 console.log("\nScopes des blobs du proxy");
@@ -996,6 +1017,11 @@ console.log("\nScopes des blobs du proxy");
     "GET:/v1/features/stacks",
   ]);
   check("aucun DELETE", scopes.filter((s) => methodsOf(s).includes("DELETE")), []);
+  check(
+    "la fenetre de garde lit evenements et conteneurs, sauf en pause",
+    [about("beta").filter((s) => /\/(events|ps)$/.test(s)), about("alpha").filter((s) => /\/(events|ps)$/.test(s))],
+    [["GET:/v1/apps/beta/events", "GET:/v1/apps/beta/ps"], []],
+  );
   check(
     "les scopes ne dependent pas de l'ordre du manifeste",
     apiScopes([{ app: "alpha", paused: true }, { app: "beta" }]),
@@ -2032,7 +2058,9 @@ try {
   // repartait au passage suivant avec une sauvegarde fraiche, indefiniment.
   const QUARANTINED = "osc-fr1/alpha-metabase";
   const CIBLE = { sha: "a".repeat(40), version: "v0.63.18" };
-  const lockEnQuarantaine = (sha = CIBLE.sha) => {
+  // Le deploiement juge est un build rate anterieur, pas le dernier deploiement
+  // que releve le fetch simule, sauf a le dire.
+  const lockEnQuarantaine = (sha = CIBLE.sha, deploymentId = "dep-rate") => {
     const l = JSON.parse(lockFixture) as { apps: Record<string, Record<string, unknown>> };
     l.apps[QUARANTINED].source = { repo: "exemple/metabase-scalingo", sha };
     l.apps[QUARANTINED].backup = { id: "bkp-42", at: "2026-10-29T09:00:00.000Z" };
@@ -2040,13 +2068,13 @@ try {
       target: CIBLE,
       reason: "build-error",
       at: "2026-10-29T10:00:00.000Z",
-      deploymentId: "dep-alpha-metabase",
+      deploymentId,
     };
     return JSON.stringify(l, null, 2) + "\n";
   };
-  const apresReleve = (status: string, sha = CIBLE.sha, lockSha?: string) => {
+  const apresReleve = (status: string, sha = CIBLE.sha, lockSha?: string, judged?: string) => {
     const b = sandbox();
-    writeFileSync(join(b.fleet, "lock.json"), lockEnQuarantaine(lockSha));
+    writeFileSync(join(b.fleet, "lock.json"), lockEnQuarantaine(lockSha, judged));
     const out = run(b, "apply.ts", ["--reconcile", ...FLEET, "--out-dir", "../sortie"], {
       SCALINGO_API_TOKEN: "faux",
       REAL: JSON.stringify({ [QUARANTINED]: { version: CIBLE.version, sha, status } }),
@@ -2083,6 +2111,14 @@ try {
   // git_ref qui n'est pas un sha, ce que rend un deploiement declenche depuis le
   // dashboard : le repli prenait le sha du manifeste, donc l'egalite cherchee,
   // et levait la quarantaine sans avoir rien constate.
+  // Le 2026-11-04 : le deploiement que la fenetre de garde refuse, Scalingo le
+  // dit `success`. Le releve horaire levait donc la quarantaine d'une app en
+  // boucle de crash, et le passage suivant la disait conforme.
+  check(
+    "le deploiement meme que la fenetre a refuse ne leve pas la quarantaine",
+    apresReleve("success", CIBLE.sha, undefined, "dep-alpha-metabase"),
+    { status: 0, quarantaine: true, ignoree: true, deploiement: false, sauvegarde: "bkp-42" },
+  );
   check("un git_ref illisible ne fabrique plus l'egalite de sha", apresReleve("success", "main", "c".repeat(40)), {
     status: 0,
     quarantaine: true,
@@ -2121,22 +2157,31 @@ try {
       version: entry.tool.version,
       quarantaine: entry.quarantine?.reason ?? null,
       releves: out.calls.filter((l) => l.endsWith("/events?from=1")).length,
+      conteneurs: out.calls.filter((l) => l.endsWith("/ps")).length,
       vague: /Echec sur l'eclaireur/.test(out.output),
     };
   };
+  const withoutWait = bumped.replace("    backup: not-available\n", "    backup: not-available\n    settle:\n      window: 0\n");
 
-  check("sans fenetre declaree, rien n'est relu et le statut conclut seul", deploiement(bumped), {
+  // Une fenetre nulle retire l'attente, pas le controle : l'etat des
+  // conteneurs reste lu. Chaque route est aussi lue une fois avant le
+  // deploiement, pour qu'un scope manquant arrete tout avant la moindre
+  // ecriture. La fenetre par defaut est couverte par settleOf, ses deux minutes
+  // ne tenant pas dans le delai d'un test.
+  check("une fenetre nulle conclut encore sur l'etat des conteneurs", deploiement(withoutWait), {
     status: 0,
     version: "v0.63.19",
     quarantaine: null,
-    releves: 0,
+    releves: 3,
+    conteneurs: 2,
     vague: false,
   });
   check("une fenetre que rien ne trouble conclut au succes", deploiement(withSettle), {
     status: 0,
     version: "v0.63.19",
     quarantaine: null,
-    releves: 2,
+    releves: 3,
+    conteneurs: 2,
     vague: false,
   });
   // Le lock ne doit pas porter la nouvelle version, et la vague doit s'arreter
@@ -2145,7 +2190,8 @@ try {
     status: 1,
     version: "v0.63.18",
     quarantaine: "redemarrage en erreur pendant la fenetre de garde (restart)",
-    releves: 2,
+    releves: 3,
+    conteneurs: 1,
     vague: true,
   });
   // La relecture du statut en fin de fenetre attrape ce que les evenements ont
@@ -2154,9 +2200,89 @@ try {
     status: 1,
     version: "v0.63.18",
     quarantaine: 'app "stopped" au bout de la fenetre de garde',
-    releves: 2,
+    releves: 3,
+    conteneurs: 1,
     vague: true,
   });
+  // Le 2026-11-04 : maestro-metabase deploye en `success`, puis Metabase en
+  // boucle de crash, et le resume disait 11 deployees, 0 echec. L'app se lit
+  // `running` tant qu'un conteneur tourne : c'est le conteneur qui le dit.
+  check("un conteneur tombe apres un deploiement reussi met en quarantaine", deploiement(withSettle, { CONTAINER: "crashed" }), {
+    status: 1,
+    version: "v0.63.18",
+    quarantaine: 'conteneur web-1 "crashed" apres le deploiement',
+    releves: 3,
+    conteneurs: 2,
+    vague: true,
+  });
+  check("meme avec une fenetre nulle", deploiement(withoutWait, { CONTAINER: "crashed" }), {
+    status: 1,
+    version: "v0.63.18",
+    quarantaine: 'conteneur web-1 "crashed" apres le deploiement',
+    releves: 3,
+    conteneurs: 2,
+    vague: true,
+  });
+  // Un conteneur qui demarre encore laisse attendre, et la boucle de crash se
+  // voit dans les evenements releves entre deux lectures, sans attendre le delai.
+  check(
+    "un conteneur qui redemarre en boucle est vu par ses evenements",
+    deploiement(withoutWait, { CONTAINER: "booting", CRASH_AFTER: "2" }),
+    {
+      status: 1,
+      version: "v0.63.18",
+      quarantaine: "redemarrage en erreur pendant la fenetre de garde (restart)",
+      releves: 4,
+      conteneurs: 2,
+      vague: true,
+    },
+  );
+
+  // Un fgp.json sans les routes de la fenetre laissait deployer, puis
+  // interrompait : la cible tournait sans controle, et le releve la consignait.
+  {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), bumped);
+    const out = run(b, "apply.ts", [...FLEET, "--app", "delta", "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [DELTA]: { version: "v0.63.18", sha: "a".repeat(40) } }),
+      PS_DENIED: "1",
+    });
+    check(
+      "une route de la fenetre illisible arrete avant toute ecriture",
+      [
+        out.calls.filter((l) => /^(POST|PATCH) \S+\/(variables|deployments|backups)(\/|$)/.test(l)),
+        loadLock(join(b.fleet, "lock.json")).apps[DELTA].tool.version,
+        /INTERROMPU/.test(out.output),
+      ],
+      [[], "v0.63.18", true],
+    );
+  }
+
+  console.log("\nVersion en service inconnue, contre un fetch simule");
+
+  {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), bumped);
+    const lockSrc = readFileSync(join(b.fleet, "lock.json"), "utf8");
+    const at = lockSrc.indexOf('"version": "v0.63.18"', lockSrc.indexOf(DELTA));
+    writeFileSync(join(b.fleet, "lock.json"), `${lockSrc.slice(0, at)}"version": "latest"${lockSrc.slice(at + '"version": "v0.63.18"'.length)}`);
+    const out = run(b, "apply.ts", [...FLEET, "--app", "delta", "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [DELTA]: { version: "latest", sha: "a".repeat(40) } }),
+    });
+    const entry = loadLock(join(b.fleet, "lock.json")).apps[DELTA];
+    check(
+      "une variable a latest refuse la cible au lieu de la deployer",
+      [
+        out.calls.some((l) => /^POST \S+\/deployments$/.test(l)),
+        entry.tool.version,
+        entry.quarantine,
+        /VERSION EN SERVICE INCONNUE : METABASE_VERSION porte latest/.test(out.output),
+      ],
+      [false, "latest", null, true],
+    );
+  }
   console.log("\nReleve des avis amont, contre un fetch simule");
 
   // Le parc de test est en v0.63.18 : cet avis la couvre et annonce v0.63.20.

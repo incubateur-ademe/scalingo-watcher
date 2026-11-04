@@ -281,11 +281,11 @@ binaire ne sait pas démarrer.
 
 **Un déploiement conclu réussi ne dit pas que l'outil tourne.** Scalingo conclut
 dès que le conteneur répond sur son port, et un outil qui migre sa base au
-démarrage le fait après. Déclarer `settle: {window: <secondes>}`, par application
-ou dans `defaults`, fait relire l'application pendant ce temps et met en
-quarantaine si elle redémarre en erreur. Sans ce champ, le comportement est
-inchangé. En accès par proxy, il faut régénérer `fgp.json` : la fenêtre lit une
-route de plus.
+démarrage le fait après. L'apply relit donc l'application pendant une fenêtre
+de garde, 120 secondes par défaut, puis exige que chacun de ses conteneurs soit
+`running`, et met en quarantaine si elle redémarre en erreur. `settle: {window:
+<secondes>}`, par application ou dans `defaults`, ajuste la fenêtre. En accès par
+proxy, il faut régénérer `fgp.json` : la fenêtre lit les routes `events` et `ps`.
 
 ## Développement
 

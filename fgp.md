@@ -100,6 +100,7 @@ curl -sX POST "$FGP/api/generate" -H 'Content-Type: application/json' -d "{
     \"GET|POST:/v1/apps/alpha-metabase/deployments\",
     \"GET:/v1/apps/alpha-metabase/deployments/*\",
     \"GET:/v1/apps/alpha-metabase/events\",
+    \"GET:/v1/apps/alpha-metabase/ps\",
     \"GET:/v1/apps/alpha-metabase/addons\",
     \"GET:/v1/apps/alpha-metabase/scm_repo_link\",
     \"GET:/v1/apps/beta-metabase\",
@@ -114,12 +115,12 @@ curl -sX POST "$FGP/api/generate" -H 'Content-Type: application/json' -d "{
 
 Les deux lectures globales servent à l'audit et à `init`, qui listent les
 applications, et au suivi des échéances de stacks. `deployments/*` couvre le
-détail d'un déploiement et son journal de build. `events` sert à la fenêtre de
-garde du champ `settle` du manifeste : une application en pause, qu'on ne
-déploie pas, ne l'a pas. **Un `fgp.json` généré avant la version qui a introduit
-`settle` n'ouvre pas cette route** : déclarer le champ sans régénérer fait
-refuser l'appel par le proxy, et le passage s'interrompt sans rien mettre en
-quarantaine.
+détail d'un déploiement et son journal de build. `events` et `ps` servent à la
+fenêtre de garde, appliquée après chaque déploiement : une application en pause,
+qu'on ne déploie pas, ne les a pas. **Un `fgp.json` généré avant la version qui
+a ajouté `ps` n'ouvre pas cette route** : le proxy refuse l'appel à la lecture
+préalable, avant toute écriture, et le passage s'interrompt sans rien déployer
+ni mettre en quarantaine.
 
 Un blob par application pour ses bases, le mode `scalingo-addon` liant le blob
 à une base précise :
