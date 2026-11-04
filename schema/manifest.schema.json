@@ -223,6 +223,16 @@
                   "minimum": 1,
                   "default": 1,
                   "description": "Nombre de composants de tete qui forment une ligne de versions publiee a part. Une version n'est comparee qu'aux releases de sa ligne. `1` pour la plupart des outils, ou la ligne est la majeure. Chez Metabase, `1` aussi, mais le premier chiffre y designe l'edition (0 pour l'OSS, 1 pour l'Enterprise) et non une version."
+                },
+                "lifecycle": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9.-]*$",
+                  "description": "Nom de l'outil chez endoflife.date, qui dit la fin de support de chaque ligne et laquelle est de support long. Le moteur en connait deja une table, indexee par `env` : ce champ ne sert qu'a la completer pour un outil qu'elle ne connait pas, ou a la surcharger. Sans lui la veille de fin de vie se tait sur cet outil, plutot que de deviner son nom chez la source. Le nom est celui du chemin de l'API, visible dans l'URL de sa page : `sonarqube-community` pour SonarQube Community Build.",
+                  "examples": [
+                    "metabase",
+                    "grafana",
+                    "sonarqube-community"
+                  ]
                 }
               }
             }

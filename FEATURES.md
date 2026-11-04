@@ -257,7 +257,8 @@ suivante, que les releases n'exposaient pas, et celle-ci peut être hors support
 avec une fin de vie plus proche que la ligne en service. Sans cette borne, le tableau
 de bord porterait une montée permanente invitant à quitter le support long, soit
 exactement l'alerte qu'on apprend à ignorer. La borne s'édite à la main au changement
-de ligne, environ une fois l'an.
+de ligne, environ une fois l'an, et c'est la veille de fin de vie du moteur qui
+signale ce moment : rien ne le disait auparavant.
 
 **[fait]** Les règles de Metabase ne filtrent pas la source des versions, seulement
 le nom du paquet. Un parc dont le manifeste porte encore l'ancienne annotation garde
@@ -687,6 +688,19 @@ annoncé tranche, une faille sans correctif atteignable, un correctif qui sort d
 la ligne d'édition, un correctif rattrapé par un avis plus récent. Chaque forme
 de plage éprouvée a réellement été publiée par Metabase.
 
+**[fait]** La veille de fin de vie est couverte par ses cas limites, contre les
+lignes réelles de Metabase au 2026-11-04 : une ligne morte, une ligne plus récente
+mais hors support long, une ligne qui est le dernier support long, un support long
+plus récent déjà mort, une édition jugée contre l'autre, une ligne sans date
+annoncée, une date illisible, une borne qui n'est pas une date du tout, le seuil
+au jour près, et un outil hors de la table qui n'est pas interrogé.
+
+**[fait]** Ses cas de journal sont testés à part de ses cas de verdict. Un verdict
+juste dont le passage ne dit rien est le défaut qui a échappé au premier jet :
+les tests vérifiaient qu'une ligne sans date rendait un verdict non daté, jamais
+que le passage le disait, et il la comptait parmi les lignes saines. Chacun de ces
+trois tests a été vérifié en cassant ce qu'il protège.
+
 **[fait]** Les tests ont été vérifiés en cassant volontairement chacun des
 invariants, pour s'assurer qu'ils échouent quand ils le doivent.
 
@@ -965,6 +979,100 @@ positif se corrige par `tool.upstream`, qui désigne le bon dépôt.
 nombre d'avis confrontés et sur combien de dépôts. Sans ce décompte, un amont qui
 ne publie rien sur les versions en service et un relevé en panne rendent
 exactement le même silence.
+
+**[fait]** Veille de la fin de vie de la ligne en service. Les versions du lock
+sont confrontées à ce que l'éditeur annonce pour leur ligne de versions, lu chez
+endoflife.date (`GET /api/v1/products/{nom}`). L'outil savait déjà veiller sur
+les failles de l'amont et sur la dépréciation d'un stack, mais rien ne disait
+quand la ligne suivie cesse d'être supportée : la borne `allowedVersions` du
+preset Metabase est tenue à la main, son commentaire dit de l'éditer au prochain
+changement de support long, et personne n'était prévenu de ce changement. Il a
+fallu une recherche manuelle pour établir que la 0.65, plus récente et donc
+tentante, sortait du support long et mourait onze mois avant la 0.64 en service.
+
+**[fait]** La version 1 de l'API est préférée à la version 0 pour une raison de
+forme. La v0 écrit `eol` et `lts` tantôt en booléen tantôt en date,
+`"lts":"2026-10-28"` chez nodejs, `"eol":true` sur une ligne déjà morte : lire
+cette union demanderait de trancher à chaque champ ce qu'une valeur veut dire, et
+une erreur y rendrait « supportée » une ligne qui ne l'est plus. La v1 sépare le
+drapeau de la date, `isEol` et `eolFrom`, `isLts` et `ltsFrom`, et porte un
+`schema_version`.
+
+**[fait]** Le rapprochement entre un outil et un produit de la source est déclaré,
+jamais dérivé de sa variable de version. C'est la règle que la table des dépôts
+amont s'impose déjà, pour la même raison : un mauvais rapprochement daterait la
+fin de vie d'un autre produit, ce qui est pire qu'une fin de vie inconnue. Le nom
+vient de la table `UPSTREAM` ou de `tool.upstream.lifecycle`, et un outil qui n'en
+a pas n'est pas interrogé du tout. Le dépôt `SonarSource/sonarqube` publie
+aujourd'hui la Community Build numérotée `26.x`, donc `sonarqube-community` et non
+la `sonarqube-server` numérotée par année, qui est un autre produit.
+
+**[fait]** La ligne en service est celle dont les composants préfixent la version
+jugée, la plus précise quand plusieurs le font. La lecture est numérique et non
+textuelle : en chaîne, `0.65` préfixerait `0.6`. Les lignes retenues sont ensuite
+celles que le champ `line` rend comparables à la version jugée. Chez Metabase le
+premier chiffre désigne l'édition : sans ce filtre, une ligne `1.x` de
+l'Enterprise passerait pour un support long plus récent que la `0.64` de l'OSS,
+quand c'est un changement d'édition. Limite assumée, chez un outil où `line`
+désigne bien la majeure, un support long de la majeure suivante n'est pas nommé ;
+c'est la fin de support de la ligne en service qui est signalée, et elle seule
+force la décision.
+
+**[fait]** Deux signalements de nature différente, rangés à deux endroits. Une
+fin de support proche ou dépassée est une date qui tombe, comme la dépréciation
+d'un stack : elle part dans les échéances, donc au journal, dans l'issue d'état du
+parc et dans la notification. Une ligne de support long plus récente n'est pas une
+date mais une décision à instruire, et resterait des mois dans l'issue à chaque
+passage, ce qui est exactement l'alerte permanente qu'on apprend à ignorer : elle
+reste au journal. Une échéance nommant déjà le support long en cours, le constat
+ne la répète pas.
+
+**[fait]** Le seuil de l'échéance est de quatre-vingt-dix jours. La politique de
+Metabase garantit au moins soixante jours à une ligne ordinaire et au moins
+quatorze mois à une ligne de support long : un seuil calé sur soixante ne
+laisserait aucune marge sur une ligne courte. Un trimestre laisse le temps
+d'instruire la montée en pull request puis de la dérouler sur le parc, ce qui est
+le délai réel entre le signal et le dernier déploiement.
+
+**[fait]** La veille ne déploie rien, ne propose aucune pull request et n'édite
+pas la borne `allowedVersions`. La ligne suivie reste une décision humaine, portée
+par le preset ; cette veille dit seulement quand la reprendre.
+
+**[fait]** Une version qu'aucune ligne de la source ne porte est dite sans
+verdict, elle ne passe pas pour supportée. C'est le cas de l'édition Enterprise
+de Metabase, que la source ne liste pas, et d'une version fraîchement publiée que
+la source n'a pas encore référencée : `26.11.0.134175` existe en tag du dépôt
+SonarQube alors que la source s'arrête à la ligne `26.10`. Une version glissante
+ne tranche pas non plus, pour la raison qui l'écarte déjà des avis. Et comme pour
+les avis, une veille muette dit qu'elle a regardé : le passage annonce le nombre
+de lignes relevées et sur combien de produits, sans quoi une ligne que rien ne
+menace et un relevé en panne rendraient le même silence.
+
+**[fait]** Une ligne dont la source ne date pas la fin se dit elle aussi, pour la
+même raison et au même endroit. Elastic n'annonce aucune date, donc les lignes de
+Kibana et de Logstash n'en portent pas, et ces deux outils sont dans la table :
+une fin qu'on ne sait pas dater n'est ni proche ni lointaine, et la taire la
+faisait compter parmi les lignes que rien ne menace. Le premier jet le faisait,
+et deux relectures indépendantes l'ont attrapé là où les tests du verdict seul ne
+pouvaient pas : ils vérifiaient que le verdict n'était pas daté, jamais ce que le
+passage en disait.
+
+**[fait]** Une date hors forme est distinguée d'une absence de date, et retenue
+telle quelle. Le garde qui la ramène à « pas de date » existe pour éviter un
+`NaN`, puisque `NaN <= seuil` est faux et laisserait la ligne passer pour
+supportée. Mais les deux cas ne demandent pas la même chose : l'absence est un
+fait de l'éditeur, la forme inattendue dit que la source a changé et se corrige
+dans le moteur. Les confondre perdrait le seul signal de ce changement, y compris
+le retour à la forme de la version 0 de l'API, où cette borne s'écrit en booléen.
+C'est la distinction que le relevé des avis fait déjà entre une plage absente et
+une plage illisible.
+
+**[fait]** Un appel réseau par outil, et un verdict par couple outil, ligne et
+version. Sept instances du même outil donneraient sept fois la même requête, et
+un parc hétérogène juge chaque version qu'il porte sans relire la source. Les
+deux mécanismes sont distincts et un parc homogène ne les sépare pas : le test du
+compteur d'appels passait sans le cache, la mémoire du verdict par couple y
+suffisant. Il porte désormais deux versions du même outil.
 
 **[fait]** Surveillance des stacks. Chaque application est confrontée à la liste
 des stacks de sa région, qui portent une date de dépréciation. Un stack en fin de
