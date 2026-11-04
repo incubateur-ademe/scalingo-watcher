@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.2.2...v1.3.0) (2026-11-04)
+
+
+### Nouveautés
+
+* **upstream:** signaler la fin de vie d'une ligne de version ([#36](https://github.com/incubateur-ademe/scalingo-watcher/issues/36)) ([ff7ed5f](https://github.com/incubateur-ademe/scalingo-watcher/commit/ff7ed5f62e76d3f4d00ae3779ac3b51a6edcf8a2))
+
 ## [1.2.2](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.2.1...v1.2.2) (2026-11-04)
 
 
