@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.2](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.2.1...v1.2.2) (2026-11-04)
+
+
+### Corrections
+
+* **apply:** exiger une app demarree apres deploiement, refuser une version en service inconnue ([#37](https://github.com/incubateur-ademe/scalingo-watcher/issues/37)) ([daf1936](https://github.com/incubateur-ademe/scalingo-watcher/commit/daf19364747085feacd96019185a42e972ddb9de))
+
 ## [1.2.1](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.2.0...v1.2.1) (2026-11-04)
 
 
