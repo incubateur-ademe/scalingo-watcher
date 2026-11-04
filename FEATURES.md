@@ -698,8 +698,24 @@ au jour près, et un outil hors de la table qui n'est pas interrogé.
 **[fait]** Ses cas de journal sont testés à part de ses cas de verdict. Un verdict
 juste dont le passage ne dit rien est le défaut qui a échappé au premier jet :
 les tests vérifiaient qu'une ligne sans date rendait un verdict non daté, jamais
-que le passage le disait, et il la comptait parmi les lignes saines. Chacun de ces
-trois tests a été vérifié en cassant ce qu'il protège.
+que le passage le disait, et il la comptait parmi les lignes saines.
+
+**[fait]** Le fetch simulé sait faire échouer la source de fin de vie, par
+`EOL_OUTAGE=1`, comme il sait déjà faire échouer la liste des addons. Sans ce
+levier la branche de source illisible n'était pas atteignable par un test, et son
+défaut d'échéance n'aurait pas pu être couvert.
+
+**[fait]** Un test qui passe aussi bien avec le défaut qu'avec sa correction ne
+protège rien. Le cas du rapprochement numérique en portait un : une version courte
+face à une ligne longue ne trompe ni la lecture en chiffres ni la lecture en
+chaîne, et son commentaire énonçait le danger à l'envers. Le risque est la ligne
+courte, `0.6` préfixant la chaîne `0.65.3`, et c'est ce sens que le test exerce.
+
+**[fait]** Chacun des tests de cette veille a été vérifié en cassant ce qu'il
+protège : la validation du calendrier, l'échéance sur source illisible, l'écart des
+lignes de support long qui régressent, l'arrondi du seuil, la distinction des
+raisons d'un verdict absent, le sens du rapprochement numérique, et la fin de la
+ligne en service dans le constat.
 
 **[fait]** Les tests ont été vérifiés en cassant volontairement chacun des
 invariants, pour s'assurer qu'ils échouent quand ils le doivent.
@@ -1056,6 +1072,51 @@ faisait compter parmi les lignes que rien ne menace. Le premier jet le faisait,
 et deux relectures indépendantes l'ont attrapé là où les tests du verdict seul ne
 pouvaient pas : ils vérifiaient que le verdict n'était pas daté, jamais ce que le
 passage en disait.
+
+**[fait]** Une date est validée sur le calendrier et pas seulement sur sa forme.
+`2026-13-01` et `2026-11-32` passent l'expression `\d{4}-\d{2}-\d{2}` et rendent
+`NaN` à la lecture, soit exactement le `NaN` contre lequel le garde existe :
+`NaN <= seuil` étant faux, la ligne ne devenait pas une échéance, et comme la
+date n'était pas nulle elle ne devenait pas non plus un constat. Les deux portes
+se refermaient et le passage ne disait plus qu'« aucune ligne n'approche de sa fin
+de support ». `2026-02-31` ne rend pas `NaN` mais roule au 3 mars, et compter les
+jours depuis une date que personne n'a annoncée est un autre faux. Le détour par
+`toISOString` attrape les deux : une date impossible n'en revient jamais à
+l'identique. La chaîne qui ressemble à une date était ainsi moins bien traitée que
+celle qui n'y ressemble pas.
+
+**[fait]** Une source de fin de vie injoignable laisse une échéance, et non un
+parc sain. Sans elle, `warnings` redevenait vide, le rapport repassait en état
+sain et l'action qui notifie annonçait un retour à la normale sur un parc dont la
+ligne peut avoir cessé de recevoir des correctifs : un 503 chez la source
+suffisait à envoyer cette fausse bonne nouvelle, la veille n'ayant ni colonne ni
+rangée dans l'issue. C'est le garde que `readStacks` pose déjà sur une liste de
+stacks illisible, avec le même motif, une surveillance muette étant indiscernable
+d'un parc sain.
+
+**[fait]** Une ligne de support long qui meurt avant la ligne en service n'est pas
+nommée comme issue. C'est le travers même que cette veille existe pour éviter, un
+cran plus haut : se laisser attirer par un numéro plus récent dont le support
+s'arrête plus tôt. La candidate qui régresse est écartée avant le choix, donc elle
+ne masque pas une ligne plus ancienne qui, elle, vit plus longtemps. Quand l'une
+des deux fins n'est pas datée, rien ne se compare : la ligne est nommée avec sa
+date, et c'est au lecteur de juger. Le constat porte d'ailleurs la fin de la ligne
+en service à côté de celle qu'il propose, sans quoi ce lecteur ne peut voir ni ce
+que la montée lui gagne, ni qu'elle ne lui gagne rien.
+
+**[fait]** Le seuil ne dépend pas de l'heure du passage. La borne vaut minuit UTC
+et l'instant de comparaison est celui de l'exécution : arrondi au plus proche, une
+passe de l'après-midi voyait quatre-vingt-onze jours pleins comme quatre-vingt-dix
+et déclenchait le seuil un jour trop tôt. L'arrondi au jour supérieur donne de
+surcroît le compte calendaire, celui qu'un lecteur attend : du 4 novembre 2026 au
+1er décembre 2027, trois cent quatre-vingt-douze jours et non trois cent
+quatre-vingt-onze.
+
+**[fait]** Les trois raisons d'un verdict absent se disent séparément : une source
+illisible, une version qu'on ne sait pas lire et une version qu'aucune ligne ne
+porte. Les dire sous la même phrase en rendait deux fausses, une version flottante
+n'étant pas absente de la source, qui porte bien sa ligne. C'est le champ
+`missing` que le relevé des avis porte déjà pour la même raison.
 
 **[fait]** Une date hors forme est distinguée d'une absence de date, et retenue
 telle quelle. Le garde qui la ramène à « pas de date » existe pour éviter un

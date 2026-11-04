@@ -535,8 +535,20 @@ const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
  *
  * Une valeur hors forme rend null plutot que NaN : `NaN <= seuil` est faux, donc
  * un NaN laisse passer la ligne pour supportee sans que rien ne le dise.
+ *
+ * La forme ne suffit pas, le calendrier est verifie avec. `2026-13-01` et
+ * `2026-11-32` la passent et rendent pourtant NaN a la lecture, ce qui est
+ * exactement le NaN ci-dessus ; `2026-02-31` ne rend pas NaN mais roule au 3
+ * mars, et compter les jours depuis une date que personne n'a annoncee est un
+ * autre faux. Le detour par toISOString attrape les deux : une date impossible
+ * n'en revient jamais a l'identique.
  */
-const dayOf = (raw: string | null): string | null => (raw && ISO_DAY.test(raw) ? raw : null);
+const dayOf = (raw: string | null): string | null => {
+  if (!raw || !ISO_DAY.test(raw)) return null;
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) return null;
+  return at.toISOString().slice(0, 10) === raw ? raw : null;
+};
 
 /**
  * Confronte une version a la fin de vie de sa ligne.
@@ -568,7 +580,7 @@ export function judgeLifecycle(
   if (!judged) return null;
 
   const comparable = lines
-    .map((r) => ({ release: r, v: typeof r.name === "string" ? parseSemver(r.name) : null }))
+    .map((r) => ({ release: r, v: r && typeof r.name === "string" ? parseSemver(r.name) : null }))
     .filter((c): c is { release: Line; v: Version } => c.v !== null && compareLines(c.v, judged, line) === 0);
 
   const prefixes = (c: Version) => c.every((n, i) => judged[i] === n);
@@ -577,24 +589,39 @@ export function judgeLifecycle(
     .reduce<{ release: Line; v: Version } | null>((best, c) => (!best || c.v.length > best.v.length ? c : best), null);
   if (!current) return null;
 
-  // Une ligne de support long deja morte ne resout rien : seule une ligne encore
-  // supportee est une issue.
-  const next = comparable
-    .filter((c) => Boolean(c.release.isLts) && !c.release.isEol && cmpVersion(c.v, current.v) > 0)
-    .reduce<{ release: Line; v: Version } | null>((best, c) => (!best || cmpVersion(c.v, best.v) > 0 ? c : best), null);
-
   // Lu tel quel et non par le type declare : si la source revenait a la forme de
   // sa version 0, cette borne porterait un booleen, et c'est la seule chose qui
   // le dirait.
   const announced = current.release.eolFrom;
   const eol = dayOf(announced);
+
+  /**
+   * Une ligne de support long deja morte ne resout rien, et une ligne qui meurt
+   * avant celle en service non plus : la nommer serait precisement se laisser
+   * attirer par un numero plus recent dont le support s'arrete plus tot, ce que
+   * cette veille existe pour eviter. Les dates etant validees, l'ordre des
+   * chaines est l'ordre des jours. Quand l'une des deux n'est pas datee, rien ne
+   * se compare : la ligne est nommee avec sa date, et c'est au lecteur de juger.
+   */
+  const outlives = (c: { release: Line }) => {
+    const until = dayOf(c.release.eolFrom);
+    return !eol || !until || until >= eol;
+  };
+  const next = comparable
+    .filter(
+      (c) => Boolean(c.release.isLts) && !c.release.isEol && cmpVersion(c.v, current.v) > 0 && outlives(c),
+    )
+    .reduce<{ release: Line; v: Version } | null>((best, c) => (!best || cmpVersion(c.v, best.v) > 0 ? c : best), null);
   const written = announced === null || announced === undefined ? "" : String(announced).trim();
   return {
     cycle: current.release.name,
     lts: Boolean(current.release.isLts),
     eol,
     unreadableEol: eol === null && written !== "" ? written : null,
-    days: eol ? Math.round((Date.parse(eol) - today) / DAY_MS) : null,
+    // Arrondi au jour superieur et non au plus proche : la borne vaut minuit
+    // UTC, donc une passe de l'apres-midi voyait 91 jours pleins comme 90 et
+    // declenchait le seuil un jour trop tot, selon son heure.
+    days: eol ? Math.ceil((Date.parse(eol) - today) / DAY_MS) : null,
     ended: Boolean(current.release.isEol),
     nextLts: next ? { cycle: next.release.name, eol: dayOf(next.release.eolFrom) } : null,
   };

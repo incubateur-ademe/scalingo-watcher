@@ -145,10 +145,19 @@ const observedAdvisories = new Map<string, AppAdvisories>();
 
 /**
  * Ce que la source de fin de vie dit de la ligne en service de chaque
- * application. `verdict` vaut null quand il n'y a rien a conclure : source
- * illisible, ou aucune ligne qui porte la version en service.
+ * application.
+ *
+ * `missing` porte la raison quand il n'y a pas de verdict, comme pour les avis :
+ * une source illisible, une version qu'on ne sait pas lire et une version
+ * qu'aucune ligne ne porte sont trois ignorances distinctes, et les dire sous la
+ * meme phrase en rendrait deux fausses.
  */
-type AppLifecycle = { version: string; product: string; verdict: LifecycleVerdict | null };
+type AppLifecycle = {
+  version: string;
+  product: string;
+  verdict: LifecycleVerdict | null;
+  missing: string | null;
+};
 const observedLifecycle = new Map<string, AppLifecycle>();
 
 // Comme pour les avis : un outil dont aucune ligne n'approche de sa fin et un
@@ -2371,7 +2380,7 @@ async function checkAdvisories(targets: AppEntry[], lock: Lock): Promise<void> {
  * pas son nom chez la source.
  */
 async function checkLifecycle(targets: AppEntry[], lock: Lock): Promise<void> {
-  const judged = new Map<string, LifecycleVerdict | null>();
+  const judged = new Map<string, { verdict: LifecycleVerdict | null; missing: string | null }>();
   const today = Date.now();
   for (const entry of targets) {
     const key = keyOf(entry);
@@ -2382,21 +2391,43 @@ async function checkLifecycle(targets: AppEntry[], lock: Lock): Promise<void> {
 
     const product = upstream.lifecycle;
     const couple = `${product}#${upstream.line}#${version}`;
-    let verdict = judged.get(couple);
-    if (verdict === undefined) {
-      const releases = await lifecycleFor(product, fetchJson);
-      if (!releases) lifecycleUnread.add(product);
-      else lifecycleRead.set(product, releases.length);
-      verdict = releases ? judgeLifecycle(releases, version, upstream.line, today) : null;
-      judged.set(couple, verdict);
+    let seen = judged.get(couple);
+    if (!seen) {
+      const lines = await lifecycleFor(product, fetchJson);
+      if (!lines) {
+        // Un releve en panne n'est pas un parc sain. Sans cette echeance,
+        // warnings redevient vide, le rapport repasse en etat sain et l'action
+        // qui notifie annonce un retour a la normale sur un parc dont la ligne
+        // peut avoir cesse de recevoir des correctifs. Un 503 chez la source
+        // suffirait a envoyer cette fausse bonne nouvelle. Meme raison, et meme
+        // forme, qu'une liste de stacks illisible.
+        if (!lifecycleUnread.has(product)) {
+          warn(product, `fin de vie de ${product} illisible, aucune echeance de ligne n'a pu etre verifiee`);
+        }
+        lifecycleUnread.add(product);
+      } else {
+        lifecycleRead.set(product, lines.length);
+      }
+      const verdict = lines ? judgeLifecycle(lines, version, upstream.line, today) : null;
+      seen = {
+        verdict,
+        missing: verdict
+          ? null
+          : !lines
+            ? "fin de vie illisible"
+            : pinnedVersion(version)
+              ? `aucune ligne de ${product} ne la porte`
+              : "version illisible",
+      };
+      judged.set(couple, seen);
     }
-    observedLifecycle.set(key, { version, product, verdict });
+    observedLifecycle.set(key, { version, product, ...seen });
     // La fin de support est une date qui tombe, comme la depreciation d'un
     // stack : elle part dans les echeances, donc au journal, dans l'issue d'etat
     // et dans la notification. La ligne de support long plus recente n'est pas
     // une date mais une decision a instruire, et resterait des mois dans l'issue
     // a chaque passage : elle reste au journal, plus bas.
-    if (verdict && lifecycleDue(verdict)) warn(key, lifecycleDeadline(verdict, version));
+    if (seen.verdict && lifecycleDue(seen.verdict)) warn(key, lifecycleDeadline(seen.verdict, version));
   }
 }
 
@@ -2418,20 +2449,25 @@ function lifecycleDeadline(v: LifecycleVerdict, version: string): string {
 
 /** Ce que le journal dit d'une ligne sur laquelle il reste quelque chose a dire. */
 const lifecycleLine = (l: AppLifecycle): string => {
-  if (!l.verdict) return `${l.version} : aucune ligne de ${l.product} ne la porte, aucun verdict`;
-  const { cycle, eol, unreadableEol, nextLts } = l.verdict;
+  if (!l.verdict) return `${l.version} : ${l.missing}, aucun verdict`;
+  const { cycle, lts, eol, unreadableEol, nextLts } = l.verdict;
+  // La fin de la ligne en service est dite avec celle qu'on propose : sans elle,
+  // le lecteur ne peut pas voir ce que la montee lui gagne, ni qu'elle ne lui
+  // gagne rien.
+  //
   // Une fin que la source ne date pas ne peut etre ni proche ni lointaine : la
   // taire laisserait le decompte muet plus bas affirmer qu'aucune ligne
   // n'approche de sa fin, ce qui est un "supporte" sans appui.
-  const undated =
+  const where = `${l.version} est sur la ${lts ? "ligne de support long" : "ligne"} ${cycle}`;
+  const until =
     eol !== null
-      ? ""
+      ? `, supportee jusqu'au ${eol}`
       : unreadableEol !== null
         ? `, dont la fin de support s'annonce "${unreadableEol}" et pas en date`
         : `, dont ${l.product} ne date aucune fin de support`;
-  const until = nextLts?.eol ? ` jusqu'au ${nextLts.eol}` : "";
-  const next = nextLts ? `, ${nextLts.cycle} est de support long${until}` : "";
-  return `${l.version} est sur la ligne ${cycle}${undated}${next}`;
+  const after = nextLts?.eol ? ` jusqu'au ${nextLts.eol}` : "";
+  const next = nextLts ? `, ${nextLts.cycle} est de support long${after}` : "";
+  return `${where}${until}${next}`;
 };
 
 /** Ce que le journal et le rapport disent d'un verdict, en une ligne. */
@@ -3009,7 +3045,7 @@ async function main() {
     log(
       stacksSeen > 0
         ? `\nAucune echeance. ${stacksSeen} stack(s) confrontes sur ${stackCache.size} region(s), ${dbChecked} base(s) relevee(s).`
-        : `\nAucune echeance verifiee : aucun stack n'a pu etre lu.`,
+        : `\nAucune echeance de stack verifiee : aucun stack n'a pu etre lu.`,
     );
   }
 

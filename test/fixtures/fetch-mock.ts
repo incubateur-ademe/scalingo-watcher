@@ -20,6 +20,7 @@
  * LIFECYCLE, liste de lignes de versions, repond a la source de fin de vie ;
  * sans elle, la ligne en service est de support long et loin de sa fin, soit
  * le cas ou cette veille n'a rien a dire.
+ * EOL_OUTAGE=1 fait echouer cette source, comme un editeur injoignable.
  *
  * Un deploiement est accepte et conclu du premier coup, au statut de REAL.
  * CRASH=1 fait apparaitre un redemarrage en erreur dans les evenements de l'app
@@ -59,6 +60,7 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
     return json(u.includes("page=1") ? advisories : []);
   }
   if (m === "GET" && (r = /^https:\/\/endoflife\.date\/api\/v1\/products\/([^/?]+)$/.exec(u))) {
+    if (process.env.EOL_OUTAGE) return json({ error: "injoignable" }, 503);
     return json({ result: { name: r[1], releases: lifecycle } });
   }
   if (m === "POST" && u.endsWith("/api/generate")) {
