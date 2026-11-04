@@ -29,8 +29,9 @@ function appScopes({ app, paused }: ScopedApp): string[] {
     // Le detail d'un deploiement et son journal de build.
     `GET:${base}/deployments/*`,
     // La fenetre de garde, apres un deploiement, y cherche un redemarrage que
-    // personne n'a demande. Inutile a une app en pause, qu'on ne deploie pas.
-    ...(paused ? [] : [`GET:${base}/events`]),
+    // personne n'a demande, puis l'etat des conteneurs. Inutile a une app en
+    // pause, qu'on ne deploie pas.
+    ...(paused ? [] : [`GET:${base}/events`, `GET:${base}/ps`]),
     `GET:${base}/addons`,
     `GET:${base}/scm_repo_link`,
   ];

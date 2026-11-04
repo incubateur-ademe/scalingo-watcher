@@ -134,13 +134,11 @@ lever la pause lui rend ses montées au passage suivant.
 Cette seconde valeur se pose consciemment après vérification, jamais par défaut.
 
 **[fait]** Fenêtre de garde par application, `settle: {window: <secondes>}`,
-posable aussi dans `defaults`. Déclarée, elle fait relire l'application pendant
-ce temps après un déploiement conclu réussi, et le succès n'est consigné que si
-rien ne l'a fait redémarrer. Absente, ou à `window: 0`, le statut du déploiement
-conclut seul et aucun appel supplémentaire n'est émis : c'est le comportement
-d'avant ce champ. La surcharge se fait en bloc, un objet ne s'héritant pas clé
-par clé, donc `window: 0` est le seul moyen de retirer à une application une
-fenêtre posée dans `defaults`.
+posable aussi dans `defaults`. Elle fait relire l'application pendant ce temps
+après un déploiement conclu réussi, et le succès n'est consigné que si rien ne
+l'a fait redémarrer. Absente, elle vaut 120 secondes. La surcharge se fait en
+bloc, un objet ne s'héritant pas clé par clé. `window: 0` retire l'attente, pas
+le contrôle de l'état des conteneurs qui la conclut.
 
 **[fait]** Chaque application déclare son dépôt applicatif et sa branche
 indépendamment : deux applications d'un même parc peuvent suivre deux dépôts
@@ -389,6 +387,18 @@ numéro est inférieur. Écarter les lignes entre elles inversait les risques : 
 descente la plus destructrice, de 12.1 à 11.6, passait quand 12.1.3 vers 12.1.0
 était refusée.
 
+**[fait]** Une version en service qui ne se compare pas est tenue pour inconnue,
+et la cible est refusée. Le 2026-11-04, la variable portait `latest`, alors
+v0.65.2 : v0.64.4.3 est passée sur une base déjà migrée, et Metabase a refusé de
+démarrer. `latest`, ou un alias en `.x`, ne dit pas ce qui tourne, donc une
+descente y est indiscernable d'une montée. Le message renvoie au journal de
+démarrage de l'outil pour relever la version servie, puis à `--force --app`.
+Lire cette version avant de décider a été écarté : Metabase la donne à
+`/api/session/properties`, muet derrière un oauth2-proxy, et dans sa ligne de
+démarrage, dans des journaux hors de portée du proxy et élagués au-delà du débit
+d'ingestion, où une ligne absente ne prouve rien. Une variable absente reste
+hors du contrôle : c'est un état d'amorçage, qu'il bloquerait sur tout le parc.
+
 **[fait]** Déploiement par archive via `POST /deployments`, avec une URL
 d'archive GitHub que Scalingo télécharge lui-même. Aucune clé SSH, aucun dépôt à
 héberger, aucun artefact intermédiaire.
@@ -402,8 +412,11 @@ déploiement.
 **[fait]** Attente du statut final avec un délai maximal de 20 minutes, en
 reconnaissant les six statuts terminaux de Scalingo.
 
-**[fait]** Fenêtre de garde après un déploiement conclu réussi, quand
-l'application la déclare. Le statut `success` ne dit qu'une chose : le conteneur
+**[fait]** Fenêtre de garde après un déploiement conclu réussi, appliquée
+d'office. Une application qui n'en déclare aucune reçoit 120 secondes : le
+2026-11-04, sur un parc qui n'en déclarait pas, Metabase a refusé de démarrer
+en boucle sur une base déjà migrée par une version supérieure, et le résumé a
+compté le déploiement réussi pendant que le lock consignait la cible. Le statut `success` ne dit qu'une chose : le conteneur
 a répondu sur son port. Metabase ouvre Jetty avant de migrer sa base, donc le
 port répond en quelques secondes, Scalingo conclut, puis la migration tourne. Si
 elle échoue, le processus sort en code 1 alors que le lock porte déjà `deployed`
@@ -419,7 +432,7 @@ là sont relevés d'abord et écartés, ce qui évite de comparer notre horloge 
 celle de la plateforme.
 
 **[fait]** Le contrôle ne connaît rien de l'outil déployé : aucun marqueur, aucun
-chemin HTTP, rien qu'une route de la plateforme déjà parlée par le moteur. Il ne
+chemin HTTP, rien que deux routes de la plateforme, `events` et `ps`. Il ne
 prouve pas que l'outil a fini de démarrer, il constate qu'il n'est pas tombé dans
 le temps qu'on lui a laissé.
 
@@ -437,9 +450,34 @@ que faire manquer un échec, jamais refuser un déploiement sain. En revanche un
 réponse sans liste d'événements interrompt, plutôt que de passer pour une
 surveillance qui ne regarde rien.
 
+**[fait]** La fenêtre se conclut sur l'état des conteneurs, lu par
+`GET /v1/apps/<app>/ps` : chacun doit être `running`. Le statut de l'application
+ne le dit pas, il vaut `running` dès qu'un seul conteneur tourne, et
+`/containers` ne rend que la formation déclarée, sans état. Un conteneur
+`crashed` met en quarantaine tout de suite. Tout autre état laisse attendre, cinq
+minutes au plus, et les événements restent relus entre deux lectures : une
+boucle de crash se voit là plutôt qu'au bout du délai. Au-delà, l'application est
+mise en quarantaine. `stopped` attend aussi, rien ne garantissant que la
+plateforme marque l'ancienne formation supprimée avant de la dire éteinte. Les
+consoles one-off et les conteneurs supprimés ou créés avant le déploiement ne
+comptent pas.
+
+**[fait]** Les deux routes de la fenêtre sont lues une fois avant toute
+écriture, sauvegarde comprise. Un `fgp.json` qui ne les couvre pas arrête donc le
+passage avant le déploiement. Sans cette lecture préalable, l'application était
+déployée, la fenêtre s'interrompait sur le refus du proxy, et le relevé suivant
+consignait une cible que rien n'avait contrôlée.
+
+**[fait]** Le relevé ne lève pas une quarantaine sur le déploiement même qu'elle
+a jugé. Scalingo dit `success` un déploiement que la fenêtre a refusé : le relevé
+horaire concluait la cible atteinte, levait la quarantaine, et le passage suivant
+disait conforme une application en boucle de crash. Un autre déploiement réussi
+sur la cible, fait hors du watcher, la lève toujours.
+
 **[fait]** Une lecture impossible pendant la fenêtre interrompt au lieu de mettre
-en quarantaine. C'est par là qu'arrive le refus du proxy quand `fgp.json` précède
-ce champ, et son message renvoie à la régénération des blobs.
+en quarantaine. Le refus du proxy, quand `fgp.json` ne couvre pas ses routes,
+arrive plus tôt, à la lecture préalable, et son message renvoie à la régénération
+des blobs.
 
 **[fait]** Relevé des buildpacks réellement utilisés après un déploiement réussi,
 consigné dans le lock à titre d'observation.
@@ -716,7 +754,7 @@ fonctionnerait pas partout : derrière un oauth2-proxy, c'est le wrapper qui pre
 `$PORT`, donc sa disponibilité ne dit plus rien de l'outil déployé, et son
 authentification arrête la sonde avant l'outil. La vérification reste donc
 extérieure à l'application : le statut du déploiement, puis la fenêtre de
-garde de `settle` quand elle est déclarée.
+garde, appliquée d'office.
 
 **Les journaux applicatifs ne sont pas lus.** Y chercher un marqueur de fin
 d'initialisation serait le signal le plus direct, c'est même ainsi que le succès
@@ -741,8 +779,8 @@ porte un déploiement réussi, donc la cible est tenue pour atteinte.
 `unexpected_failure`. Les types `crash` et `repeated_crash` apparaissent dans le
 client Go de Scalingo et dans ses notifications, pas dans cette page. Ils sont
 surveillés par précaution : s'ils n'existaient pas sous ce nom, la fenêtre
-retomberait sur le seul `restart`, donc sur le comportement d'avant ce champ, et
-jamais sur un refus à tort.
+retomberait sur le seul `restart` et sur l'état des conteneurs, et jamais sur un
+refus à tort.
 
 **La fenêtre se paie en temps de passage.** L'éclaireur est déployé seul, donc sa
 fenêtre s'ajoute entière, puis une fenêtre par vague de trois. Six applications à
