@@ -431,7 +431,9 @@ function extract(manager: CustomManager | undefined, src: string): Record<string
         )
       : patterns.flatMap((pattern) => matches(pattern, src));
   const template = manager.depTypeTemplate;
-  return found.map(({ groups }) => (template ? { ...groups, depType: template.replace(/\{\{\{(\w+)\}\}\}/g, (_, k: string) => groups[k] ?? "") } : groups));
+  const render = (t: string, groups: Record<string, string>) =>
+    t.replace(/\{\{#if (\w+)\}\}([^{]*)\{\{\/if\}\}/g, (_, k: string, body: string) => (groups[k] ? body : "")).replace(/\{\{\{(\w+)\}\}\}/g, (_, k: string) => groups[k] ?? "");
+  return found.map(({ groups }) => (template ? { ...groups, depType: render(template, groups) } : groups));
 }
 // Les packageRules s'appliquent dans l'ordre et la derniere qui correspond
 // l'emporte. Un critere que cette emulation ne connait pas la ferait mentir.
@@ -456,33 +458,78 @@ function ruleValue(rules: readonly PackageRule[], dep: Record<string, string>, k
   return value;
 }
 const RULES = ["base", "metabase", "watcher"].flatMap((name) => preset(name).packageRules ?? []);
-const TOOL_VERSIONS = preset("base").customManagers?.find((m) => m.matchStringsStrategy === "recursive");
+const TOOL_VERSIONS = preset("base").customManagers?.find((m) => m.depTypeTemplate?.startsWith("outil "));
+const SOURCES = preset("base").customManagers?.find((m) => m.depTypeTemplate?.startsWith("source"));
 const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTemplate === "documentation");
 {
   const src = readFileSync(join(FIXTURES, "manifest.yaml"), "utf8");
   const block = "  policy:\n    minor: auto\n    major: pr\n";
-  const depTypes = (manifest: string) => [extract(TOOL_VERSIONS, manifest).length, [...new Set(extract(TOOL_VERSIONS, manifest).map((g) => g.depType))]];
-  check("Renovate porte la politique du manifeste dans le depType de chaque version d'outil", depTypes(src), [4, ["outil minor=auto major=pr"]]);
+  const running = (manifest: string) => extract(TOOL_VERSIONS, manifest).filter((g) => !g.paused);
+  const depTypes = (manifest: string) => [running(manifest).length, [...new Set(running(manifest).map((g) => g.depType))]];
+  check("Renovate porte la politique du manifeste dans le depType de chaque version d'outil", depTypes(src), [3, ["outil minor=auto major=pr"]]);
   check(
     "la politique se relit dans n'importe quel ordre, quotee et commentee",
     depTypes(src.replace(block, "  policy: # relue par Renovate\n    # montees fonctionnelles\n    major: \"auto\"  # a surveiller\n\n    minor: 'pr'\n")),
-    [4, ["outil minor=pr major=auto"]],
+    [3, ["outil minor=pr major=auto"]],
   );
-  check("sans politique, les versions restent suivies et le depType le dit", depTypes(src.replace(block, "")), [4, ["outil minor= major="]]);
+  check("sans politique, les versions restent suivies et le depType le dit", depTypes(src.replace(block, "")), [3, ["outil minor= major="]]);
   check(
     "la politique se relit aussi en fins de ligne CRLF",
     [depTypes(src.replace(/\n/g, "\r\n")), policyReadByRenovate(src.replace(/\n/g, "\r\n"))],
-    [[4, ["outil minor=auto major=pr"]], { minor: "auto", major: "pr" }],
+    [[3, ["outil minor=auto major=pr"]], { minor: "auto", major: "pr" }],
   );
   check(
     "database.major n'est pas pris pour la politique",
     depTypes(src.replace("    major: pr\n", "").replace("      version: 16.15.0-1\n", "      version: 16.15.0-1\n      major: allowed\n")),
-    [4, ["outil minor=auto major="]],
+    [3, ["outil minor=auto major="]],
   );
   check(
     "une politique en style flow n'est pas relue, --validate le signale",
     [depTypes(src.replace(block, "  policy: { minor: pr, major: auto }\n")), policyReadByRenovate(src.replace(block, "  policy: { minor: pr, major: auto }\n"))],
-    [[4, ["outil minor= major="]], { minor: undefined, major: undefined }],
+    [[3, ["outil minor= major="]], { minor: undefined, major: undefined }],
+  );
+
+  // Une app en pause n'est jamais ecrite : une montee fusionnee seule
+  // reecrirait son manifeste sans rien deployer.
+  const pausedOf = (manager: typeof TOOL_VERSIONS, manifest: string) =>
+    extract(manager, manifest).map((g) => [g.depName, g.depType, ruleValue(RULES, { ...g, manager: "custom.regex" }, "enabled") ?? true]);
+  check(
+    "Renovate releve paused dans le bloc de chaque app et n'y propose rien",
+    [pausedOf(TOOL_VERSIONS, src), pausedOf(SOURCES, src)],
+    [
+      [
+        ["alpha-metabase", "outil minor=auto major=pr", true],
+        ["beta-metabase", "outil minor=auto major=pr en pause", false],
+        ["gamma-metabase", "outil minor=auto major=pr", true],
+        ["delta-metabase", "outil minor=auto major=pr", true],
+      ],
+      [
+        ["alpha-metabase", "source", true],
+        ["beta-metabase", "source en pause", false],
+        ["gamma-metabase", "source", true],
+        ["delta-metabase", "source", true],
+      ],
+    ],
+  );
+  const pausedLast = src.replace("    paused: true\n", "").replace(/(\n {2}- app: gamma-metabase\n)/, "    paused: true # en fin de bloc\n$1");
+  check(
+    "paused se lit ou qu'il soit dans le bloc, sans deborder sur l'app suivante",
+    [pausedOf(TOOL_VERSIONS, pausedLast).map(([n, , e]) => [n, e]), pausedOf(SOURCES, pausedLast.replace(/\n/g, "\r\n")).map(([n, , e]) => [n, e])],
+    [
+      [["alpha-metabase", true], ["beta-metabase", false], ["gamma-metabase", true], ["delta-metabase", true]],
+      [["alpha-metabase", true], ["beta-metabase", false], ["gamma-metabase", true], ["delta-metabase", true]],
+    ],
+  );
+  check(
+    "paused: false et un commentaire qui cite paused ne mettent pas en pause",
+    pausedOf(TOOL_VERSIONS, src.replace("    paused: true\n", "    paused: false # paused: true plus tard\n")).map(([n, , e]) => [n, e]),
+    [["alpha-metabase", true], ["beta-metabase", true], ["gamma-metabase", true], ["delta-metabase", true]],
+  );
+  const noAnnotation = src.replace(/(- app: alpha-metabase[\s\S]*?)      # renovate: datasource=\S+ depName=metabase\/metabase\n/, "$1");
+  check(
+    "une version sans annotation n'emprunte pas celle de l'app suivante",
+    extract(TOOL_VERSIONS, noAnnotation).map((g) => g.depName),
+    ["beta-metabase", "gamma-metabase", "delta-metabase"],
   );
 
   const metabaseVia = (policy: string, datasource: string) =>
@@ -1483,6 +1530,32 @@ try {
     "une version sans annotation est refusee",
     validateVariant("version", fixtureSrc.replace("      # renovate: datasource=github-releases depName=metabase/metabase\n", "")),
     ["version", 1, ["osc-fr1/alpha-metabase : tool.version n'est pas precedee de son annotation # renovate:, Renovate ne la suit pas"]],
+  );
+  // Renovate ne relit paused qu'ecrit `true` : `True` ou un alias mettent l'app
+  // en pause pour le moteur, et Renovate y proposerait encore des montees.
+  check(
+    "une pause que Renovate ne relit pas est refusee",
+    validateVariant("True", fixtureSrc.replace("    paused: true\n", "    paused: True\n")),
+    [
+      "True",
+      1,
+      [
+        "osc-fr1/beta-metabase : paused vaut true, Renovate lit false : l'ecrire `paused: true` en minuscules, sans alias",
+        "osc-fr1/beta-metabase : paused vaut true, Renovate lit false : l'ecrire `paused: true` en minuscules, sans alias",
+      ],
+    ],
+  );
+  check(
+    "un bloc d'app coupe par une ligne en tiret est refuse",
+    validateVariant("tiret", fixtureSrc.replace("      version: 16.15.0-1\n", "      version: >-\n        16.15.0\n        -1\n")),
+    [
+      "tiret",
+      1,
+      [
+        "osc-fr1/alpha-metabase : Renovate ne releve pas son sha, il ne le suit pas : garder le bloc de l'app sans ligne qui commence par un tiret",
+        "osc-fr1/alpha-metabase : Renovate ne releve pas son tool.version, il ne le suit pas : garder le bloc de l'app sans ligne qui commence par un tiret",
+      ],
+    ],
   );
   // Renovate ne relit la politique qu'ecrite en bloc : en flow, l'automerge
   // retombait sur son defaut sans que rien ne le dise.
@@ -2485,7 +2558,7 @@ try {
   check(
     "la politique et le $schema generes sont relus par Renovate",
     [[...new Set(extract(versionManager, generated.src).map((g) => g.depType))], extract(CITED_VERSIONS, generated.src).map((g) => g.currentValue)],
-    [["outil minor=auto major=pr"], [`v${JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")).version}`]],
+    [["outil minor=auto major=pr", "outil minor=auto major=pr en pause"], [`v${JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")).version}`]],
   );
   const filePatterns = managers.flatMap((m) => m.managerFilePatterns ?? []);
   check(

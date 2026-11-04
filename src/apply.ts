@@ -2372,6 +2372,7 @@ export const RENAMED_FIELDS: readonly Rename[] = [];
 export const RAW_FIELDS: readonly string[] = [
   "apps",
   "apps[].app",
+  "apps[].paused",
   "apps[].source.branch",
   "apps[].source.sha",
   "apps[].tool.version",
@@ -2494,7 +2495,9 @@ function lineBeforeKey(source: string, map: unknown, field: string): string | nu
  * autre depot que source.repo fait chercher a Renovate une branche qui n'existe
  * pas. Une entree de lock sans app n'est plus suivie et decrit un parc qui
  * n'existe pas. Une politique que Renovate ne relit pas, ecrite par exemple en
- * style flow, laisse l'automerge a son defaut sans le dire.
+ * style flow, laisse l'automerge a son defaut sans le dire. Une pause que
+ * Renovate ne relit pas, ecrite `True` ou par un alias, lui laisse proposer des
+ * montees qui reecriraient le manifeste sans rien deployer.
  */
 export function checkFleetData(source: string, manifest: Manifest, lock: Lock): string[] {
   const issues: string[] = [];
@@ -2513,6 +2516,22 @@ export function checkFleetData(source: string, manifest: Manifest, lock: Lock): 
       issues.push(`${key} : tool.version n'est pas precedee de son annotation # renovate:, Renovate ne la suit pas`);
     }
   });
+  const watched = appsReadByRenovate(source);
+  for (const [kind, label] of [["source", "sha"], ["tool", "tool.version"]] as const) {
+    const pending = [...watched[kind]];
+    for (const entry of manifest.apps) {
+      const found = pending.findIndex((w) => w.app === entry.app);
+      if (found === -1) {
+        if (issues.some((issue) => issue.startsWith(`${keyOf(entry)} : ${label} n'est pas precede`))) continue;
+        issues.push(`${keyOf(entry)} : Renovate ne releve pas son ${label}, il ne le suit pas : garder le bloc de l'app sans ligne qui commence par un tiret`);
+        continue;
+      }
+      const [read] = pending.splice(found, 1);
+      if (read.paused !== (entry.paused === true)) {
+        issues.push(`${keyOf(entry)} : paused vaut ${entry.paused === true}, Renovate lit ${read.paused} : l'ecrire \`paused: true\` en minuscules, sans alias`);
+      }
+    }
+  }
   const read = policyReadByRenovate(source);
   for (const key of ["minor", "major"] as const) {
     const wanted = manifest.defaults.policy?.[key];
@@ -2541,6 +2560,26 @@ export function policyReadByRenovate(source: string): Policy {
     }
   }
   return { minor: groups.minorPolicy as Policy["minor"], major: groups.majorPolicy as Policy["major"] };
+}
+
+/**
+ * Apps dont les gestionnaires du preset base relevent le sha et la version, dans
+ * l'ordre du manifeste, avec la pause qu'ils y lisent : c'est elle, et non le
+ * YAML, qui decide si Renovate propose des montees. `recursive` applique chaque
+ * expression aux correspondances de la precedente et cumule les groupes nommes.
+ */
+export function appsReadByRenovate(source: string): Record<"source" | "tool", { app: string; paused: boolean }[]> {
+  type CustomManager = { matchStringsStrategy?: string; matchStrings?: string[]; depTypeTemplate?: string };
+  const managers = (JSON.parse(readFileSync(RENOVATE_BASE_FILE, "utf8")) as { customManagers?: CustomManager[] }).customManagers ?? [];
+  const read = (kind: string) => {
+    const manager = managers.find((m) => m.depTypeTemplate?.startsWith(kind));
+    let layer = [{ text: source, groups: {} as Record<string, string | undefined> }];
+    for (const pattern of manager?.matchStrings ?? []) {
+      layer = layer.flatMap((f) => [...f.text.matchAll(new RegExp(pattern, "g"))].map((m) => ({ text: m[0], groups: { ...f.groups, ...m.groups } })));
+    }
+    return layer.filter((f) => f.groups.depName).map((f) => ({ app: f.groups.depName as string, paused: f.groups.paused !== undefined }));
+  };
+  return { source: read("source"), tool: read("outil ") };
 }
 
 /** Version du format de lock que ce moteur sait lire et reecrire. */

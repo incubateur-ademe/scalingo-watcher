@@ -215,7 +215,7 @@ Les quatre appelants complets sont dans le [template](https://github.com/incubat
 
 | Preset | Contenu |
 |---|---|
-| [`renovate/base`](renovate/base.json) | Lecture du manifeste par deux customManagers (commit du dépôt applicatif, version de l'outil et `defaults.policy`), délai de cinq jours, dépôts applicatifs toujours en PR, alertes de vulnérabilité, messages de commit |
+| [`renovate/base`](renovate/base.json) | Lecture du manifeste par deux customManagers (commit du dépôt applicatif, version de l'outil et `defaults.policy`), aucune montée pour une application en pause, délai de cinq jours, dépôts applicatifs toujours en PR, alertes de vulnérabilité, messages de commit |
 | [`renovate/metabase`](renovate/metabase.json) | Versioning Metabase (lignes OSS et Enterprise séparées), automerge selon `defaults.policy` : sans politique, correctifs fusionnés seuls et montées fonctionnelles en PR |
 | [`renovate/watcher`](renovate/watcher.json) | Mises à jour de l'outil : workflows épinglés par sha, presets, versions citées par la documentation et le `$schema` du manifeste, une PR groupée, un jour de délai, jamais fusionnée seule |
 
