@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.2.0...v1.2.1) (2026-11-04)
+
+
+### Corrections
+
+* **lock:** deux ecritures concurrentes s'arbitrent par la date du releve ([#32](https://github.com/incubateur-ademe/scalingo-watcher/issues/32)) ([ce7811c](https://github.com/incubateur-ademe/scalingo-watcher/commit/ce7811c6292ae329c415b0bce93b98508bab000b))
+* **renovate:** ne proposer aucune montee pour une app en pause ([#34](https://github.com/incubateur-ademe/scalingo-watcher/issues/34)) ([5b31149](https://github.com/incubateur-ademe/scalingo-watcher/commit/5b3114915f37f9a34db430374fcec93a2df65dfb))
+
 ## [1.2.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.1.2...v1.2.0) (2026-10-30)
 
 
