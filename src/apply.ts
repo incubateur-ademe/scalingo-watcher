@@ -831,6 +831,25 @@ async function adoptApp(
   };
 }
 
+/**
+ * Formes admises des trois valeurs qui entrent dans une URL de l'API GitHub.
+ *
+ * Le manifeste passe le schema a chaque execution, mais ni `lock.json` ni le
+ * journal de build : un depot ou un sha venus de la peuvent valoir n'importe
+ * quoi, et ils sont interpoles dans un chemin d'URL.
+ *
+ * Le premier caractere de chaque moitie d'un depot ne peut pas etre un point,
+ * ce qui ecarte les segments `.` et `..`. Le motif du schema les laisse passer,
+ * lui, puisqu'il admet le point, et `../..` sortirait de la route visee. Celui
+ * de la branche reprend le motif du schema, qui interdit `..` et la barre en
+ * tete comme en queue, en laissant celles du milieu : `feat/x` est une branche.
+ */
+export const isRepoRef = (repo: string): boolean =>
+  /^[A-Za-z0-9_-][A-Za-z0-9_.-]*\/[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(repo);
+export const isShaRef = (sha: string): boolean => /^[0-9a-f]{40}$/.test(sha);
+export const isBranchRef = (branch: string): boolean =>
+  /^(?!.*\.\.)(?!\/)(?!.*\/$)[A-Za-z0-9._\/-]+$/.test(branch);
+
 const refCache = new Map<string, boolean>();
 
 /**
@@ -844,11 +863,24 @@ const refCache = new Map<string, boolean>();
  * signalerait.
  *
  * Retourne null quand GitHub est injoignable : on ne bloque pas sur une panne.
+ * Un sha hors forme en rend autant, mais en le disant : le second appel passe
+ * celui du lock, que rien ne valide, et un lock laisse un sha vide derriere une
+ * premiere prise en charge en echec. L'URL batie avec rendait alors 404, donc
+ * null, donc ce controle se desactivait sans que rien ne le signale.
  */
-async function shaIsOnBranch(repo: string, branch: string, sha: string): Promise<boolean | null> {
+async function shaIsOnBranch(
+  appKey: string,
+  repo: string,
+  branch: string,
+  sha: string,
+): Promise<boolean | null> {
   const key = `${repo}@${branch}...${sha}`;
   const cached = refCache.get(key);
   if (cached !== undefined) return cached;
+  if (!isRepoRef(repo) || !isBranchRef(branch) || !isShaRef(sha)) {
+    warn(appKey, `${repo}@${branch}...${sha || "vide"} hors forme, appartenance du sha a la branche non verifiee`);
+    return null;
+  }
   try {
     const headers: Record<string, string> = {
       Accept: "application/vnd.github+json",
@@ -872,12 +904,6 @@ async function shaIsOnBranch(repo: string, branch: string, sha: string): Promise
 // un depot commun ne coute pas des appels pour le meme silence. L'echeance, elle,
 // n'est annoncee qu'une fois par couple depot-commit.
 const declaredCache = new Map<string, string[] | null>();
-
-// Le premier caractere de chaque moitie ne peut pas etre un point, ce qui
-// ecarte les segments `.` et `..` : le motif du schema les laisse passer,
-// puisqu'il admet le point, et `../..` sortirait de la route visee.
-const GH_REPO = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*\/[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
-const GH_SHA = /^[0-9a-f]{40}$/;
 
 /** Depots des entrees d'un `.buildpacks`, rendu en base64 par l'API GitHub. */
 const buildpacksFile = (content: string): string[] =>
@@ -911,7 +937,7 @@ async function declaredBuildpacks(key: string, repo: string, sha: string): Promi
   // URL. Le lock sait porter un sha vide, qu'une premiere prise en charge en
   // echec y laisse, et l'API aurait alors rendu une absence de fichier, donc
   // compte tous les buildpacks comme retires.
-  if (!GH_REPO.test(repo) || !GH_SHA.test(sha)) {
+  if (!isRepoRef(repo) || !isShaRef(sha)) {
     warn(key, `couple ${repo}@${sha || "vide"} hors forme, aucun retrait de buildpack verifie`);
     declaredCache.set(cacheKey, null);
     return null;
@@ -1296,7 +1322,7 @@ async function applyApp(
   //
   // Le premier verifie que le manifeste est coherent avec lui-meme : un sha
   // epingle doit appartenir a la branche qu'il declare suivre.
-  if ((await shaIsOnBranch(entry.source.repo, entry.source.branch, target.sha)) === false) {
+  if ((await shaIsOnBranch(key, entry.source.repo, entry.source.branch, target.sha)) === false) {
     emit(`    INCOHERENCE : ${target.sha.slice(0, 7)} n'est pas sur la branche ${entry.source.branch} de ${entry.source.repo}`);
     emit(`    le manifeste se contredit, rien n'est tente`);
     note(key, `le manifeste se contredit : ${target.sha.slice(0, 7)} n'est pas sur la branche ${entry.source.branch} de ${entry.source.repo}. Rien n'a ete tente.`);
@@ -1314,7 +1340,7 @@ async function applyApp(
   // place lui est forcement etranger, et ce n'est pas une anomalie mais la
   // consequence du changement voulu.
   if (sameRepo && current?.source.sha && current.source.sha !== target.sha) {
-    if ((await shaIsOnBranch(entry.source.repo, entry.source.branch, current.source.sha)) === false) {
+    if ((await shaIsOnBranch(key, entry.source.repo, entry.source.branch, current.source.sha)) === false) {
       emit(`    CHANGEMENT DE BRANCHE : l'app tourne ${current.source.sha.slice(0, 7)}, absent de ${entry.source.branch}`);
       emit(`    corrige la branche du manifeste, ou assume le changement en mettant a jour le lock`);
       note(key, `changement de branche : l'app tourne ${current.source.sha.slice(0, 7)}, absent de ${entry.source.branch}. Corriger la branche du manifeste, ou assumer le changement en mettant a jour le lock.`);
@@ -1533,10 +1559,18 @@ async function latestInLine(upstream: Upstream, version: string | null): Promise
 
 const headCache = new Map<string, string | null>();
 
-/** Sha de tete d'une branche, ou null si la branche est introuvable. */
+/**
+ * Sha de tete d'une branche, ou null si la branche est introuvable.
+ *
+ * Le garde de forme ne peut pas se declencher dans une execution arrivee
+ * jusqu'ici, les deux valeurs venant du manifeste que loadManifest valide avant
+ * tout. Il tient la promesse qu'aucune URL n'est batie sans controle, et c'est
+ * pour ca qu'il n'annonce rien : une echeance inatteignable n'informe personne.
+ */
 async function branchHead(repo: string, branch: string): Promise<string | null> {
   const key = `${repo}#${branch}`;
   if (headCache.has(key)) return headCache.get(key)!;
+  if (!isRepoRef(repo) || !isBranchRef(branch)) return null;
   const b = await ghJson<{ commit: { sha: string } }>(`/repos/${repo}/branches/${branch}`);
   const sha = b?.commit?.sha ?? null;
   headCache.set(key, sha);
@@ -1551,9 +1585,14 @@ const movedSinceCache = new Map<string, string | null>();
  * Les buildpacks ne sont pas epingles : chaque build reprend la tete de leur
  * branche par defaut. Savoir qu'ils ont bouge depuis le dernier deploiement est
  * la seule facon de voir qu'un redeploiement changerait quelque chose.
+ *
+ * Le nom du depot vient du journal de build, releve par readBuildpacks, qui
+ * rend l'URL brute quand elle ne designe pas GitHub. Une telle entree n'est pas
+ * une anomalie mais une ligne de `.buildpacks` qui pointe ailleurs : elle ne
+ * s'annonce donc pas, elle se dit dans le tableau de bord, qui ne la lie plus.
  */
 async function buildpackMovedSince(repo: string, since: string | null): Promise<string | null> {
-  if (!since) return null;
+  if (!since || !isRepoRef(repo)) return null;
   const key = `${repo}#${since}`;
   if (movedSinceCache.has(key)) return movedSinceCache.get(key)!;
   const commits = await ghJson<Array<{ sha: string }>>(
@@ -1565,6 +1604,14 @@ async function buildpackMovedSince(repo: string, since: string | null): Promise<
 }
 
 const appUrl = (e: AppEntry) => `https://dashboard.scalingo.com/apps/${e.region}/${e.app}`;
+
+/**
+ * Rend une valeur relevee sur la plateforme posable dans une cellule du
+ * tableau de bord. La barre verticale couperait la ligne et l'accent grave
+ * fermerait le code, et ce qui suit passerait pour du markdown : ces valeurs
+ * sortent du journal de build, personne ne les a declarees.
+ */
+const inCell = (value: string) => value.replace(/[|`]/g, "").slice(0, 120);
 
 /**
  * Lien vers l'annonce Scalingo de cette version precise.
@@ -1789,11 +1836,23 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
       continue;
     }
     for (const bp of known.buildpacks) {
+      // Ce nom vient du journal de build, pas d'une declaration : hors forme
+      // owner/name il ne designe aucun depot GitHub, et le lier produisait un
+      // lien mort. Il entre de surcroit dans le corps d'une issue, ou une
+      // parenthese referme le lien et laisse passer le reste, et une barre
+      // verticale coupe la ligne du tableau. L'appel, lui, se garde tout seul.
+      const onGitHub = isRepoRef(bp.repo);
       const moved = await buildpackMovedSince(bp.repo, known.deployment?.at ?? null);
+      const name = onGitHub ? `[${bp.repo}](https://github.com/${bp.repo})` : `\`${inCell(bp.repo)}\``;
+      const update = !onGitHub
+        ? "hors GitHub, non vérifiable"
+        : moved
+          ? `[\`${moved.slice(0, 7)}\`](https://github.com/${bp.repo}/commit/${moved})`
+          : "non";
       lines.push(
         `| [${entry.app}](${appUrl(entry)}) ` +
-          `| [${bp.repo}](https://github.com/${bp.repo})${bp.ref ? `@${bp.ref}` : ""} ` +
-          `| ${moved ? `[\`${moved.slice(0, 7)}\`](https://github.com/${bp.repo}/commit/${moved})` : "non"} ` +
+          `| ${name}${bp.ref ? `@${inCell(bp.ref)}` : ""} ` +
+          `| ${update} ` +
           `| ${bp.ref ? "épinglé" : "suit sa branche"} |`,
       );
     }

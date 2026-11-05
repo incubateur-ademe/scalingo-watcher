@@ -37,6 +37,9 @@ import {
   describeAdvisoryProposal,
   describeProposal,
   describeTools,
+  isBranchRef,
+  isRepoRef,
+  isShaRef,
   loadLock,
   parseBuildpackRef,
   policyReadByRenovate,
@@ -1666,11 +1669,17 @@ const app = { app: "alpha-metabase", region: "osc-fr1" } as never;
 const done = (id: string) => ({ id, status: "done", created_at: "2026-09-23T05:04:00Z" });
 const running = (id: string) => ({ id, status: "running", created_at: "2026-09-23T05:04:00Z" });
 
+// Chaque URL appelee depuis le dernier simulate(), pour les constats qui
+// portent sur un appel qui ne doit PAS avoir lieu.
+const simulatedUrls: string[] = [];
+
 /** Repond aux appels attendus dans l'ordre, et note ce qui a ete demande. */
 function simulate(responses: Record<string, Array<{ body: unknown; status?: number }>>) {
   const trace: string[] = [];
+  simulatedUrls.length = 0;
   globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
     const key = `${init.method ?? "GET"} ${String(url)}`;
+    simulatedUrls.push(key);
     trace.push(key.includes("/token") ? "jeton" : key.startsWith("POST") ? "demande" : "releve");
     const queue = responses[key];
     if (!queue?.length) throw new Error(`appel imprevu : ${key}`);
@@ -1805,6 +1814,36 @@ check(
   "les liens de release suivent tool.upstream",
   rowOf("outil-maison").includes("| [2.0.0](https://github.com/exemple/outil/releases/tag/2.0.0) | [2.1.0](https://github.com/exemple/outil/releases/tag/2.1.0) |"),
   true,
+);
+
+console.log("\nValeurs hors forme dans les URL GitHub");
+
+check("un depot owner/name est accepte", isRepoRef("betagouv/oauth2-proxy-buildpack"), true);
+check("un segment de remontee est refuse", isRepoRef("../.."), false);
+// C'est ce que parseBuildpackRef rend quand l'URL du journal ne designe pas
+// GitHub : la valeur arrivait telle quelle dans un chemin d'URL.
+check("une URL brute de journal de build est refusee", isRepoRef("https://exemple.test/bp.tgz"), false);
+check("un depot sans barre est refuse", isRepoRef("metabase-buildpack"), false);
+check("un sha de 40 hexa est accepte", isShaRef("a".repeat(40)), true);
+// git_ref sait valoir un nom de branche, et le lock le recopie.
+check("un nom de branche en guise de sha est refuse", isShaRef("master"), false);
+check("un sha vide est refuse", isShaRef(""), false);
+check("une branche a barre interne est acceptee", isBranchRef("feat/garde"), true);
+check("une branche a remontee est refusee", isBranchRef("feat/../main"), false);
+check("une branche a barre en tete est refusee", isBranchRef("/main"), false);
+
+// describeTools recoit ses entrees telles quelles, sans passer par le schema :
+// c'est par la qu'on exerce les gardes de branchHead et de buildpackMovedSince.
+const entreeHorsForme = JSON.parse(JSON.stringify(fixture.apps[0])) as { source: { branch: string } };
+entreeHorsForme.source.branch = "feat/../main";
+simulate({
+  "GET https://api.github.com/repos/metabase/metabase/releases?per_page=100": [releases("v0.63.18")],
+});
+await describeTools([entreeHorsForme as never], loadLock(join(FIXTURES, "lock.json")));
+check(
+  "une branche hors forme n'atteint pas l'API GitHub",
+  simulatedUrls.filter((u) => u.includes("/branches/")),
+  [],
 );
 
 console.log("\nCommandes lancees hors du depot, contre un fetch simule");
@@ -2843,6 +2882,72 @@ try {
       horsForme: true,
     },
   );
+
+  console.log("\nValeurs hors forme venues du lock, contre un fetch simule");
+
+  // git_ref sait valoir un nom de branche, le lock le recopie, et rien ne
+  // valide le lock a la difference du manifeste. L'URL batie avec rendait 404,
+  // donc null, donc les deux controles se desactivaient sans rien dire.
+  {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), withoutWait);
+    const lockSrc = JSON.parse(readFileSync(join(b.fleet, "lock.json"), "utf8"));
+    lockSrc.apps[DELTA].source.sha = "master";
+    writeFileSync(join(b.fleet, "lock.json"), JSON.stringify(lockSrc, null, 2));
+    const out = run(b, "apply.ts", [...FLEET, "--app", "delta", "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [DELTA]: { version: "v0.63.18", sha: EN_SERVICE } }),
+    });
+    check(
+      "un sha de lock hors forme n'atteint ni compare ni contents",
+      [
+        // Le sha de la cible est bien forme et reste interroge : seul celui du
+        // lock doit manquer a l'appel.
+        out.calls.filter((l) => /\.\.\.master$|ref=master$/.test(l)),
+        /hors forme, appartenance du sha a la branche non verifiee/.test(out.output),
+        /hors forme, aucun retrait de buildpack verifie/.test(out.output),
+      ],
+      [[], true, true],
+    );
+  }
+
+  // Le nom du buildpack vient du journal de build : hors forme owner/name, il
+  // n'est ni interrogeable ni liable. Le parc est conforme ici, donc rien ne se
+  // deploie, et les echeances de fin de ligne suffisent a faire ecrire le
+  // rapport ou vit ce tableau.
+  {
+    const b = sandbox();
+    const lockSrc = JSON.parse(readFileSync(join(b.fleet, "lock.json"), "utf8"));
+    lockSrc.apps["osc-fr1/alpha-metabase"].buildpacks = [
+      { repo: "https://exemple.test/bp.tgz", ref: null },
+      { repo: "Scalingo/metabase|buildpack", ref: null },
+    ];
+    writeFileSync(join(b.fleet, "lock.json"), JSON.stringify(lockSrc, null, 2));
+    const out = run(b, "apply.ts", [...FLEET, "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ "osc-fr1/beta-metabase": { version: "v0.63.18", sha: EN_SERVICE } }),
+    });
+    const rapport = readFileSync(join(b.outDir, "incident.md"), "utf8").split("\n");
+    const ligne = (motif: string) => rapport.find((l) => l.startsWith("| [alpha-metabase]") && l.includes(motif)) ?? "";
+    check(
+      "un depot de buildpack hors forme n'atteint pas l'API GitHub",
+      // Les buildpacks bien formes des autres apps restent interroges : seuls
+      // ceux d'alpha, hors forme, doivent manquer a l'appel.
+      out.calls.filter((l) => /exemple\.test|metabase(\||%7C)buildpack/i.test(l)),
+      [],
+    );
+    check(
+      "un buildpack hors GitHub n'est pas lie et se dit non verifiable",
+      [
+        ligne("exemple.test").includes("](https://github.com/https://exemple.test"),
+        ligne("exemple.test").includes("| hors GitHub, non vérifiable |"),
+      ],
+      [false, true],
+    );
+    // La barre verticale coupait la ligne du tableau, et l'accent grave aurait
+    // ferme le code pour laisser passer le reste en markdown.
+    check("une barre verticale relevee ne coupe pas la ligne", ligne("metabasebuildpack").split("|").length, 6);
+  }
 
   console.log("\nVersion en service inconnue, contre un fetch simule");
 

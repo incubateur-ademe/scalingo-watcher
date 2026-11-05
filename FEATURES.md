@@ -368,7 +368,7 @@ variables et effacerait le reste de l'environnement.
 l'application lors d'un changement de variable, contrairement au dashboard et à
 la CLI. La valeur est posée, puis le build la consomme.
 
-**[fait]** Deux contrôles de cohérence des références avant tout déploiement. Le
+**[fait]** Trois contrôles de cohérence des références avant tout déploiement. Le
 premier vérifie que le commit épinglé appartient à la branche que le manifeste
 déclare suivre. Le second, plus important, vérifie que le commit **actuellement
 déployé** appartient lui aussi à cette branche : si ce n'est pas le cas, ou bien
@@ -379,7 +379,37 @@ oauth2-proxy devant Metabase : la redéployer depuis `master` exposerait
 l'instance sans authentification, sans que le statut du déploiement le signale.
 Rien n'est tenté dans ce cas.
 
-**[fait]** Un troisième contrôle, sur le sens de l'écart et non plus sur sa
+**[fait]** Le troisième de ces contrôles ne regarde plus d'où vient le commit
+mais ce qu'il emporte. Les deux premiers ne voient qu'une déclaration
+incohérente avec elle-même : une déclaration cohérente mais fausse, branche et
+sha d'accord sur un commit qui ne porte pas le même `.buildpacks`, les passe
+tous les deux. Le `.buildpacks` est donc lu sur GitHub au commit en service et
+au commit visé, et un buildpack que `lock.json` relève en service et que le
+commit visé ne déclare plus fait refuser le déploiement. Un fichier absent au
+commit visé compte comme un retrait, c'est le cas le plus total ; seule une
+panne de GitHub vaut ignorance, et elle s'annonce en échéance.
+
+**[fait]** Après le déploiement, les buildpacks relevés dans le journal du build
+sont comparés à ceux du lock, et une disparition met en quarantaine comme les
+autres refus de la fenêtre de garde. Il mesure là où le contrôle préalable
+déduit, donc il attrape aussi un retrait venu d'ailleurs. Un relevé vide ne vaut
+pas disparition : le journal illisible et le journal sans buildpack rendent la
+même liste vide, et le relevé précédent du lock est alors conservé plutôt
+qu'effacé, sans quoi un seul journal illisible désarmait le contrôle préalable
+du passage suivant, qui part de ce relevé.
+
+**[fait]** Aucune valeur n'entre dans une URL de l'API GitHub sans contrôle de
+forme. Le manifeste passe le schéma à chaque exécution, mais ni `lock.json` ni
+le journal de build : un sha de lock peut valoir un nom de branche ou la chaîne
+vide, et un nom de buildpack relevé dans le journal peut être une URL entière
+quand la ligne de `.buildpacks` ne pointe pas GitHub. Hors forme, la valeur vaut
+ignorance, annoncée quand elle est anormale et silencieuse quand elle est
+légitime. Un buildpack hors GitHub n'est donc plus lié dans le tableau de bord,
+sa colonne de mise à jour le dit non vérifiable, et son nom est posé en cellule
+sans barre verticale ni accent grave, qui couperaient la ligne ou ouvriraient du
+markdown dans le corps de l'issue.
+
+**[fait]** Un quatrième contrôle, sur le sens de l'écart et non plus sur sa
 cohérence. Une cible du manifeste strictement antérieure à la version que porte
 la variable de l'application est refusée au lieu d'être déployée. Le manifeste
 dit l'intention, pas la vérité : une application montée à la main avant que le
