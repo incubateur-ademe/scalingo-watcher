@@ -62,7 +62,7 @@
     }
   ],
   "vulnerabilityAlerts": {
-    "description": "Etiquette les montees que la plateforme rattache a une alerte de vulnerabilite, et leve pour elles le delai de quarantaine, qui est deja le defaut de ce bloc. Ne vaut que pour ce que la plateforme sait voir : les workflows appelants et les presets, donc scalingo-watcher lui-meme chez un consommateur. La version de l'outil portee par le manifeste n'en releve pas, n'etant une dependance d'aucun ecosysteme de paquets : aucune alerte ne l'atteint, et c'est le watcher qui releve les avis de son depot amont. Pas d'automerge ici ; les correctifs du manifeste restent fusionnes seuls par le preset de l'outil.",
+    "description": "Etiquette les montees que la plateforme rattache a une alerte de vulnerabilite. Ne vaut que pour ce que la plateforme sait voir : les workflows appelants et les presets, donc scalingo-watcher lui-meme chez un consommateur. La version de l'outil portee par le manifeste n'en releve pas, n'etant une dependance d'aucun ecosysteme de paquets : aucune alerte ne l'atteint, et c'est le watcher qui releve les avis de son depot amont. Pas d'automerge ici ; les correctifs du manifeste restent fusionnes seuls par le preset de l'outil.",
     "labels": [
       "securite"
     ]
