@@ -253,8 +253,8 @@ Mend hébergée fait tourner.
 
 Ce que le moteur sait d'un outil vit dans un module, un fichier par outil sous
 [`src/tools`](src/tools) : sa variable de version, son nom, le dépôt qui publie
-ses releases, ce qui forme une ligne de versions, son nom chez endoflife.date,
-et la forme de ses avis de sécurité. `init` reconnaît une application à cette
+ses releases, ce qui forme une ligne de versions, son nom chez endoflife.date
+et son preset Renovate. `init` reconnaît une application à cette
 variable, l'audit et le rapport en tirent l'amont.
 
 1. Créer `src/tools/<outil>.ts` sur le modèle de

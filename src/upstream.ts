@@ -23,8 +23,6 @@ export type Upstream = {
    * inconnu.
    */
   lifecycle?: string;
-  /** Vrai quand les avis ecrivent l'edition en `x` litteral, voir ToolModule. */
-  editionWildcard?: boolean;
 };
 
 const DEFAULT_LINE = 1;
@@ -34,24 +32,17 @@ export type ToolDeclaration = {
   upstream?: { repo: string; line?: number; lifecycle?: string };
 };
 
-/**
- * Amont d'un outil : celui que declare le manifeste, sinon celui de son module.
- *
- * La forme des avis suit l'outil et non le depot : un manifeste qui designe un
- * autre depot pour Metabase garde la lecture du `x` d'edition.
- */
+/** Amont d'un outil : celui que declare le manifeste, sinon celui de son module. */
 export function upstreamOf(tool: ToolDeclaration): Upstream | null {
   const known = toolOf(tool.env);
-  const edition = known?.editionWildcard ? { editionWildcard: true } : {};
   if (tool.upstream) {
     return {
       repo: tool.upstream.repo,
       line: tool.upstream.line ?? known?.upstream.line ?? DEFAULT_LINE,
       lifecycle: tool.upstream.lifecycle ?? known?.upstream.lifecycle,
-      ...edition,
     };
   }
-  return known ? { ...known.upstream, ...edition } : null;
+  return known ? { ...known.upstream } : null;
 }
 
 /** Nom de l'outil dans le rapport : celui de son module, a defaut celui de sa variable. */
@@ -163,8 +154,7 @@ export type Advisory = {
 
 
 /**
- * Un texte d'avis dont l'edition est substituee par celle de la version jugee,
- * chez un outil dont le module le demande.
+ * Un texte d'avis dont l'edition est substituee par celle de la version jugee.
  *
  * Metabase ecrit l'edition en `x` litteral, `>= x.64.0, < x.64.3.4` par exemple,
  * pour couvrir d'un seul avis la ligne OSS et la ligne Enterprise. Ce n'est pas
@@ -175,12 +165,12 @@ export type Advisory = {
  * Un `x` qui ne precede pas un chiffre reste tel quel : dans `0.54.x` c'est un
  * joker sur le reste de la version, que ce releve ne sait pas lire.
  */
-const substituteEdition = (raw: string, judged: Version, edition: boolean) =>
-  edition ? raw.replace(/(^|[^\w.])x(?=\.\d)/g, (_, before: string) => `${before}${judged[0] ?? 0}`) : raw;
+const substituteEdition = (raw: string, judged: Version) =>
+  raw.replace(/(^|[^\w.])x(?=\.\d)/g, (_, before: string) => `${before}${judged[0] ?? 0}`);
 
 /** Les versions qu'un texte d'avis nomme, quelle que soit sa forme. */
-const versionsNamed = (raw: string, judged: Version, edition: boolean): Version[] =>
-  [...substituteEdition(raw, judged, edition).matchAll(/\d+(?:\.\d+)*/g)].map((m) => m[0].split(".").map(Number));
+const versionsNamed = (raw: string, judged: Version): Version[] =>
+  [...substituteEdition(raw, judged).matchAll(/\d+(?:\.\d+)*/g)].map((m) => m[0].split(".").map(Number));
 
 /** Une borne ramenee a une suite de chiffres, ou null si ce n'en est pas une. */
 const readBound = (raw: string): string | null => {
@@ -200,8 +190,8 @@ const readBound = (raw: string): string | null => {
  * se devine : c'est judgeAdvisories qui tranche ensuite, par le correctif que
  * l'avis annonce lui-meme.
  */
-export function readRange(raw: string, judged: Version, edition: boolean): Range | null {
-  const parts = substituteEdition(raw, judged, edition)
+export function readRange(raw: string, judged: Version): Range | null {
+  const parts = substituteEdition(raw, judged)
     .split(",")
     .map((p) => p.trim())
     .filter(Boolean);
@@ -287,7 +277,7 @@ const formatLike = (model: string, v: Version) => (model.trim().startsWith("v") 
 export function judgeAdvisories(
   advisories: readonly Advisory[],
   version: string,
-  { line, editionWildcard = false }: Pick<Upstream, "line" | "editionWildcard">,
+  line: number,
 ): AdvisoryVerdict | null {
   const judged = pinnedVersion(version);
   if (!judged) return null;
@@ -320,9 +310,9 @@ export function judgeAdvisories(
    */
   const judgeOne = (advisory: Advisory, v: Version) => {
     const entries = (advisory.vulnerabilities ?? []).filter((e) => e.vulnerable_version_range);
-    const patchedIn = (raw: string | null) => versionsNamed(raw ?? "", v, editionWildcard).filter((x) => inLine(x, v));
+    const patchedIn = (raw: string | null) => versionsNamed(raw ?? "", v).filter((x) => inLine(x, v));
     const announced = top(entries.flatMap((e) => patchedIn(e.patched_versions)));
-    const named = entries.flatMap((e) => versionsNamed(e.vulnerable_version_range!, v, editionWildcard)).filter((x) => inLine(x, v));
+    const named = entries.flatMap((e) => versionsNamed(e.vulnerable_version_range!, v)).filter((x) => inLine(x, v));
     if (named.length === 0 && !announced) return null;
 
     let affected = false;
@@ -331,7 +321,7 @@ export function judgeAdvisories(
     const blind: string[] = [];
     for (const entry of entries) {
       const raw = entry.vulnerable_version_range!;
-      const range = readRange(raw, v, editionWildcard);
+      const range = readRange(raw, v);
       if (!range) {
         blind.push(raw);
         continue;

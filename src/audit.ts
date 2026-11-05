@@ -660,7 +660,7 @@ async function analyse(report: AppReport, officialBuildpacks: Set<string>, findi
       try {
         const published = await advisoriesFor(upstream.repo, githubJson);
         const current = declared && !FLOATING.has(declared.trim()) ? declared : null;
-        const verdict = published && current ? judgeAdvisories(published, current, upstream) : null;
+        const verdict = published && current ? judgeAdvisories(published, current, upstream.line) : null;
         if (verdict) {
           entry.advisory = {
             hits: verdict.hits.map((h) => h.cve ?? h.ghsa),

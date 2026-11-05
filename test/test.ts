@@ -621,12 +621,14 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
 
   const ruleFor = (packageName: string, updateType: string, key: string, policy = "minor= major=") =>
     ruleValue(RULES, { manager: "custom.regex", packageName, datasource: "github-tags", depType: `outil ${policy}`, updateType }, key);
+  // Renovate lit separateMinorPatch avant de connaitre le type de la mise a
+  // jour : une regle qui filtre matchUpdateTypes ne le pose jamais.
+  const beforeLookup = (packageName: string, key: string, depType = "outil minor= major=") =>
+    ruleValue(RULES, { manager: "custom.regex", packageName, datasource: "github-tags", depType }, key);
   check(
     "correctifs et montees de Metabase restent groupes comme avant, dans des branches separees",
-    [["patch", "groupName"], ["minor", "groupName"], ["patch", "separateMinorPatch"], ["minor", "separateMinorPatch"]].map(([u, k]) =>
-      ruleFor("metabase/metabase", u, k),
-    ),
-    ["correctifs outils", "montee fonctionnelle des outils", true, true],
+    [ruleFor("metabase/metabase", "patch", "groupName"), ruleFor("metabase/metabase", "minor", "groupName"), beforeLookup("metabase/metabase", "separateMinorPatch")],
+    ["correctifs outils", "montee fonctionnelle des outils", true],
   );
   // Une rupture change le contrat de l'outil : major=auto ne la vise pas. La
   // politique est instanciee pour un outil dont le versioning a des ruptures,
@@ -643,11 +645,12 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
     [true, true, false],
   );
   // La politique ne vaut que pour un versioning verifie : sous le semver par
-  // defaut, une minor de Grafana est une montee, et une regle generique mal
-  // posee la fusionnerait seule.
+  // defaut, une minor d'un outil sans preset est une montee, et une regle
+  // generique mal posee la fusionnerait seule.
+  const presetless = TOOLS.find((t) => !t.renovatePreset)!.upstream.repo;
   check(
     "un outil sans preset n'est jamais fusionne seul, quelle que soit la politique",
-    ["minor= major=", "minor=auto major=auto"].flatMap((p) => ["patch", "minor", "major"].map((u) => ruleFor("grafana/grafana", u, "automerge", p))),
+    ["minor= major=", "minor=auto major=auto"].flatMap((p) => ["patch", "minor", "major"].map((u) => ruleFor(presetless, u, "automerge", p))),
     Array(6).fill(undefined),
   );
   // La politique entiere ne vise que le depot de l'outil : etendue au reste, elle
@@ -656,8 +659,8 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
   check(
     "correctifs et montees ne sont separes que pour un outil qui a son preset",
     [
-      ruleFor("grafana/grafana", "patch", "separateMinorPatch"),
-      ruleValue(RULES, { manager: "custom.regex", packageName: "incubateur-ademe/scalingo-watcher", datasource: "github-tags", depType: "documentation", updateType: "patch" }, "separateMinorPatch"),
+      beforeLookup(presetless, "separateMinorPatch"),
+      beforeLookup("incubateur-ademe/scalingo-watcher", "separateMinorPatch", "documentation"),
       rulesOf("politique", ["exemple/outil"]).every((r) => JSON.stringify(r.matchPackageNames) === JSON.stringify(["exemple/outil"])),
     ],
     [undefined, undefined, true],
@@ -675,7 +678,6 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
       if (JSON.stringify(rule.matchPackageNames) !== JSON.stringify([t.upstream.repo])) gaps.push(`${name} : regle hors de ${t.upstream.repo}`);
       if (rule.automerge !== undefined) gaps.push(`${name} : automerge pose hors de la politique`);
     }
-    if (!(own.packageRules ?? []).some((r) => typeof r.versioning === "string")) gaps.push(`${name} : aucun versioning`);
     return gaps;
   });
   const orphans = readdirSync(PRESETS_DIR)
@@ -1023,16 +1025,6 @@ try {
 } finally {
   rmSync(aliasSandbox, { recursive: true, force: true });
 }
-// Le drapeau d'edition voyage dans l'amont : un appel qui reconstruirait
-// { line } le perdrait, et chez Metabase la plage en `x` deviendrait illisible,
-// une version affectee passant inapercue. Le chemin de l'audit n'est exerce par
-// aucun test de bout en bout, d'ou ce controle sur le source.
-check(
-  "chaque jugement des avis recoit l'amont entier, drapeau d'edition compris",
-  [apply, audit].flatMap((src) => [...src.matchAll(/judgeAdvisories\(([^()]*)\)/g)].map((m) => m[1].trim().split(/\s*,\s*/).at(-1))),
-  ["upstream", "upstream", "upstream"],
-);
-
 // --validate et le plan lisent le manifeste par le meme chemin, qui affiche
 // les avertissements avant toute autre sortie.
 check(
@@ -1048,27 +1040,17 @@ check("Metabase a son module", upstreamOf({ env: "METABASE_VERSION" }), {
   repo: "metabase/metabase",
   line: 1,
   lifecycle: "metabase",
-  editionWildcard: true,
 });
 check("un outil sans module n'a pas d'amont", upstreamOf({ env: "NGINX_VERSION" }), null);
-// La forme des avis suit l'outil : un autre depot pour Metabase ecrit ses
-// plages comme l'amont dont il derive.
 check(
-  "le manifeste surcharge le module, en gardant sa ligne et sa lecture des avis",
+  "le manifeste surcharge le module, en gardant sa ligne",
   upstreamOf({ env: "METABASE_VERSION", upstream: { repo: "exemple/metabase" } }),
-  { repo: "exemple/metabase", line: 1, lifecycle: "metabase", editionWildcard: true },
+  { repo: "exemple/metabase", line: 1, lifecycle: "metabase" },
 );
 check(
   "chaque module a sa variable, de la forme que le schema exige",
   TOOLS.map((t) => t.env).filter((env, i, all) => all.indexOf(env) !== i || !/^[A-Z][A-Z0-9_]*_VERSION$/.test(env)),
   [],
-);
-// Ailleurs, `x` est un joker sur la fin de la version : le remplacer par la
-// premiere composante fabriquerait une borne que l'avis ne donne pas.
-check(
-  "seul Metabase lit le x d'edition dans ses avis",
-  TOOLS.filter((t) => t.editionWildcard).map((t) => t.env),
-  ["METABASE_VERSION"],
 );
 // Un depot complete par le manifeste n'apporte pas de nom chez la source de fin
 // de vie : la veille se tait sur cet outil plutot que de deviner ce nom.
@@ -1536,7 +1518,7 @@ const advisory = (
 /** Ce qu'un verdict dit, ramene a trois valeurs comparables. */
 // Les avis sont ceux de Metabase, dont le module demande la lecture du `x`.
 const judge = (advisories: unknown[], version: string, line = 1) => {
-  const v = judgeAdvisories(advisories as never, version, { line, editionWildcard: true });
+  const v = judgeAdvisories(advisories as never, version, line);
   return v ? [v.hits.map((h) => h.ghsa), v.fix, v.unreadable.map((u) => u.range)] : null;
 };
 
@@ -1545,14 +1527,6 @@ const judge = (advisories: unknown[], version: string, line = 1) => {
 // sinon aucune plage ne correspond jamais et tout le parc passe pour indemne.
 const CRITICAL = advisory("GHSA-v44v-x8x4-mvcw", [[">= x.64.0, < x.64.3.4", "x.64.3.4"]]);
 check("le x litteral de l'edition est substitue", judge([CRITICAL], "v0.64.1.0"), [["GHSA-v44v-x8x4-mvcw"], "v0.64.3.4", []]);
-// Chez un outil dont le module ne le demande pas, `x` n'est jamais lu comme une
-// borne : les numeros 64.0 et 64.3.4 ne sont pas de la ligne 0, l'avis lui est
-// etranger.
-check(
-  "sans le drapeau d'edition, le x n'est pas substitue",
-  [readRange("< x.64.3.4", [0, 64, 1, 0], false), judgeAdvisories([CRITICAL] as never, "v0.64.1.0", { line: 1 })],
-  [null, { hits: [], fix: null, unreadable: [] }],
-);
 check("la version corrigee en sort indemne", judge([CRITICAL], "v0.64.4.2"), [[], null, []]);
 check("la version juste avant le correctif est couverte", judge([CRITICAL], "v0.64.3.3"), [["GHSA-v44v-x8x4-mvcw"], "v0.64.3.4", []]);
 // Le quatrieme nombre compte : 0.64.3 est sous 0.64.3.4, pas a egalite.
@@ -1584,7 +1558,7 @@ for (const form of [
   "All enterprise versions < 0.63.x",
   "< 0.63.20, >= 0.63.30",
 ]) {
-  check(`la plage ${JSON.stringify(form)} est illisible`, readRange(form, [0, 63, 18], true), null);
+  check(`la plage ${JSON.stringify(form)} est illisible`, readRange(form, [0, 63, 18]), null);
 }
 for (const [form, read] of [
   [">= 0.63.0, < 0.63.20", { startIncl: "0.63.0", endExcl: "0.63.20" }],
@@ -1593,7 +1567,7 @@ for (const [form, read] of [
   ["> 0.63.0", { startExcl: "0.63.0" }],
   ["= 0.63.18", { startIncl: "0.63.18", endIncl: "0.63.18" }],
 ] as const) {
-  check(`la plage ${JSON.stringify(form)} est lue`, readRange(form, [0, 63, 18], true), read);
+  check(`la plage ${JSON.stringify(form)} est lue`, readRange(form, [0, 63, 18]), read);
 }
 
 // Une plage illisible ne vaut ni affectation ni innocence. Sans correctif

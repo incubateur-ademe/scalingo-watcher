@@ -155,12 +155,6 @@ et `init`, dit où l'outil publie ses versions, indexé par sa variable de
 version. Le champ `tool.upstream` le complète pour un outil sans module, ou le
 surcharge. Le titre de section du rapport et les liens de release en dérivent.
 
-**[fait]** La lecture du `x` d'édition dans les avis de sécurité est un drapeau
-du module, posé pour Metabase seul. Elle s'appliquait à tous les outils : chez
-un autre, un `x` est un joker sur la fin de la version, et le remplacer
-fabriquait une borne que l'avis ne donne pas. Un manifeste qui désigne un autre
-dépôt pour un outil garde la lecture de son module.
-
 **[fait]** Un champ renommé reste accepté sous son ancien nom, avec un
 avertissement au `--validate` et au plan. Les deux noms présents et en
 désaccord sont refusés. Aucun renommage n'est en vigueur à ce jour : le
@@ -902,7 +896,7 @@ release. Il n'existe donc pas d'ordre entre deux états d'un buildpack, seulemen
 
 **Le mapping vers les releases amont doit être déclaré.** Rien dans un buildpack
 ne dit de façon standard où l'outil publie ses versions. C'est la seule
-information non dérivable : elle vit dans la table d'amonts du moteur, dans
+information non dérivable : elle vit dans les modules d'outil du moteur, dans
 `tool.upstream`, et dans les annotations du manifeste.
 
 **Deux hôtes d'API distincts.** Les sauvegardes et les bases passent par

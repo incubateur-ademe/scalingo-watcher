@@ -29,13 +29,6 @@ export type ToolModule = {
     lifecycle?: string;
   };
   /**
-   * Les avis de securite de l'amont ecrivent le premier composant en `x`
-   * litteral, `>= x.64.0` pour couvrir toutes les editions d'un seul avis. Le
-   * releve le remplace alors par celui de la version jugee. Ailleurs, un `x`
-   * reste un joker que le releve ne sait pas lire.
-   */
-  editionWildcard?: boolean;
-  /**
    * Preset renovate/<preset>.json qui pose le versioning de l'outil et etend la
    * politique commune. Absent, Renovate suit les versions sans jamais fusionner
    * seul : la politique ne vaut que pour un versioning verifie.

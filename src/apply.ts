@@ -1992,10 +1992,10 @@ async function proposeSecurityUpgrades(targets: AppEntry[]): Promise<void> {
     }
     withUpstream++;
     const version = entry.tool.version;
-    const couple = `${upstream.repo}#${upstream.line}#${upstream.editionWildcard ? "x" : ""}#${version}`;
+    const couple = `${upstream.repo}#${upstream.line}#${version}`;
     if (!verdicts.has(couple)) {
       const list = await advisoriesFor(upstream.repo, ghJson);
-      verdicts.set(couple, list ? judgeAdvisories(list, version, upstream) : null);
+      verdicts.set(couple, list ? judgeAdvisories(list, version, upstream.line) : null);
     }
     const verdict = verdicts.get(couple)!;
 
@@ -2460,13 +2460,13 @@ async function checkAdvisories(targets: AppEntry[], lock: Lock): Promise<void> {
     const version = lock.apps[key]?.tool.version ?? entry.tool.version;
     if (!version) continue;
 
-    const couple = `${upstream.repo}#${upstream.line}#${upstream.editionWildcard ? "x" : ""}#${version}`;
+    const couple = `${upstream.repo}#${upstream.line}#${version}`;
     let seen = judged.get(couple);
     if (!seen) {
       const list = await advisoriesFor(upstream.repo, ghJson);
       if (!list) advisoriesUnread.add(upstream.repo);
       else advisoriesRead.set(upstream.repo, list.length);
-      const verdict = list ? judgeAdvisories(list, version, upstream) : null;
+      const verdict = list ? judgeAdvisories(list, version, upstream.line) : null;
       seen = { verdict, missing: verdict ? null : list ? "version illisible" : "avis illisibles" };
       judged.set(couple, seen);
     }
