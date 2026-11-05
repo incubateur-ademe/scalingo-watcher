@@ -2519,11 +2519,12 @@ try {
   };
   const FILES = (next: string[]) => JSON.stringify({ [EN_SERVICE]: [JVM, MB, PROXY], [VISE]: next });
 
-  const retrait = (manifestSrc: string, env: Record<string, string> = {}) => {
+  const retrait = (manifestSrc: string, env: Record<string, string> = {}, lockSha?: string) => {
     const b = sandbox();
     writeFileSync(join(b.fleet, "manifest.yaml"), manifestSrc);
     const lockSrc = JSON.parse(readFileSync(join(b.fleet, "lock.json"), "utf8"));
     lockSrc.apps[DELTA].buildpacks = [{ repo: MB_REPO, ref: null }, { repo: PROXY_REPO, ref: null }];
+    if (lockSha !== undefined) lockSrc.apps[DELTA].source.sha = lockSha;
     writeFileSync(join(b.fleet, "lock.json"), JSON.stringify(lockSrc, null, 2));
     const out = run(b, "apply.ts", [...FLEET, "--app", "delta", "--out-dir", "../sortie"], {
       SCALINGO_API_TOKEN: "faux",
@@ -2547,6 +2548,7 @@ try {
       // meme silence qu'un controle qui a regarde et n'a rien trouve.
       panne: /\.buildpacks de \S+ illisible/.test(out.output),
       muet: /journal du build illisible/.test(out.output),
+      horsForme: /hors forme/.test(out.output),
     };
   };
 
@@ -2563,6 +2565,7 @@ try {
       signale: true,
       panne: false,
       muet: false,
+      horsForme: false,
     },
   );
   check(
@@ -2578,6 +2581,7 @@ try {
       signale: false,
       panne: false,
       muet: false,
+      horsForme: false,
     },
   );
   // A sha constant le controle prealable ne regarde rien : c'est le releve
@@ -2592,6 +2596,7 @@ try {
     signale: true,
     panne: false,
     muet: false,
+    horsForme: false,
   });
   check("un journal de build muet ne met pas en quarantaine", retrait(withoutWait, { BUILT: "" }), {
     sha: EN_SERVICE.slice(0, 7),
@@ -2605,6 +2610,7 @@ try {
     signale: false,
     panne: false,
     muet: true,
+    horsForme: false,
   });
   // Sans la table, l'API GitHub refuse : le deploiement passe, comme partout
   // ailleurs ici, et l'echeance dit que le controle n'a pas pu etre mene. Un
@@ -2622,6 +2628,7 @@ try {
       signale: false,
       panne: true,
       muet: false,
+      horsForme: false,
     },
   );
   // Le retrait le plus total : le commit vise supprime le `.buildpacks`.
@@ -2640,6 +2647,47 @@ try {
       signale: true,
       panne: false,
       muet: false,
+      horsForme: false,
+    },
+  );
+
+  // Un echec de la fenetre de garde n'a pas lu le journal du build : l'ancien
+  // placement du constat annoncait pourtant un journal illisible, ce qui est la
+  // confusion meme que ce controle existe pour eviter.
+  check(
+    "une quarantaine de fenetre de garde n'annonce pas de journal illisible",
+    retrait(withoutWait, { CONTAINER: "crashed" }),
+    {
+      sha: EN_SERVICE.slice(0, 7),
+      version: "v0.63.18",
+      quarantaine: 'conteneur web-1 "crashed" apres le deploiement',
+      deploiement: true,
+      refus: false,
+      releve: [MB_REPO, PROXY_REPO],
+      signale: false,
+      panne: false,
+      muet: false,
+      horsForme: false,
+    },
+  );
+  // Le lock n'est pas valide par le schema, a la difference du manifeste, et il
+  // sait porter un sha vide qu'une premiere prise en charge en echec y laisse.
+  // Le batir en URL aurait fait rendre une absence de fichier par l'API, donc
+  // compte tous les buildpacks comme retires.
+  check(
+    "un sha de lock hors forme n'est pas bati en URL",
+    retrait(withoutWait, { BUILT: `${MB},${PROXY}`, BUILDPACKS: JSON.stringify({ [EN_SERVICE]: [JVM, MB, PROXY] }) }, ""),
+    {
+      sha: EN_SERVICE.slice(0, 7),
+      version: "v0.63.19",
+      quarantaine: null,
+      deploiement: true,
+      refus: false,
+      releve: [MB_REPO, PROXY_REPO],
+      signale: false,
+      panne: false,
+      muet: false,
+      horsForme: true,
     },
   );
 

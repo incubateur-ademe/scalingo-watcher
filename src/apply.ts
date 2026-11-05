@@ -873,6 +873,12 @@ async function shaIsOnBranch(repo: string, branch: string, sha: string): Promise
 // n'est annoncee qu'une fois par couple depot-commit.
 const declaredCache = new Map<string, string[] | null>();
 
+// Le premier caractere de chaque moitie ne peut pas etre un point, ce qui
+// ecarte les segments `.` et `..` : le motif du schema les laisse passer,
+// puisqu'il admet le point, et `../..` sortirait de la route visee.
+const GH_REPO = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*\/[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
+const GH_SHA = /^[0-9a-f]{40}$/;
+
 /** Depots des entrees d'un `.buildpacks`, rendu en base64 par l'API GitHub. */
 const buildpacksFile = (content: string): string[] =>
   Buffer.from(content, "base64")
@@ -900,6 +906,16 @@ async function declaredBuildpacks(key: string, repo: string, sha: string): Promi
   const cacheKey = `${repo}@${sha}`;
   const cached = declaredCache.get(cacheKey);
   if (cached !== undefined) return cached;
+  // Le manifeste passe le schema a chaque execution, le lock non : son depot et
+  // son sha arrivent ici tels qu'ils ont ete ecrits, et ils entrent dans une
+  // URL. Le lock sait porter un sha vide, qu'une premiere prise en charge en
+  // echec y laisse, et l'API aurait alors rendu une absence de fichier, donc
+  // compte tous les buildpacks comme retires.
+  if (!GH_REPO.test(repo) || !GH_SHA.test(sha)) {
+    warn(key, `couple ${repo}@${sha || "vide"} hors forme, aucun retrait de buildpack verifie`);
+    declaredCache.set(cacheKey, null);
+    return null;
+  }
   let declared: string[] | null = null;
   let failure: string | null = null;
   try {
@@ -1408,15 +1424,6 @@ async function applyApp(
     const buildpacks = failure ? [] : await readBuildpacks(entry, dep.id);
     failure ??= buildpacksLost(current?.buildpacks ?? [], buildpacks);
 
-    // Un releve vide vaut journal illisible, pas app sans buildpack. L'ecrire
-    // tel quel effacerait ce que le lock savait, et le controle prealable du
-    // passage suivant, qui part de ce releve, ne regarderait plus rien : un
-    // journal illisible desarmait le garde pour cette app.
-    const known = buildpacks.length > 0 ? buildpacks : (current?.buildpacks ?? []);
-    if (buildpacks.length === 0 && known.length > 0) {
-      warn(key, `journal du build illisible, releve de buildpacks du deploiement precedent conserve`);
-    }
-
     if (failure) {
       lock.apps[key] = {
         ...(current ?? {
@@ -1433,6 +1440,20 @@ async function applyApp(
       emit(`    ECHEC (${failure}), mise en quarantaine`);
       note(key, `deploiement en echec (${failure}), mise en quarantaine.`);
       return "failed";
+    }
+
+    // Un releve vide vaut journal illisible, pas app sans buildpack. L'ecrire
+    // tel quel effacerait ce que le lock savait, et le controle prealable du
+    // passage suivant, qui part de ce releve, ne regarderait plus rien : un
+    // journal illisible desarmait le garde pour cette app.
+    //
+    // Sous le bloc d'echec, et non au-dessus : plus haut, un echec de la
+    // fenetre de garde passait ici avec un releve vide parce que personne ne
+    // l'avait lu, et l'echeance annoncait un journal illisible qui n'avait
+    // jamais ete ouvert.
+    const known = buildpacks.length > 0 ? buildpacks : (current?.buildpacks ?? []);
+    if (buildpacks.length === 0 && known.length > 0) {
+      warn(key, `journal du build illisible, releve de buildpacks du deploiement precedent conserve`);
     }
 
     lock.apps[key] = {
