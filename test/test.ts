@@ -32,10 +32,13 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import { parse, parseDocument } from "yaml";
 import {
   backupAddon,
+  buildpacksDropped,
+  buildpacksLost,
   describeAdvisoryProposal,
   describeProposal,
   describeTools,
   loadLock,
+  parseBuildpackRef,
   policyReadByRenovate,
   readManifest,
   RENAMED_FIELDS,
@@ -2454,6 +2457,155 @@ try {
       [[], "v0.63.18", true],
     );
   }
+
+  console.log("\nBuildpack retire, contre un fetch simule");
+
+  // Les gardes de branche n'attrapent qu'une declaration incoherente avec
+  // elle-meme. Une branche et un sha d'accord sur un commit dont le
+  // `.buildpacks` a perdu l'oauth2-proxy devant l'outil les passent tous les
+  // deux, et rien du statut du deploiement ne le signalerait.
+  const JVM = "https://github.com/Scalingo/buildpack-jvm-common.git";
+  const MB = "https://github.com/Scalingo/metabase-buildpack";
+  const PROXY = "https://github.com/betagouv/oauth2-proxy-buildpack.git";
+  const EN_SERVICE = "a".repeat(40);
+  const VISE = "c".repeat(40);
+  const MB_REPO = "Scalingo/metabase-buildpack";
+  const PROXY_REPO = "betagouv/oauth2-proxy-buildpack";
+
+  // Le journal de build et le `.buildpacks` ecrivent la meme forme d'URL : les
+  // deux releves ne se comparent que lus par le meme parseur.
+  check("une entree de .buildpacks se lit comme une ligne de journal", parseBuildpackRef(PROXY), {
+    repo: PROXY_REPO,
+    ref: null,
+  });
+  check("un #ref est retenu", parseBuildpackRef(`${MB}#v2`), { repo: MB_REPO, ref: "v2" });
+
+  const EN_PLACE = [{ repo: MB_REPO }, { repo: PROXY_REPO }];
+  const DEUX = [MB_REPO, PROXY_REPO];
+  check("un buildpack que le commit vise ne declare plus est nomme", buildpacksDropped(EN_PLACE, DEUX, [MB_REPO]), [PROXY_REPO]);
+  // Le pilote designe par BUILDPACK_URL ne figure a aucun `.buildpacks` : le
+  // prochain build le rechargera de la meme facon, donc il ne disparait pas.
+  check(
+    "un buildpack qu'aucun des deux fichiers ne nomme n'est pas une disparition",
+    buildpacksDropped([{ repo: "Scalingo/multi-buildpack" }, ...EN_PLACE], DEUX, DEUX),
+    [],
+  );
+  // GitHub injoignable, ou depot sans `.buildpacks` : on ne bloque pas sur une panne.
+  check("un fichier illisible ne fait rien refuser", buildpacksDropped(EN_PLACE, null, [MB_REPO]), []);
+  check("et pas davantage du cote du commit vise", buildpacksDropped(EN_PLACE, DEUX, null), []);
+
+  check(
+    "un buildpack absent du build est nomme",
+    buildpacksLost(EN_PLACE, [{ repo: MB_REPO }]),
+    `buildpack retire par le build : ${PROXY_REPO}`,
+  );
+  // readBuildpacks rend une liste vide aussi bien sur un journal illisible que
+  // sur un journal sans buildpack : confondre les deux aurait mis en
+  // quarantaine toute app dont le journal n'a pas pu etre lu.
+  check("un releve d'apres build vide ne conclut rien", buildpacksLost(EN_PLACE, []), null);
+  check("un releve d'avant vide non plus", buildpacksLost([], EN_PLACE), null);
+
+  // delta-metabase sert ici aussi : son lock recoit l'oauth2-proxy devant
+  // l'outil, et son manifeste deplace le sha vers un commit qui ne le declare
+  // plus.
+  const movedTo = (src: string) => {
+    const was = `sha: ${EN_SERVICE}`;
+    const at = src.lastIndexOf(was);
+    return `${src.slice(0, at)}sha: ${VISE}${src.slice(at + was.length)}`;
+  };
+  const FILES = (next: string[]) => JSON.stringify({ [EN_SERVICE]: [JVM, MB, PROXY], [VISE]: next });
+
+  const retrait = (manifestSrc: string, env: Record<string, string> = {}) => {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), manifestSrc);
+    const lockSrc = JSON.parse(readFileSync(join(b.fleet, "lock.json"), "utf8"));
+    lockSrc.apps[DELTA].buildpacks = [{ repo: MB_REPO, ref: null }, { repo: PROXY_REPO, ref: null }];
+    writeFileSync(join(b.fleet, "lock.json"), JSON.stringify(lockSrc, null, 2));
+    const out = run(b, "apply.ts", [...FLEET, "--app", "delta", "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [DELTA]: { version: "v0.63.18", sha: EN_SERVICE } }),
+      ...env,
+    });
+    const entry = loadLock(join(b.fleet, "lock.json")).apps[DELTA];
+    const incidentFile = join(b.outDir, "incident.md");
+    const incident = existsSync(incidentFile) ? readFileSync(incidentFile, "utf8") : "";
+    return {
+      sha: entry.source.sha.slice(0, 7),
+      version: entry.tool.version,
+      quarantaine: entry.quarantine?.reason ?? null,
+      deploiement: out.calls.some((l) => /^POST \S+\/deployments$/.test(l)),
+      refus: /BUILDPACK RETIRE/.test(out.output),
+      // Un rejet ne fait pas sortir en erreur, comme ses trois controles
+      // freres : c'est l'issue tiree de ce fichier qui porte le signal.
+      signale: /buildpack retire .*oauth2-proxy-buildpack/.test(incident),
+      // Une panne de GitHub laisse deployer, mais elle ne doit pas rendre le
+      // meme silence qu'un controle qui a regarde et n'a rien trouve.
+      panne: /aucun retrait de buildpack verifie/.test(out.output),
+    };
+  };
+
+  check(
+    "un deploiement qui retirerait l'oauth2-proxy est refuse avant toute ecriture",
+    retrait(movedTo(withoutWait), { BUILDPACKS: FILES([JVM, MB]) }),
+    {
+      sha: EN_SERVICE.slice(0, 7),
+      version: "v0.63.18",
+      quarantaine: null,
+      deploiement: false,
+      refus: true,
+      signale: true,
+      panne: false,
+    },
+  );
+  check(
+    "le meme deploiement passe quand le commit vise le declare encore",
+    retrait(movedTo(withoutWait), { BUILDPACKS: FILES([JVM, MB, PROXY]), BUILT: `${MB},${PROXY}` }),
+    {
+      sha: VISE.slice(0, 7),
+      version: "v0.63.19",
+      quarantaine: null,
+      deploiement: true,
+      refus: false,
+      signale: false,
+      panne: false,
+    },
+  );
+  // A sha constant le controle prealable ne regarde rien : c'est le releve
+  // d'apres build qui attrape le retrait, d'ou qu'il vienne.
+  check("un buildpack disparu du build met en quarantaine", retrait(withoutWait, { BUILT: MB }), {
+    sha: EN_SERVICE.slice(0, 7),
+    version: "v0.63.18",
+    quarantaine: `buildpack retire par le build : ${PROXY_REPO}`,
+    deploiement: true,
+    refus: false,
+    signale: true,
+    panne: false,
+  });
+  check("un journal de build muet ne met pas en quarantaine", retrait(withoutWait, { BUILT: "" }), {
+    sha: EN_SERVICE.slice(0, 7),
+    version: "v0.63.19",
+    quarantaine: null,
+    deploiement: true,
+    refus: false,
+    signale: false,
+    panne: false,
+  });
+  // Sans la table, l'API GitHub refuse : le deploiement passe, comme partout
+  // ailleurs ici, et l'echeance dit que le controle n'a pas pu etre mene. Un
+  // quota de l'API sans GITHUB_TOKEN se presente exactement comme ca.
+  check(
+    "un .buildpacks illisible laisse deployer, et l'annonce",
+    retrait(movedTo(withoutWait), { BUILT: `${MB},${PROXY}` }),
+    {
+      sha: VISE.slice(0, 7),
+      version: "v0.63.19",
+      quarantaine: null,
+      deploiement: true,
+      refus: false,
+      signale: false,
+      panne: true,
+    },
+  );
 
   console.log("\nVersion en service inconnue, contre un fetch simule");
 

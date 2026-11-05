@@ -22,6 +22,13 @@
  * le cas ou cette veille n'a rien a dire.
  * EOL_OUTAGE=1 fait echouer cette source, comme un editeur injoignable.
  *
+ * BUILDPACKS (sha -> liste d'URL) repond au .buildpacks du depot applicatif a
+ * ce commit ; un sha absent de la table rend 404, comme un depot sans ce
+ * fichier, et sans la table l'API GitHub repond 500, comme une panne.
+ * BUILT, liste d'URL separees par des virgules, donne les buildpacks que le
+ * journal du build annonce ; a defaut il n'en annonce qu'un, celui du lock du
+ * gabarit, et la chaine vide simule un journal qui n'en nomme aucun.
+ *
  * Un deploiement est accepte et conclu du premier coup, au statut de REAL.
  * CRASH=1 fait apparaitre un redemarrage en erreur dans les evenements de l'app
  * a partir du deuxieme releve suivant le deploiement, soit pendant la fenetre
@@ -48,6 +55,11 @@ const lifecycle = JSON.parse(
   process.env.LIFECYCLE ?? '[{"name":"0.63","isLts":true,"isEol":false,"eolFrom":"2099-01-01"}]',
 ) as unknown[];
 
+const buildpacks = JSON.parse(process.env.BUILDPACKS ?? "null") as Record<string, string[]> | null;
+const built = (process.env.BUILT ?? "https://github.com/Scalingo/metabase-buildpack")
+  .split(",")
+  .filter((u) => u.length > 0);
+
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
@@ -67,6 +79,11 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   // Tout vient de la premiere page, les suivantes sont vides.
   if (m === "GET" && /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/security-advisories\?/.test(u)) {
     return json(u.includes("page=1") ? advisories : []);
+  }
+  if (buildpacks && m === "GET" && (r = /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/contents\/\.buildpacks\?ref=(\w+)$/.exec(u))) {
+    const lines = buildpacks[r[1]];
+    if (!lines) return json({ message: "Not Found" }, 404);
+    return json({ encoding: "base64", content: Buffer.from(lines.join("\n")).toString("base64") });
   }
   if (m === "GET" && (r = /^https:\/\/endoflife\.date\/api\/v1\/products\/([^/?]+)$/.exec(u))) {
     if (process.env.EOL_OUTAGE) return json({ error: "injoignable" }, 503);
@@ -115,7 +132,7 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
       return json({ deployment: { id: `dep-${app}`, status: state.status ?? "success", created_at: AT } });
     }
     if (route === `/deployments/dep-${app}/output`) {
-      return new Response("-----> Downloading Buildpack: https://github.com/Scalingo/metabase-buildpack\n", { status: 200 });
+      return new Response(built.map((b) => `-----> Downloading Buildpack: ${b}\n`).join(""), { status: 200 });
     }
     if (route === "/ps") {
       if (process.env.PS_DENIED) return json({ error: "scope_denied" }, 403);
