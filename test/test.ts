@@ -2491,6 +2491,10 @@ try {
     [],
   );
   // GitHub injoignable, ou depot sans `.buildpacks` : on ne bloque pas sur une panne.
+  check("un commit vise sans .buildpacks retire tout ce qu'il declarait", buildpacksDropped(EN_PLACE, DEUX, []), [MB_REPO, PROXY_REPO]);
+  // Un commit en service sans ce fichier ne dit rien : ce que le lock releve
+  // vient alors d'ailleurs, et le prochain build le rechargera pareil.
+  check("un commit en service sans .buildpacks ne fait rien refuser", buildpacksDropped(EN_PLACE, [], [MB_REPO]), []);
   check("un fichier illisible ne fait rien refuser", buildpacksDropped(EN_PLACE, null, [MB_REPO]), []);
   check("et pas davantage du cote du commit vise", buildpacksDropped(EN_PLACE, DEUX, null), []);
 
@@ -2535,12 +2539,14 @@ try {
       quarantaine: entry.quarantine?.reason ?? null,
       deploiement: out.calls.some((l) => /^POST \S+\/deployments$/.test(l)),
       refus: /BUILDPACK RETIRE/.test(out.output),
+      releve: entry.buildpacks.map((b) => b.repo),
       // Un rejet ne fait pas sortir en erreur, comme ses trois controles
       // freres : c'est l'issue tiree de ce fichier qui porte le signal.
       signale: /buildpack retire .*oauth2-proxy-buildpack/.test(incident),
       // Une panne de GitHub laisse deployer, mais elle ne doit pas rendre le
       // meme silence qu'un controle qui a regarde et n'a rien trouve.
-      panne: /aucun retrait de buildpack verifie/.test(out.output),
+      panne: /\.buildpacks de \S+ illisible/.test(out.output),
+      muet: /journal du build illisible/.test(out.output),
     };
   };
 
@@ -2553,8 +2559,10 @@ try {
       quarantaine: null,
       deploiement: false,
       refus: true,
+      releve: [MB_REPO, PROXY_REPO],
       signale: true,
       panne: false,
+      muet: false,
     },
   );
   check(
@@ -2566,8 +2574,10 @@ try {
       quarantaine: null,
       deploiement: true,
       refus: false,
+      releve: [MB_REPO, PROXY_REPO],
       signale: false,
       panne: false,
+      muet: false,
     },
   );
   // A sha constant le controle prealable ne regarde rien : c'est le releve
@@ -2578,8 +2588,10 @@ try {
     quarantaine: `buildpack retire par le build : ${PROXY_REPO}`,
     deploiement: true,
     refus: false,
+    releve: [MB_REPO, PROXY_REPO],
     signale: true,
     panne: false,
+    muet: false,
   });
   check("un journal de build muet ne met pas en quarantaine", retrait(withoutWait, { BUILT: "" }), {
     sha: EN_SERVICE.slice(0, 7),
@@ -2587,8 +2599,12 @@ try {
     quarantaine: null,
     deploiement: true,
     refus: false,
+    // Le releve precedent survit : l'effacer desarmait le controle prealable du
+    // passage suivant, qui part de lui, pour le prix d'un journal illisible.
+    releve: [MB_REPO, PROXY_REPO],
     signale: false,
     panne: false,
+    muet: true,
   });
   // Sans la table, l'API GitHub refuse : le deploiement passe, comme partout
   // ailleurs ici, et l'echeance dit que le controle n'a pas pu etre mene. Un
@@ -2602,8 +2618,28 @@ try {
       quarantaine: null,
       deploiement: true,
       refus: false,
+      releve: [MB_REPO, PROXY_REPO],
       signale: false,
       panne: true,
+      muet: false,
+    },
+  );
+  // Le retrait le plus total : le commit vise supprime le `.buildpacks`.
+  // L'API GitHub rend 404, qui est une mesure et non une panne : tenu pour
+  // inconnu, il laissait passer la disparition de tous les buildpacks.
+  check(
+    "un commit vise qui supprime le .buildpacks est refuse",
+    retrait(movedTo(withoutWait), { BUILDPACKS: JSON.stringify({ [EN_SERVICE]: [JVM, MB, PROXY] }) }),
+    {
+      sha: EN_SERVICE.slice(0, 7),
+      version: "v0.63.18",
+      quarantaine: null,
+      deploiement: false,
+      refus: true,
+      releve: [MB_REPO, PROXY_REPO],
+      signale: true,
+      panne: false,
+      muet: false,
     },
   );
 

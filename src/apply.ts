@@ -883,8 +883,10 @@ const buildpacksFile = (content: string): string[] =>
     .map((l) => parseBuildpackRef(l).repo);
 
 /**
- * Buildpacks que le `.buildpacks` du depot applicatif declare a ce commit, ou
- * null quand le fichier est absent et quand GitHub n'a pas repondu.
+ * Buildpacks que le `.buildpacks` du depot applicatif declare a ce commit. Une
+ * liste vide quand ce commit n'a pas ce fichier, null quand GitHub n'a pas
+ * repondu : le fichier absent est une mesure, la panne est une ignorance, et
+ * les confondre revient a ne pas garder le cas que ce controle vise le plus.
  *
  * C'est la seule facon de savoir avant un build ce qu'il va charger : l'API
  * Scalingo n'expose pas ce fichier, et le journal de build ne le dit qu'apres.
@@ -906,10 +908,14 @@ async function declaredBuildpacks(key: string, repo: string, sha: string): Promi
     });
     if (res.ok) {
       const body = (await res.json()) as { content?: string; encoding?: string };
-      if (body.encoding === "base64" && body.content) declared = buildpacksFile(body.content);
-    } else if (res.status !== 404) {
-      // Un 404 est une reponse : ce depot n'a pas ce fichier a ce commit, il
-      // n'y a rien a comparer. Tout autre refus est une panne.
+      if (body.encoding === "base64" && typeof body.content === "string") declared = buildpacksFile(body.content);
+      else failure = `contenu illisible, encodage ${body.encoding ?? "absent"}`;
+    } else if (res.status === 404) {
+      // Un 404 est une mesure, pas une panne : ce commit ne declare aucun
+      // buildpack par ce fichier. Le tenir pour inconnu laissait passer le
+      // retrait le plus total, celui d'un commit qui supprime le `.buildpacks`.
+      declared = [];
+    } else {
       failure = `${res.status} ${res.statusText}`;
     }
   } catch (e) {
@@ -918,6 +924,7 @@ async function declaredBuildpacks(key: string, repo: string, sha: string): Promi
   if (failure) {
     warn(key, `.buildpacks de ${repo} illisible a ${sha.slice(0, 7)}, aucun retrait de buildpack verifie : ${failure}`);
   }
+
   declaredCache.set(cacheKey, declared);
   return declared;
 }
@@ -1401,6 +1408,15 @@ async function applyApp(
     const buildpacks = failure ? [] : await readBuildpacks(entry, dep.id);
     failure ??= buildpacksLost(current?.buildpacks ?? [], buildpacks);
 
+    // Un releve vide vaut journal illisible, pas app sans buildpack. L'ecrire
+    // tel quel effacerait ce que le lock savait, et le controle prealable du
+    // passage suivant, qui part de ce releve, ne regarderait plus rien : un
+    // journal illisible desarmait le garde pour cette app.
+    const known = buildpacks.length > 0 ? buildpacks : (current?.buildpacks ?? []);
+    if (buildpacks.length === 0 && known.length > 0) {
+      warn(key, `journal du build illisible, releve de buildpacks du deploiement precedent conserve`);
+    }
+
     if (failure) {
       lock.apps[key] = {
         ...(current ?? {
@@ -1422,7 +1438,7 @@ async function applyApp(
     lock.apps[key] = {
       source: { repo: entry.source.repo, sha: target.sha },
       tool: { env: entry.tool.env, version: entry.tool.version },
-      buildpacks,
+      buildpacks: known,
       deployment: { id: dep.id, status: dep.status, at: dep.at },
       backup,
       quarantine: null,
