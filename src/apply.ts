@@ -726,6 +726,17 @@ async function settleOut(
   }
 }
 
+/**
+ * Depot et ref d'une entree de buildpack. La meme forme d'URL s'ecrit dans le
+ * `.buildpacks` du depot applicatif et se relit dans le journal de build : un
+ * seul parseur garde les deux releves comparables entre eux.
+ */
+export const parseBuildpackRef = (url: string): { repo: string; ref: string | null } => {
+  const [bare, ref] = url.split("#");
+  const m = /github\.com[/:]([^/]+\/[^/#]+?)(?:\.git)?$/.exec(bare);
+  return { repo: m ? m[1] : bare, ref: ref || null };
+};
+
 /** Les buildpacks reellement utilises ne sont lisibles que dans les logs du build. */
 async function readBuildpacks(entry: AppEntry, deploymentId: string) {
   // Cette route rend du texte brut, pas du JSON : elle ne passe pas par req().
@@ -742,15 +753,31 @@ async function readBuildpacks(entry: AppEntry, deploymentId: string) {
   for (const line of text.split("\n")) {
     const dl = /Downloading Buildpack:\s*(\S+)/.exec(line);
     if (dl) {
-      const [bare, ref] = dl[1].split("#");
-      const m = /github\.com[/:]([^/]+\/[^/#]+?)(?:\.git)?$/.exec(bare);
-      out.push({ repo: m ? m[1] : bare, ref: ref || null });
+      out.push(parseBuildpackRef(dl[1]));
       continue;
     }
     const br = /Using branch:\s*(\S+)/.exec(line);
     if (br && out.length > 0) out[out.length - 1].ref = br[1];
   }
   return out;
+}
+
+/**
+ * Raison de refuser un build qui a perdu un buildpack, ou null.
+ *
+ * Un releve vide ne vaut pas disparition : readBuildpacks rend une liste vide
+ * aussi bien quand le journal du build est illisible que quand il ne nomme
+ * aucun buildpack, et confondre les deux aurait mis en quarantaine toute app
+ * dont le journal n'a pas pu etre lu.
+ */
+export function buildpacksLost(
+  before: ReadonlyArray<{ repo: string }>,
+  after: ReadonlyArray<{ repo: string }>,
+): string | null {
+  if (before.length === 0 || after.length === 0) return null;
+  const kept = new Set(after.map((b) => b.repo));
+  const lost = before.map((b) => b.repo).filter((r) => !kept.has(r));
+  return lost.length > 0 ? `buildpack retire par le build : ${lost.join(", ")}` : null;
 }
 
 type Deployment = { id: string; status: string; created_at: string; git_ref: string | null };
@@ -839,6 +866,105 @@ async function shaIsOnBranch(repo: string, branch: string, sha: string): Promise
   } catch {
     return null;
   }
+}
+
+// Une panne est retenue comme une absence, pour que le refaire app par app sur
+// un depot commun ne coute pas des appels pour le meme silence. L'echeance, elle,
+// n'est annoncee qu'une fois par couple depot-commit.
+const declaredCache = new Map<string, string[] | null>();
+
+// Le premier caractere de chaque moitie ne peut pas etre un point, ce qui
+// ecarte les segments `.` et `..` : le motif du schema les laisse passer,
+// puisqu'il admet le point, et `../..` sortirait de la route visee.
+const GH_REPO = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*\/[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
+const GH_SHA = /^[0-9a-f]{40}$/;
+
+/** Depots des entrees d'un `.buildpacks`, rendu en base64 par l'API GitHub. */
+const buildpacksFile = (content: string): string[] =>
+  Buffer.from(content, "base64")
+    .toString("utf8")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith("#"))
+    .map((l) => parseBuildpackRef(l).repo);
+
+/**
+ * Buildpacks que le `.buildpacks` du depot applicatif declare a ce commit. Une
+ * liste vide quand ce commit n'a pas ce fichier, null quand GitHub n'a pas
+ * repondu : le fichier absent est une mesure, la panne est une ignorance, et
+ * les confondre revient a ne pas garder le cas que ce controle vise le plus.
+ *
+ * C'est la seule facon de savoir avant un build ce qu'il va charger : l'API
+ * Scalingo n'expose pas ce fichier, et le journal de build ne le dit qu'apres.
+ *
+ * Une panne laisse deployer, comme partout ailleurs ici, mais elle s'annonce.
+ * `shaIsOnBranch` se tait sur la sienne, et sans GITHUB_TOKEN un 403 de quota y
+ * desactive le controle sans que rien ne le dise : un garde muet quand il
+ * n'a pas pu regarder est indiscernable d'un garde qui n'a rien trouve.
+ */
+async function declaredBuildpacks(key: string, repo: string, sha: string): Promise<string[] | null> {
+  const cacheKey = `${repo}@${sha}`;
+  const cached = declaredCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  // Le manifeste passe le schema a chaque execution, le lock non : son depot et
+  // son sha arrivent ici tels qu'ils ont ete ecrits, et ils entrent dans une
+  // URL. Le lock sait porter un sha vide, qu'une premiere prise en charge en
+  // echec y laisse, et l'API aurait alors rendu une absence de fichier, donc
+  // compte tous les buildpacks comme retires.
+  if (!GH_REPO.test(repo) || !GH_SHA.test(sha)) {
+    warn(key, `couple ${repo}@${sha || "vide"} hors forme, aucun retrait de buildpack verifie`);
+    declaredCache.set(cacheKey, null);
+    return null;
+  }
+  let declared: string[] | null = null;
+  let failure: string | null = null;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/contents/.buildpacks?ref=${sha}`, {
+      headers: ghHeaders(),
+    });
+    if (res.ok) {
+      const body = (await res.json()) as { content?: string; encoding?: string };
+      if (body.encoding === "base64" && typeof body.content === "string") declared = buildpacksFile(body.content);
+      else failure = `contenu illisible, encodage ${body.encoding ?? "absent"}`;
+    } else if (res.status === 404) {
+      // Un 404 est une mesure, pas une panne : ce commit ne declare aucun
+      // buildpack par ce fichier. Le tenir pour inconnu laissait passer le
+      // retrait le plus total, celui d'un commit qui supprime le `.buildpacks`.
+      declared = [];
+    } else {
+      failure = `${res.status} ${res.statusText}`;
+    }
+  } catch (e) {
+    failure = (e as Error).message.slice(0, 120);
+  }
+  if (failure) {
+    warn(key, `.buildpacks de ${repo} illisible a ${sha.slice(0, 7)}, aucun retrait de buildpack verifie : ${failure}`);
+  }
+
+  declaredCache.set(cacheKey, declared);
+  return declared;
+}
+
+/**
+ * Buildpacks en service que le commit vise ne declare plus.
+ *
+ * Trois conditions, et chacune ecarte un faux positif qui lui est propre. Le
+ * buildpack doit avoir ete releve dans le build en service, pour qu'on parle de
+ * ce qui tourne et non de ce qu'un fichier annonce. Il doit figurer au
+ * `.buildpacks` du commit en service : celui que ce fichier ne nomme pas vient
+ * de BUILDPACK_URL, que le prochain build rechargera de la meme facon, donc il
+ * ne disparait pas. Il doit manquer a celui du commit vise, qui est la
+ * disparition elle-meme.
+ */
+export function buildpacksDropped(
+  inService: ReadonlyArray<{ repo: string }>,
+  declaredNow: readonly string[] | null,
+  declaredNext: readonly string[] | null,
+): string[] {
+  if (!declaredNow || !declaredNext) return [];
+  const now = new Set(declaredNow);
+  const next = new Set(declaredNext);
+  return inService.map((b) => b.repo).filter((r) => now.has(r) && !next.has(r));
 }
 
 // ---------------------------------------------------------------- application
@@ -1166,7 +1292,7 @@ async function applyApp(
   }
   emit(`  ${key} : ${changes.join(", ")}`);
 
-  // Deux controles distincts, et c'est le second qui compte le plus.
+  // Trois controles sur la provenance de ce qu'on deploie.
   //
   // Le premier verifie que le manifeste est coherent avec lui-meme : un sha
   // epingle doit appartenir a la branche qu'il declare suivre.
@@ -1196,9 +1322,33 @@ async function applyApp(
     }
   }
 
-  // Troisieme controle, sur le sens de l'ecart et non plus sur sa coherence.
-  // Les deux precedents verifient d'ou vient ce qu'on deploie ; celui-ci
-  // verifie qu'on ne recule pas. Il ne vaut que face a une version que le lock
+  // Le troisieme ne regarde plus d'ou vient le commit mais ce qu'il emporte.
+  // Les deux precedents ne voient qu'une declaration incoherente avec
+  // elle-meme : une declaration coherente mais fausse, branche et sha d'accord
+  // sur un commit qui ne porte pas le meme `.buildpacks`, les passe tous les
+  // deux. C'est par la que l'oauth2-proxy devant un outil se perd, puisque rien
+  // du statut du deploiement ne le signalerait.
+  if (current && current.buildpacks.length > 0 && (!sameRepo || current.source.sha !== target.sha)) {
+    const dropped = buildpacksDropped(
+      current.buildpacks,
+      await declaredBuildpacks(key, current.source.repo, current.source.sha),
+      await declaredBuildpacks(key, entry.source.repo, target.sha),
+    );
+    if (dropped.length > 0) {
+      emit(`    BUILDPACK RETIRE : ${target.sha.slice(0, 7)} ne declare plus ${dropped.join(", ")}`);
+      emit(`    corrige la branche ou le sha du manifeste, ou assume le retrait en mettant a jour le lock`);
+      note(
+        key,
+        `buildpack retire : ${target.sha.slice(0, 7)} ne declare plus ${dropped.join(", ")}, en service sur cette app. ` +
+          `Corriger la branche ou le sha du manifeste, ou assumer le retrait en mettant a jour le lock.`,
+      );
+      return "rejected";
+    }
+  }
+
+  // Quatrieme controle, sur le sens de l'ecart et non plus sur ce qu'il emporte.
+  // Les trois precedents verifient ce qu'on deploie ; celui-ci verifie qu'on ne
+  // recule pas. Il ne vaut que face a une version que le lock
   // dit reellement en service : apres un echec, la variable porte la nouvelle
   // valeur sans que le binaire ait change, et refuser le retour en arriere
   // serait precisement refuser la seule reaction sensee.
@@ -1264,7 +1414,15 @@ async function applyApp(
 
     // Le statut de Scalingo ne dit qu'une chose : le conteneur a repondu. La
     // fenetre de garde verifie qu'il tient.
-    const failure = dep.status !== "success" ? dep.status : await settleOut(entry, settle.window, dep.at, emit);
+    let failure = dep.status !== "success" ? dep.status : await settleOut(entry, settle.window, dep.at, emit);
+
+    // Le controle prealable ne voit qu'un buildpack que `.buildpacks` nomme.
+    // Celui-ci mesure au lieu de deduire, et attrape donc aussi un retrait venu
+    // d'ailleurs, d'un BUILDPACK_URL change sur Scalingo a une ligne que le
+    // parseur n'a pas su lire. L'instance a deja tourne un moment sans ce que
+    // le buildpack apportait : c'est le prix d'un controle qui mesure.
+    const buildpacks = failure ? [] : await readBuildpacks(entry, dep.id);
+    failure ??= buildpacksLost(current?.buildpacks ?? [], buildpacks);
 
     if (failure) {
       lock.apps[key] = {
@@ -1284,10 +1442,24 @@ async function applyApp(
       return "failed";
     }
 
+    // Un releve vide vaut journal illisible, pas app sans buildpack. L'ecrire
+    // tel quel effacerait ce que le lock savait, et le controle prealable du
+    // passage suivant, qui part de ce releve, ne regarderait plus rien : un
+    // journal illisible desarmait le garde pour cette app.
+    //
+    // Sous le bloc d'echec, et non au-dessus : plus haut, un echec de la
+    // fenetre de garde passait ici avec un releve vide parce que personne ne
+    // l'avait lu, et l'echeance annoncait un journal illisible qui n'avait
+    // jamais ete ouvert.
+    const known = buildpacks.length > 0 ? buildpacks : (current?.buildpacks ?? []);
+    if (buildpacks.length === 0 && known.length > 0) {
+      warn(key, `journal du build illisible, releve de buildpacks du deploiement precedent conserve`);
+    }
+
     lock.apps[key] = {
       source: { repo: entry.source.repo, sha: target.sha },
       tool: { env: entry.tool.env, version: entry.tool.version },
-      buildpacks: await readBuildpacks(entry, dep.id),
+      buildpacks: known,
       deployment: { id: dep.id, status: dep.status, at: dep.at },
       backup,
       quarantine: null,
