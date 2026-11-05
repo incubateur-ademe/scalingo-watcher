@@ -2,15 +2,11 @@
  * L'amont d'un outil : ou il publie ses versions, comment les ranger en lignes,
  * et ce qu'il dit des failles de celles-ci.
  *
- * Le rapprochement outil - depot est le seul que rien ne permet de deriver : le
- * nom de la variable de version dit quel buildpack la lit, pas ou l'outil publie
- * ses releases. La table se limite aux depots verifies : un mauvais
- * rapprochement produirait un "a jour" faux, ce qui est pire que
- * "amont inconnu".
- * A confirmer avant ajout : clamav, geoserver, opensearch-dashboards, nginx.
- *
- * Le champ tool.upstream du manifeste complete ou surcharge cette table.
+ * Ce que le moteur sait de chaque outil vit dans son module, sous src/tools.
+ * Le champ tool.upstream du manifeste le complete ou le surcharge.
  */
+
+import { toolOf } from "./tools/index.ts";
 
 export type Upstream = {
   /** Depot GitHub qui publie les releases, au format owner/name. */
@@ -29,22 +25,6 @@ export type Upstream = {
   lifecycle?: string;
 };
 
-/** Cle : la variable de version lue par le buildpack, celle de tool.env. */
-export const UPSTREAM: Record<string, Upstream & { name: string }> = {
-  // Deux lignes publiees en parallele : v0.x pour l'edition OSS, v1.x pour
-  // l'Enterprise. Le premier chiffre designe l'edition et non une version :
-  // v1.52.2 date de 2024 quand v0.63.16 date de 2026.
-  METABASE_VERSION: { name: "Metabase", repo: "metabase/metabase", line: 1, lifecycle: "metabase" },
-  GRAFANA_VERSION: { name: "Grafana", repo: "grafana/grafana", line: 1, lifecycle: "grafana" },
-  LOGSTASH_VERSION: { name: "Logstash", repo: "elastic/logstash", line: 1, lifecycle: "logstash" },
-  KIBANA_VERSION: { name: "Kibana", repo: "elastic/kibana", line: 1, lifecycle: "kibana" },
-  PROMETHEUS_VERSION: { name: "Prometheus", repo: "prometheus/prometheus", line: 1, lifecycle: "prometheus" },
-  // Le depot publie aujourd'hui la Community Build, numerotee 26.x, et non la
-  // SonarQube Server numerotee par annee : ce sont deux produits distincts chez
-  // endoflife.date, et les confondre daterait la fin de vie de l'autre.
-  SONARQUBE_VERSION: { name: "SonarQube", repo: "SonarSource/sonarqube", line: 1, lifecycle: "sonarqube-community" },
-};
-
 const DEFAULT_LINE = 1;
 
 export type ToolDeclaration = {
@@ -52,22 +32,22 @@ export type ToolDeclaration = {
   upstream?: { repo: string; line?: number; lifecycle?: string };
 };
 
-/** Amont d'un outil : celui que declare le manifeste, sinon celui de la table. */
+/** Amont d'un outil : celui que declare le manifeste, sinon celui de son module. */
 export function upstreamOf(tool: ToolDeclaration): Upstream | null {
-  const known = UPSTREAM[tool.env];
+  const known = toolOf(tool.env);
   if (tool.upstream) {
     return {
       repo: tool.upstream.repo,
-      line: tool.upstream.line ?? known?.line ?? DEFAULT_LINE,
-      lifecycle: tool.upstream.lifecycle ?? known?.lifecycle,
+      line: tool.upstream.line ?? known?.upstream.line ?? DEFAULT_LINE,
+      lifecycle: tool.upstream.lifecycle ?? known?.upstream.lifecycle,
     };
   }
-  return known ? { repo: known.repo, line: known.line, lifecycle: known.lifecycle } : null;
+  return known ? { ...known.upstream } : null;
 }
 
-/** Nom de l'outil dans le rapport : celui de la table, a defaut celui de sa variable. */
+/** Nom de l'outil dans le rapport : celui de son module, a defaut celui de sa variable. */
 export function toolName(env: string): string {
-  const known = UPSTREAM[env]?.name;
+  const known = toolOf(env)?.name;
   if (known) return known;
   const base = env.replace(/_VERSION$/, "").toLowerCase().replace(/_/g, " ");
   return base.charAt(0).toUpperCase() + base.slice(1);
@@ -554,8 +534,8 @@ const dayOf = (raw: string | null): string | null => {
  * Confronte une version a la fin de vie de sa ligne.
  *
  * Rend null quand rien ne se rapproche : version flottante, ou aucune ligne de
- * la source qui porte la version en service. C'est la regle que la table des
- * amonts s'impose deja : un outil que la source ne connait pas reste muet, un
+ * la source qui porte la version en service. C'est la regle que les modules
+ * d'outil s'imposent deja : un outil que la source ne connait pas reste muet, un
  * faux "supporte" etant pire qu'un "fin de vie inconnue".
  *
  * La ligne en service est celle dont les composants prefixent la version jugee,

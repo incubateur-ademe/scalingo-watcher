@@ -46,7 +46,7 @@ import {
   targetReached,
   writeOptions,
 } from "../src/apply.ts";
-import { upstreamKey, upstreamsDeclared } from "../src/audit.ts";
+import { resolveLatest, upstreamKey, upstreamsDeclared } from "../src/audit.ts";
 import { renderManifest } from "../src/init.ts";
 import { compose, matrixPayload, slackPayload, teamsPayload } from "../src/notify.ts";
 import { apiScopes, backupScopes, deniedByProxy } from "../src/fgp-scopes.ts";
@@ -63,6 +63,7 @@ import {
   upstreamOf,
   type Line,
 } from "../src/upstream.ts";
+import { TOOLS } from "../src/tools/index.ts";
 
 const SRC = join(import.meta.dirname, "..", "src");
 const FIXTURES = join(import.meta.dirname, "fixtures");
@@ -422,12 +423,42 @@ console.log("\nPresets Renovate");
 // precedente et cumule les groupes nommes, que les templates peuvent citer.
 type CustomManager = { managerFilePatterns?: string[]; matchStrings?: string[]; matchStringsStrategy?: string; depTypeTemplate?: string };
 type PackageRule = Record<string, unknown>;
-const preset = (name: string) =>
-  JSON.parse(readFileSync(join(import.meta.dirname, "..", "renovate", `${name}.json`), "utf8")) as {
-    customManagers?: CustomManager[];
-    packageRules?: PackageRule[];
-    minimumReleaseAge?: string | null;
-  };
+type Preset = {
+  extends?: string[];
+  customManagers?: CustomManager[];
+  packageRules?: PackageRule[];
+  minimumReleaseAge?: string | null;
+};
+const PRESETS_DIR = join(import.meta.dirname, "..", "renovate");
+const preset = (name: string) => JSON.parse(readFileSync(join(PRESETS_DIR, `${name}.json`), "utf8")) as Preset;
+// Comme Renovate : une reference relative `./x(a,b)` est remplacee sur place
+// par les regles de x, ses {{argN}} substitues, avant les regles du preset qui
+// l'etend. Un preset integre a Renovate n'est pas rejoue : seuls ceux de
+// IGNORED_PRESETS, qui ne touchent a aucune cle lue ici, sont admis.
+const IGNORED_PRESETS = new Set(["helpers:pinGitHubActionDigests"]);
+function rulesOf(name: string, args: string[] = []): PackageRule[] {
+  const text = readFileSync(join(PRESETS_DIR, `${name}.json`), "utf8").replace(/\{\{arg(\d+)\}\}/g, (_, i: string) => args[Number(i)] ?? "");
+  const config = JSON.parse(text) as Preset;
+  const extended = (config.extends ?? []).flatMap((ref) => {
+    if (IGNORED_PRESETS.has(ref)) return [];
+    const m = /^\.\/([\w-]+)(?:\((.*)\))?$/.exec(ref);
+    if (!m) throw new Error(`reference de preset non emulee : ${ref}`);
+    return rulesOf(m[1], m[2] === undefined ? [] : m[2].split(",").map((a) => a.trim()));
+  });
+  return [...extended, ...(config.packageRules ?? [])];
+}
+// Comme le versioning regex de Renovate : un groupe major absent vaut 0, et une
+// difference qui n'est ni de major ni de minor est un patch. Null quand les
+// deux versions ne sont pas de la meme compatibilite, Renovate ne proposant
+// alors rien.
+function updateTypeUnder(versioning: string, from: string, to: string): string | null {
+  const re = new RegExp(versioning.replace(/^regex:/, ""));
+  const [a, b] = [re.exec(from)?.groups, re.exec(to)?.groups];
+  if (!a || !b) throw new Error(`version hors du versioning : ${from} ou ${to}`);
+  if (a.compatibility !== b.compatibility) return null;
+  const n = (g: Record<string, string | undefined>, k: string) => Number(g[k] ?? 0);
+  return n(a, "major") !== n(b, "major") ? "major" : n(a, "minor") !== n(b, "minor") ? "minor" : "patch";
+}
 const regexOf = (pattern: string) => new RegExp(pattern.replace(/^\/|\/$/g, ""));
 function extract(manager: CustomManager | undefined, src: string): Record<string, string>[] {
   if (!manager) return [];
@@ -471,7 +502,8 @@ function ruleValue(rules: readonly PackageRule[], dep: Record<string, string>, k
   }
   return value;
 }
-const RULES = ["base", "metabase", "watcher"].flatMap((name) => preset(name).packageRules ?? []);
+const TOOL_PRESETS = TOOLS.flatMap((t) => (t.renovatePreset ? [t.renovatePreset] : []));
+const RULES = ["base", ...TOOL_PRESETS, "watcher"].flatMap((name) => rulesOf(name));
 const TOOL_VERSIONS = preset("base").customManagers?.find((m) => m.depTypeTemplate?.startsWith("outil "));
 const SOURCES = preset("base").customManagers?.find((m) => m.depTypeTemplate?.startsWith("source"));
 const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTemplate === "documentation");
@@ -546,9 +578,27 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
     ["beta-metabase", "gamma-metabase", "delta-metabase"],
   );
 
+  // Trois pas reels : correctif de quatrieme chiffre, correctif de troisieme,
+  // montee de ligne. Leur type vient du versioning du preset, comme chez
+  // Renovate, et non d'une hypothese du test.
+  const METABASE_STEPS = [
+    ["v0.64.4.3", "v0.64.4.4"],
+    ["v0.64.3.1", "v0.64.4"],
+    ["v0.64.4.4", "v0.65.0"],
+  ];
+  const metabaseVersioning = ruleValue(RULES, { manager: "custom.regex", packageName: "metabase/metabase" }, "versioning") as string;
+  check(
+    "le versioning de Metabase fait des deux derniers chiffres un correctif, du deuxieme une montee, de l'edition rien",
+    [...METABASE_STEPS, ["v0.64.4", "v1.64.4"]].map(([from, to]) => updateTypeUnder(metabaseVersioning, from, to)),
+    ["patch", "patch", "minor", null],
+  );
   const metabaseVia = (policy: string, datasource: string) =>
-    ["patch", "minor", "major"].map((updateType) =>
-      ruleValue(RULES, { manager: "custom.regex", packageName: "metabase/metabase", datasource, depType: `outil ${policy}`, updateType }, "automerge"),
+    METABASE_STEPS.map(([from, to]) =>
+      ruleValue(
+        RULES,
+        { manager: "custom.regex", packageName: "metabase/metabase", datasource, depType: `outil ${policy}`, updateType: updateTypeUnder(metabaseVersioning, from, to)! },
+        "automerge",
+      ),
     );
   const metabase = (policy: string) => metabaseVia(policy, "github-tags");
   check(
@@ -573,6 +623,72 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
       [true, true, false],
     ],
   );
+
+  const ruleFor = (packageName: string, updateType: string, key: string, policy = "minor= major=") =>
+    ruleValue(RULES, { manager: "custom.regex", packageName, datasource: "github-tags", depType: `outil ${policy}`, updateType }, key);
+  // Renovate lit separateMinorPatch avant de connaitre le type de la mise a
+  // jour : une regle qui filtre matchUpdateTypes ne le pose jamais.
+  const beforeLookup = (packageName: string, key: string, depType = "outil minor= major=") =>
+    ruleValue(RULES, { manager: "custom.regex", packageName, datasource: "github-tags", depType }, key);
+  check(
+    "correctifs et montees de Metabase restent groupes comme avant, dans des branches separees",
+    [ruleFor("metabase/metabase", "patch", "groupName"), ruleFor("metabase/metabase", "minor", "groupName"), beforeLookup("metabase/metabase", "separateMinorPatch")],
+    ["correctifs outils", "montee fonctionnelle des outils", true],
+  );
+  // Une rupture change le contrat de l'outil : major=auto ne la vise pas. La
+  // politique est instanciee pour un outil dont le versioning a des ruptures,
+  // ce que celui de Metabase n'a pas.
+  const semverTool = (updateType: string, policy: string) =>
+    ruleValue(
+      rulesOf("politique", ["exemple/outil"]),
+      { manager: "custom.regex", packageName: "exemple/outil", datasource: "github-tags", depType: `outil ${policy}`, updateType },
+      "automerge",
+    );
+  check(
+    "sous major=auto, une montee est fusionnee seule, une rupture jamais",
+    ["patch", "minor", "major"].map((u) => semverTool(u, "minor=auto major=auto")),
+    [true, true, false],
+  );
+  // La politique ne vaut que pour un versioning verifie : sous le semver par
+  // defaut, une minor d'un outil sans preset est une montee, et une regle
+  // generique mal posee la fusionnerait seule.
+  const presetless = TOOLS.find((t) => !t.renovatePreset)!.upstream.repo;
+  check(
+    "un outil sans preset n'est jamais fusionne seul, quelle que soit la politique",
+    ["minor= major=", "minor=auto major=auto"].flatMap((p) => ["patch", "minor", "major"].map((u) => ruleFor(presetless, u, "automerge", p))),
+    Array(6).fill(undefined),
+  );
+  // La politique entiere ne vise que le depot de l'outil : etendue au reste, elle
+  // scinderait aussi les branches d'un outil sans preset et des versions de
+  // scalingo-watcher citees par la documentation.
+  check(
+    "correctifs et montees ne sont separes que pour un outil qui a son preset",
+    [
+      beforeLookup(presetless, "separateMinorPatch"),
+      beforeLookup("incubateur-ademe/scalingo-watcher", "separateMinorPatch", "documentation"),
+      rulesOf("politique", ["exemple/outil"]).every((r) => JSON.stringify(r.matchPackageNames) === JSON.stringify(["exemple/outil"])),
+    ],
+    [undefined, undefined, true],
+  );
+
+  // Le preset d'un outil est le pendant Renovate de son module : il etend la
+  // politique avec le depot que le module declare, et ne vise que lui.
+  const moduleGaps = TOOLS.filter((t) => t.renovatePreset).flatMap((t) => {
+    const name = t.renovatePreset!;
+    if (!existsSync(join(PRESETS_DIR, `${name}.json`))) return [`${t.env} : renovate/${name}.json absent`];
+    const own = preset(name);
+    const gaps: string[] = [];
+    if (JSON.stringify(own.extends) !== JSON.stringify([`./politique(${t.upstream.repo})`])) gaps.push(`${name} : extends ${JSON.stringify(own.extends)}`);
+    for (const rule of own.packageRules ?? []) {
+      if (JSON.stringify(rule.matchPackageNames) !== JSON.stringify([t.upstream.repo])) gaps.push(`${name} : regle hors de ${t.upstream.repo}`);
+      if (rule.automerge !== undefined) gaps.push(`${name} : automerge pose hors de la politique`);
+    }
+    return gaps;
+  });
+  const orphans = readdirSync(PRESETS_DIR)
+    .map((f) => f.replace(/\.json$/, ""))
+    .filter((n) => !["base", "watcher", "politique"].includes(n) && !TOOL_PRESETS.includes(n));
+  check("chaque preset d'outil etend la politique avec le depot de son module, et chaque preset a son module", [moduleGaps, orphans], [[], []]);
 
   const watcher = (manager: string, datasource: string, depType: string) =>
     ["minor", "major"].map((updateType) =>
@@ -722,6 +838,17 @@ console.log("\nAmont declare par l'audit");
     "deux apps qui lisent la meme variable gardent chacune leur amont",
     [declared.get(upstreamKey("osc-fr1", "a", "APP_VERSION"))?.repo, declared.get(upstreamKey("osc-fr1", "b", "APP_VERSION"))?.repo],
     ["exemple/a", "exemple/b"],
+  );
+}
+
+// Metabase et SonarQube publient des versions a quatre composants.
+{
+  const tags = ["v0.64.4.2", "v0.64.4.3", "64", "v1.64.4.9"].map((tag) => ({ tag, at: "2026-11-01T00:00:00Z" }));
+  const { latestSameMajor, latestOverall } = resolveLatest(tags, [0, 64, 4, 2], 1);
+  check(
+    "l'audit compare le quatrieme composant et ignore un tag d'un seul nombre",
+    [latestSameMajor?.raw, latestOverall?.raw],
+    ["v0.64.4.3", "v1.64.4.9"],
   );
 }
 
@@ -933,16 +1060,21 @@ check(
 
 console.log("\nOutils et depots amont");
 
-check("Metabase est connu de la table", upstreamOf({ env: "METABASE_VERSION" }), {
+check("Metabase a son module", upstreamOf({ env: "METABASE_VERSION" }), {
   repo: "metabase/metabase",
   line: 1,
   lifecycle: "metabase",
 });
-check("un outil hors table n'a pas d'amont", upstreamOf({ env: "NGINX_VERSION" }), null);
+check("un outil sans module n'a pas d'amont", upstreamOf({ env: "NGINX_VERSION" }), null);
 check(
-  "le manifeste surcharge la table, en gardant sa ligne",
+  "le manifeste surcharge le module, en gardant sa ligne",
   upstreamOf({ env: "METABASE_VERSION", upstream: { repo: "exemple/metabase" } }),
   { repo: "exemple/metabase", line: 1, lifecycle: "metabase" },
+);
+check(
+  "chaque module a sa variable, de la forme que le schema exige",
+  TOOLS.map((t) => t.env).filter((env, i, all) => all.indexOf(env) !== i || !/^[A-Z][A-Z0-9_]*_VERSION$/.test(env)),
+  [],
 );
 // Un depot complete par le manifeste n'apporte pas de nom chez la source de fin
 // de vie : la veille se tait sur cet outil plutot que de deviner ce nom.
@@ -961,7 +1093,7 @@ check(
   upstreamOf({ env: "NGINX_VERSION", upstream: { repo: "nginx/nginx", line: 2 } }),
   { repo: "nginx/nginx", line: 2 },
 );
-check("le nom vient de la table", toolName("METABASE_VERSION"), "Metabase");
+check("le nom vient du module", toolName("METABASE_VERSION"), "Metabase");
 check("a defaut, de la variable", toolName("OPENSEARCH_DASHBOARDS_VERSION"), "Opensearch dashboards");
 // Chez Metabase, v0 et v1 sont deux editions publiees en parallele : v1.52.2
 // n'est pas une montee pour une instance en v0.63.
@@ -1408,6 +1540,7 @@ const advisory = (
   }) as never;
 
 /** Ce qu'un verdict dit, ramene a trois valeurs comparables. */
+// Les avis sont ceux de Metabase, dont le module demande la lecture du `x`.
 const judge = (advisories: unknown[], version: string, line = 1) => {
   const v = judgeAdvisories(advisories as never, version, line);
   return v ? [v.hits.map((h) => h.ghsa), v.fix, v.unreadable.map((u) => u.range)] : null;

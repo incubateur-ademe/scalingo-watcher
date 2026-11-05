@@ -150,9 +150,9 @@ fonctionnels. Les supprimer coupe la veille silencieusement.
 **[fait]** Région libre, de la forme `^[a-z0-9-]+$` : le schéma ne fige aucune
 liste. Elle finit dans un nom d'hôte, rien d'autre n'y entre.
 
-**[fait]** Une table d'amonts connus, partagée par l'audit et l'apply, dit où
-chaque outil publie ses versions, indexée par sa variable de version. Le champ
-`tool.upstream` la complète pour un outil qu'elle ne connaît pas, ou la
+**[fait]** Un module par outil, sous `src/tools`, partagé par l'audit, l'apply
+et `init`, dit où l'outil publie ses versions, indexé par sa variable de
+version. Le champ `tool.upstream` le complète pour un outil sans module, ou le
 surcharge. Le titre de section du rapport et les liens de release en dérivent.
 
 **[fait]** Un champ renommé reste accepté sous son ancien nom, avec un
@@ -264,18 +264,33 @@ donc sa politique, et déplacer la source une nouvelle fois ne demandera pas de
 retoucher ces règles.
 
 **[fait]** Versionnage sur mesure pour Metabase, dans le preset `metabase`, avec
-un groupe `compatibility` qui isole les lignes OSS et Enterprise. Effet de bord
-à connaître : `major` désigne le deuxième chiffre (0.63 vers 0.64, montée
-fonctionnelle) et `minor` le troisième (0.63.15 vers 0.63.16, correctif).
+un groupe `compatibility` qui isole les lignes OSS et Enterprise. Il ramène sa
+numérotation au contrat de la politique commune : le deuxième chiffre est une
+montée fonctionnelle (`minor`, 0.64 vers 0.65), le troisième et le quatrième
+des correctifs (`patch`, 0.64.3 vers 0.64.4 comme 0.64.4.3 vers 0.64.4.4).
+Jusqu'à la v1.3, ce versioning faisait du deuxième chiffre un `major` et du
+troisième un `minor`, et les règles de fusion étaient propres à Metabase. Le
+classement correctif ou montée est resté le même.
 
 **[fait]** Délai de décantation de cinq jours avant toute proposition d'une
 version d'outil, pour ne pas déployer une release publiée le matin même.
 
 **[fait]** Fusion automatique sur les correctifs, pull request sur les montées
-fonctionnelles. Les deux règles sont restreintes au manifeste : une mise à jour
-de l'outil lui-même n'est jamais fusionnée seule. Elles ne visent que Metabase,
-dont le versioning fait du troisième chiffre un correctif. Un autre outil reste
-en semver, sans fusion automatique.
+fonctionnelles, jamais de fusion seule d'une rupture. Ces règles vivent dans le
+preset `politique`, commun à tous les outils, et sont restreintes au manifeste :
+une mise à jour de l'outil lui-même n'est jamais fusionnée seule. Chaque preset
+d'outil l'étend pour son seul dépôt, `./politique(metabase/metabase)`, après un
+versioning qui fait de `patch` un correctif et de `minor` une montée. Un outil
+sans preset reste en semver, sans fusion automatique.
+
+**[fait]** Correctifs et montées fonctionnelles d'un même outil partent dans des
+branches séparées (`separateMinorPatch`) : sinon Renovate ne propose que la plus
+haute des deux, et un correctif attendrait la relecture d'une montée. Les
+branches de groupe s'appellent `renovate/patch-correctifs-outils` et
+`renovate/montee-fonctionnelle-des-outils`. Jusqu'à la v1.3, c'étaient
+`renovate/correctifs-outils` et `renovate/major-montee-fonctionnelle-des-outils`,
+et la montée des presets ferme une fois les pull requests ouvertes sous ces
+noms pour les rouvrir sous les nouveaux.
 
 **[fait]** Jamais de fusion automatique sur un changement de SHA : un condensat
 n'a ni version sémantique ni journal des modifications, donc rien à classifier.
@@ -761,7 +776,9 @@ invariants, pour s'assurer qu'ils échouent quand ils le doivent.
 **[fait]** La CI lance aussi le typecheck et un plan complet sur le parc de test,
 sans aucun secret. Node exécute le TypeScript en retirant les annotations sans
 les vérifier : sans typecheck, une lecture de champ inexistant n'apparaît qu'à
-l'exécution.
+l'exécution. Elle valide enfin les presets de `renovate/` par
+`renovate-config-validator` : Renovate ne les lit que chez les parcs, où une clé
+invalide ne se voit qu'à son passage suivant.
 
 ## 7. Limites connues
 
@@ -879,7 +896,7 @@ release. Il n'existe donc pas d'ordre entre deux états d'un buildpack, seulemen
 
 **Le mapping vers les releases amont doit être déclaré.** Rien dans un buildpack
 ne dit de façon standard où l'outil publie ses versions. C'est la seule
-information non dérivable : elle vit dans la table d'amonts du moteur, dans
+information non dérivable : elle vit dans les modules d'outil du moteur, dans
 `tool.upstream`, et dans les annotations du manifeste.
 
 **Deux hôtes d'API distincts.** Les sauvegardes et les bases passent par
@@ -922,8 +939,8 @@ une version épinglée déclenche une alerte.
 sont confrontées aux avis que publie le dépôt d'où sort l'outil
 (`GET /repos/{owner}/{repo}/security-advisories`). C'est la seule source qui
 porte l'information pour un outil hors écosystème de paquets, et le relevé est
-générique par construction : l'amont est déjà déclaré pour chaque outil, par la
-table `UPSTREAM` ou par `tool.upstream`.
+générique par construction : l'amont est déjà déclaré pour chaque outil, par son
+module sous `src/tools` ou par `tool.upstream`.
 
 **[fait]** Renovate ne peut pas tenir ce rôle, pour la raison exacte qui lui
 interdit de suivre les versions de bases Scalingo. Un outil qu'un buildpack
@@ -1053,10 +1070,10 @@ drapeau de la date, `isEol` et `eolFrom`, `isLts` et `ltsFrom`, et porte un
 `schema_version`.
 
 **[fait]** Le rapprochement entre un outil et un produit de la source est déclaré,
-jamais dérivé de sa variable de version. C'est la règle que la table des dépôts
-amont s'impose déjà, pour la même raison : un mauvais rapprochement daterait la
+jamais dérivé de sa variable de version. C'est la règle que les modules d'outil
+s'imposent déjà, pour la même raison : un mauvais rapprochement daterait la
 fin de vie d'un autre produit, ce qui est pire qu'une fin de vie inconnue. Le nom
-vient de la table `UPSTREAM` ou de `tool.upstream.lifecycle`, et un outil qui n'en
+vient du module de l'outil ou de `tool.upstream.lifecycle`, et un outil qui n'en
 a pas n'est pas interrogé du tout. Le dépôt `SonarSource/sonarqube` publie
 aujourd'hui la Community Build numérotée `26.x`, donc `sonarqube-community` et non
 la `sonarqube-server` numérotée par année, qui est un autre produit.
@@ -1406,5 +1423,5 @@ arrive vide. Vérifié en production sur le premier parc.
 l'organisation de l'outil.
 
 **[à faire]** Outils autres que Metabase de bout en bout. Le moteur les prend en
-charge, mais seul Metabase a un preset de versioning, et la table d'amonts se
-limite aux dépôts vérifiés.
+charge, mais seul Metabase a un preset d'outil, et les modules se limitent aux
+dépôts vérifiés. La recette d'ajout est dans le README.

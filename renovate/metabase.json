@@ -1,77 +1,18 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Versioning de Metabase et fusion de ses versions dans le manifeste, selon defaults.policy : correctifs fusionnes seuls et montees fonctionnelles en PR quand la politique est absente.",
+  "description": "Module Renovate de Metabase : son versioning, ramene au contrat semver de la politique commune, et la ligne suivie. La politique de fusion selon defaults.policy vient de ./politique : correctifs fusionnes seuls et montees fonctionnelles en PR quand la politique est absente.",
+  "extends": [
+    "./politique(metabase/metabase)"
+  ],
   "packageRules": [
     {
-      "description": "Metabase publie 0.x pour l'OSS et 1.x pour l'EE : ce sont deux lignes distinctes, jamais comparables entre elles. Le groupe compatibility les isole. Consequence sur les updateTypes : major = 2e chiffre (0.63 -> 0.64, montee fonctionnelle), minor = 3e chiffre (0.63.15 -> 0.63.16, correctif).\n\nallowedVersions borne la veille a la ligne 0.64, qui est la LTS courante (fin de vie 2027-12-01). C'est le prix de la source github-tags : les tags exposent la ligne 0.65, non-LTS et en fin de vie le 2027-01-01, que les releases GitHub n'exposaient pas. Sans cette borne, Renovate ouvrirait une pull request permanente demandant de quitter la LTS pour une ligne plus courte. A editer au prochain changement de LTS, que la veille de fin de vie du moteur signale desormais : elle confronte la version du lock a ce que l'editeur annonce pour sa ligne, et dit quand une ligne de support long plus recente existe. Rien ne le disait auparavant, et il a fallu une recherche manuelle pour etablir que la 0.65 sortait du support long. La forme predicat regex est voulue : `<0.65` tomberait dans le repli npm-semver, isVersion(\"0.65\") etant faux sous ce versioning.",
+      "description": "Metabase publie 0.x pour l'OSS et 1.x pour l'EE : ce sont deux lignes distinctes, jamais comparables entre elles. Le groupe compatibility les isole. Le versioning ramene sa numerotation au contrat de la politique : le 2e chiffre est la montee fonctionnelle (minor, 0.64 -> 0.65), le 3e et le 4e sont des correctifs (patch, 0.64.3 -> 0.64.4 comme 0.64.4.3 -> 0.64.4.4, le groupe build etant compare sans compter pour une montee). Aucun groupe major : une version de Metabase n'est jamais une rupture au sens de la politique, le passage d'une edition a l'autre etant deja ecarte par compatibility.\n\nallowedVersions borne la veille a la ligne 0.64, qui est la LTS courante (fin de vie 2027-12-01). C'est le prix de la source github-tags : les tags exposent la ligne 0.65, non-LTS et en fin de vie le 2027-01-01, que les releases GitHub n'exposaient pas. Sans cette borne, Renovate ouvrirait une pull request permanente demandant de quitter la LTS pour une ligne plus courte. A editer au prochain changement de LTS, que la veille de fin de vie du moteur signale : elle confronte la version du lock a ce que l'editeur annonce pour sa ligne, et dit quand une ligne de support long plus recente existe. La forme predicat regex est voulue : `<0.65` tomberait dans le repli npm-semver, isVersion(\"0.65\") etant faux sous ce versioning.",
       "matchPackageNames": [
         "metabase/metabase"
       ],
-      "versioning": "regex:^v?(?<compatibility>\\d+)\\.(?<major>\\d+)\\.(?<minor>\\d+)(?:\\.(?<patch>\\d+))?$",
+      "versioning": "regex:^v?(?<compatibility>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)(?:\\.(?<build>\\d+))?$",
       "allowedVersions": "/^v?0\\.64\\./",
       "commitMessageTopic": "Metabase"
-    },
-    {
-      "description": "Correctifs de Metabase : automerge par defaut, le job d'apply deroule ensuite dans l'ordre du manifeste. Restreint au manifeste : une mise a jour de scalingo-watcher ne doit jamais etre fusionnee seule. Restreint a Metabase, seul outil dont le versioning fait de minor un correctif.",
-      "matchManagers": [
-        "custom.regex"
-      ],
-      "matchPackageNames": [
-        "metabase/metabase"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch"
-      ],
-      "automerge": true,
-      "groupName": "correctifs outils"
-    },
-    {
-      "description": "defaults.policy.minor: pr dans le manifeste, lu dans le depType par le preset base : les correctifs attendent une fusion humaine.",
-      "matchManagers": [
-        "custom.regex"
-      ],
-      "matchPackageNames": [
-        "metabase/metabase"
-      ],
-      "matchDepTypes": [
-        "/\\bminor=pr\\b/"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch"
-      ],
-      "automerge": false
-    },
-    {
-      "description": "Montees fonctionnelles de Metabase : PR par defaut.",
-      "matchManagers": [
-        "custom.regex"
-      ],
-      "matchPackageNames": [
-        "metabase/metabase"
-      ],
-      "matchUpdateTypes": [
-        "major"
-      ],
-      "automerge": false,
-      "groupName": "montee fonctionnelle des outils"
-    },
-    {
-      "description": "defaults.policy.major: auto dans le manifeste, lu dans le depType par le preset base : les montees fonctionnelles sont fusionnees seules.",
-      "matchManagers": [
-        "custom.regex"
-      ],
-      "matchPackageNames": [
-        "metabase/metabase"
-      ],
-      "matchDepTypes": [
-        "/\\bmajor=auto\\b/"
-      ],
-      "matchUpdateTypes": [
-        "major"
-      ],
-      "automerge": true
     }
   ]
 }

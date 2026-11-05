@@ -1564,8 +1564,8 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
     "",
     "**État** : `indemne`, aucun avis ne porte sur la version en service.",
     "`affectée`, au moins un avis la couvre, et la colonne `Correctif` donne la",
-    "version qui en sort, ou dit qu'aucune n'est atteignable dans sa ligne",
-    "d'édition. `plage illisible`, un avis existe dont la plage de versions n'a",
+    "version qui en sort, ou dit qu'aucune n'est atteignable dans sa ligne.",
+    "`plage illisible`, un avis existe dont la plage de versions n'a",
     "pas la forme attendue : il n'est ni retenu ni écarté. `sans verdict`, les",
     "avis n'ont pas pu être lus, ou la version en service n'est pas comparable.",
     "",
@@ -2493,8 +2493,8 @@ async function checkAdvisories(targets: AppEntry[], lock: Lock): Promise<void> {
  *
  * Un appel reseau par outil, le cache de lifecycleFor s'en chargeant, et un
  * verdict par couple outil, ligne et version : un parc heterogene juge chaque
- * version qu'il porte sans relire la source. Un outil absent de la table de fin
- * de vie est ecarte avant tout appel : la veille se tait sur lui, elle ne devine
+ * version qu'il porte sans relire la source. Un outil dont le nom chez la source
+ * de fin de vie est inconnu est ecarte avant tout appel : la veille se tait sur lui, elle ne devine
  * pas son nom chez la source.
  */
 async function checkLifecycle(targets: AppEntry[], lock: Lock): Promise<void> {

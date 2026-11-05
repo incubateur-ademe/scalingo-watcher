@@ -8,8 +8,8 @@
  * `pnpm init`, sans `run`, est la commande de pnpm qui cree un package.json :
  * elle ne lance pas ce script.
  *
- * Retient chaque app dont une variable d'environnement designe un outil de la
- * table UPSTREAM, et la decrit telle qu'elle tourne : version de l'outil, depot
+ * Retient chaque app dont une variable d'environnement designe un outil dont
+ * le moteur a le module (src/tools), et la decrit telle qu'elle tourne : version de l'outil, depot
  * et branche lies a l'app, sha du deploiement le plus recent, version de sa base
  * PostgreSQL. Un manifeste existant n'est ecrase qu'avec --force.
  *
@@ -51,7 +51,8 @@ import {
 } from "./apply.ts";
 import { FLOATING, REGION_NAME } from "./audit.ts";
 import { accessModes, flagValue, flagValues, resolvePaths, shown, type Paths } from "./options.ts";
-import { toolName, UPSTREAM } from "./upstream.ts";
+import { TOOLS } from "./tools/index.ts";
+import { toolName, upstreamOf } from "./upstream.ts";
 
 export type InitEntry = AppRef & {
   // Nom du proprietaire quand ce n'est pas le compte de l'acces : l'app est
@@ -181,7 +182,7 @@ async function describeApp(ref: AppRef, accountId: string | null): Promise<Outco
     `${apiHost(ref.region)}/v1/apps/${ref.app}/variables`,
     ref.region,
   );
-  const tools = Object.keys(UPSTREAM).flatMap((env) => {
+  const tools = TOOLS.map((t) => t.env).flatMap((env) => {
     const version = variables.find((v) => v.name === env)?.value;
     return version === undefined ? [] : [{ env, version }];
   });
@@ -224,7 +225,7 @@ async function describeApp(ref: AppRef, accountId: string | null): Promise<Outco
       ...ref,
       ...(foreignOwner !== undefined ? { foreignOwner } : {}),
       source: { repo: `${link.owner}/${link.repo}`, branch: link.branch, sha },
-      tool: { ...tool, upstream: UPSTREAM[tool.env].repo },
+      tool: { ...tool, upstream: upstreamOf(tool)!.repo },
       notes,
     },
   };
