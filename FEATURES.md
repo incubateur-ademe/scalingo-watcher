@@ -268,8 +268,8 @@ un groupe `compatibility` qui isole les lignes OSS et Enterprise. Effet de bord
 à connaître : `major` désigne le deuxième chiffre (0.63 vers 0.64, montée
 fonctionnelle) et `minor` le troisième (0.63.15 vers 0.63.16, correctif).
 
-**[fait]** Délai de décantation de cinq jours avant toute proposition, pour ne
-pas déployer une release publiée le matin même.
+**[fait]** Délai de décantation de cinq jours avant toute proposition d'une
+version d'outil, pour ne pas déployer une release publiée le matin même.
 
 **[fait]** Fusion automatique sur les correctifs, pull request sur les montées
 fonctionnelles. Les deux règles sont restreintes au manifeste : une mise à jour
@@ -280,10 +280,9 @@ en semver, sans fusion automatique.
 **[fait]** Jamais de fusion automatique sur un changement de SHA : un condensat
 n'a ni version sémantique ni journal des modifications, donc rien à classifier.
 
-**[fait]** Les alertes de vulnérabilité passent devant le délai de décantation et
-sont étiquetées `securite`. Elles ne sont pas fusionnées d'office. Renovate
-applique ce réglage à toute dépendance, scalingo-watcher compris chez un
-consommateur, par-dessus ses règles.
+**[fait]** Les alertes de vulnérabilité sont étiquetées `securite`. Elles ne
+sont pas fusionnées d'office. Renovate applique ce réglage à toute dépendance,
+scalingo-watcher compris chez un consommateur, par-dessus ses règles.
 
 **[fait]** Chaque entrée est nommée par son application. Sans cela le tableau de
 bord affichait plusieurs fois `metabase/metabase v0.63.15` sans dire de quelle

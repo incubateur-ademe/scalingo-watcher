@@ -587,9 +587,13 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
   );
   // La regle du preset watcher doit poser null et non s'absenter : absente, la
   // valeur globale de base s'appliquerait, et un parc attendrait cinq jours
-  // avant de se voir proposer la release.
-  const releaseAge = (manager: string, packageName: string, depType: string) =>
-    ruleValue(RULES, { manager, packageName, datasource: "github-tags", depType, updateType: "minor" }, "minimumReleaseAge");
+  // avant de se voir proposer la release. Le delai effectif est calcule ici,
+  // check confondant null et undefined.
+  const releaseAge = (manager: string, packageName: string, depType: string) => {
+    const dep = { manager, packageName, datasource: "github-tags", depType, updateType: "minor" };
+    const fromRules = ruleValue(RULES, dep, "minimumReleaseAge");
+    return fromRules === undefined ? preset("base").minimumReleaseAge : fromRules;
+  };
   check(
     "une release de scalingo-watcher est proposee sans decantation, Metabase garde celle de base",
     [
@@ -597,9 +601,8 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
       releaseAge("renovate-config", "incubateur-ademe/scalingo-watcher", ""),
       releaseAge("custom.regex", "incubateur-ademe/scalingo-watcher", "documentation"),
       releaseAge("custom.regex", "metabase/metabase", "outil minor= major="),
-      preset("base").minimumReleaseAge,
     ],
-    [null, null, null, undefined, "5 days"],
+    [null, null, null, "5 days"],
   );
   check(
     "Renovate suit les versions de l'outil citees hors des workflows et des presets",
