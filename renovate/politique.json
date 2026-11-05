@@ -1,0 +1,80 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Politique de fusion des versions d'un outil, commune a tous les outils et traduite depuis defaults.policy du manifeste, que le preset base porte dans le depType. Un parc ne l'etend pas : chaque preset d'outil l'etend par reference relative, ./politique(<depot>), le parametre etant le depot amont tel que l'annotation du manifeste le nomme. La reference relative herite du tag du preset qui la porte, et demande Renovate 44.29.0 ou plus recent.",
+    "Le contrat est celui du semver : patch est un correctif, minor une montee fonctionnelle, major une rupture. Le preset de l'outil pose le versioning qui ramene sa numerotation a ce contrat. Un outil sans preset n'etend pas cette politique, et Renovate ne fusionne alors jamais seul ses versions : la politique ne vaut que pour un versioning verifie."
+  ],
+  "packageRules": [
+    {
+      "description": "Correctifs et montees fonctionnelles dans des branches separees : sans cela Renovate ne propose que la plus haute des deux, et un correctif attendrait la relecture d'une montee.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "{{arg0}}"
+      ],
+      "separateMinorPatch": true
+    },
+    {
+      "description": "Correctifs : fusionnes seuls par defaut, le job d'apply deroule ensuite dans l'ordre du manifeste. Restreint au manifeste : une mise a jour de scalingo-watcher ne doit jamais etre fusionnee seule.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "{{arg0}}"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": true,
+      "groupName": "correctifs outils"
+    },
+    {
+      "description": "defaults.policy.minor: pr dans le manifeste : les correctifs attendent une fusion humaine.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "{{arg0}}"
+      ],
+      "matchDepTypes": [
+        "/\\bminor=pr\\b/"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Montees fonctionnelles et ruptures : PR par defaut.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "{{arg0}}"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "major"
+      ],
+      "automerge": false,
+      "groupName": "montee fonctionnelle des outils"
+    },
+    {
+      "description": "defaults.policy.major: auto dans le manifeste : les montees fonctionnelles sont fusionnees seules. Jamais une rupture, qui change le contrat de l'outil et merite toujours une relecture.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "{{arg0}}"
+      ],
+      "matchDepTypes": [
+        "/\\bmajor=auto\\b/"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "automerge": true
+    }
+  ]
+}

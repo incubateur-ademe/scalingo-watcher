@@ -2,15 +2,11 @@
  * L'amont d'un outil : ou il publie ses versions, comment les ranger en lignes,
  * et ce qu'il dit des failles de celles-ci.
  *
- * Le rapprochement outil - depot est le seul que rien ne permet de deriver : le
- * nom de la variable de version dit quel buildpack la lit, pas ou l'outil publie
- * ses releases. La table se limite aux depots verifies : un mauvais
- * rapprochement produirait un "a jour" faux, ce qui est pire que
- * "amont inconnu".
- * A confirmer avant ajout : clamav, geoserver, opensearch-dashboards, nginx.
- *
- * Le champ tool.upstream du manifeste complete ou surcharge cette table.
+ * Ce que le moteur sait de chaque outil vit dans son module, sous src/tools.
+ * Le champ tool.upstream du manifeste le complete ou le surcharge.
  */
+
+import { toolOf } from "./tools/index.ts";
 
 export type Upstream = {
   /** Depot GitHub qui publie les releases, au format owner/name. */
@@ -27,22 +23,8 @@ export type Upstream = {
    * inconnu.
    */
   lifecycle?: string;
-};
-
-/** Cle : la variable de version lue par le buildpack, celle de tool.env. */
-export const UPSTREAM: Record<string, Upstream & { name: string }> = {
-  // Deux lignes publiees en parallele : v0.x pour l'edition OSS, v1.x pour
-  // l'Enterprise. Le premier chiffre designe l'edition et non une version :
-  // v1.52.2 date de 2024 quand v0.63.16 date de 2026.
-  METABASE_VERSION: { name: "Metabase", repo: "metabase/metabase", line: 1, lifecycle: "metabase" },
-  GRAFANA_VERSION: { name: "Grafana", repo: "grafana/grafana", line: 1, lifecycle: "grafana" },
-  LOGSTASH_VERSION: { name: "Logstash", repo: "elastic/logstash", line: 1, lifecycle: "logstash" },
-  KIBANA_VERSION: { name: "Kibana", repo: "elastic/kibana", line: 1, lifecycle: "kibana" },
-  PROMETHEUS_VERSION: { name: "Prometheus", repo: "prometheus/prometheus", line: 1, lifecycle: "prometheus" },
-  // Le depot publie aujourd'hui la Community Build, numerotee 26.x, et non la
-  // SonarQube Server numerotee par annee : ce sont deux produits distincts chez
-  // endoflife.date, et les confondre daterait la fin de vie de l'autre.
-  SONARQUBE_VERSION: { name: "SonarQube", repo: "SonarSource/sonarqube", line: 1, lifecycle: "sonarqube-community" },
+  /** Vrai quand les avis ecrivent l'edition en `x` litteral, voir ToolModule. */
+  editionWildcard?: boolean;
 };
 
 const DEFAULT_LINE = 1;
@@ -52,22 +34,29 @@ export type ToolDeclaration = {
   upstream?: { repo: string; line?: number; lifecycle?: string };
 };
 
-/** Amont d'un outil : celui que declare le manifeste, sinon celui de la table. */
+/**
+ * Amont d'un outil : celui que declare le manifeste, sinon celui de son module.
+ *
+ * La forme des avis suit l'outil et non le depot : un manifeste qui designe un
+ * autre depot pour Metabase garde la lecture du `x` d'edition.
+ */
 export function upstreamOf(tool: ToolDeclaration): Upstream | null {
-  const known = UPSTREAM[tool.env];
+  const known = toolOf(tool.env);
+  const edition = known?.editionWildcard ? { editionWildcard: true } : {};
   if (tool.upstream) {
     return {
       repo: tool.upstream.repo,
-      line: tool.upstream.line ?? known?.line ?? DEFAULT_LINE,
-      lifecycle: tool.upstream.lifecycle ?? known?.lifecycle,
+      line: tool.upstream.line ?? known?.upstream.line ?? DEFAULT_LINE,
+      lifecycle: tool.upstream.lifecycle ?? known?.upstream.lifecycle,
+      ...edition,
     };
   }
-  return known ? { repo: known.repo, line: known.line, lifecycle: known.lifecycle } : null;
+  return known ? { ...known.upstream, ...edition } : null;
 }
 
-/** Nom de l'outil dans le rapport : celui de la table, a defaut celui de sa variable. */
+/** Nom de l'outil dans le rapport : celui de son module, a defaut celui de sa variable. */
 export function toolName(env: string): string {
-  const known = UPSTREAM[env]?.name;
+  const known = toolOf(env)?.name;
   if (known) return known;
   const base = env.replace(/_VERSION$/, "").toLowerCase().replace(/_/g, " ");
   return base.charAt(0).toUpperCase() + base.slice(1);
@@ -174,7 +163,8 @@ export type Advisory = {
 
 
 /**
- * Un texte d'avis dont l'edition est substituee par celle de la version jugee.
+ * Un texte d'avis dont l'edition est substituee par celle de la version jugee,
+ * chez un outil dont le module le demande.
  *
  * Metabase ecrit l'edition en `x` litteral, `>= x.64.0, < x.64.3.4` par exemple,
  * pour couvrir d'un seul avis la ligne OSS et la ligne Enterprise. Ce n'est pas
@@ -185,12 +175,12 @@ export type Advisory = {
  * Un `x` qui ne precede pas un chiffre reste tel quel : dans `0.54.x` c'est un
  * joker sur le reste de la version, que ce releve ne sait pas lire.
  */
-const substituteEdition = (raw: string, judged: Version) =>
-  raw.replace(/(^|[^\w.])x(?=\.\d)/g, (_, before: string) => `${before}${judged[0] ?? 0}`);
+const substituteEdition = (raw: string, judged: Version, edition: boolean) =>
+  edition ? raw.replace(/(^|[^\w.])x(?=\.\d)/g, (_, before: string) => `${before}${judged[0] ?? 0}`) : raw;
 
 /** Les versions qu'un texte d'avis nomme, quelle que soit sa forme. */
-const versionsNamed = (raw: string, judged: Version): Version[] =>
-  [...substituteEdition(raw, judged).matchAll(/\d+(?:\.\d+)*/g)].map((m) => m[0].split(".").map(Number));
+const versionsNamed = (raw: string, judged: Version, edition: boolean): Version[] =>
+  [...substituteEdition(raw, judged, edition).matchAll(/\d+(?:\.\d+)*/g)].map((m) => m[0].split(".").map(Number));
 
 /** Une borne ramenee a une suite de chiffres, ou null si ce n'en est pas une. */
 const readBound = (raw: string): string | null => {
@@ -210,8 +200,8 @@ const readBound = (raw: string): string | null => {
  * se devine : c'est judgeAdvisories qui tranche ensuite, par le correctif que
  * l'avis annonce lui-meme.
  */
-export function readRange(raw: string, judged: Version): Range | null {
-  const parts = substituteEdition(raw, judged)
+export function readRange(raw: string, judged: Version, edition: boolean): Range | null {
+  const parts = substituteEdition(raw, judged, edition)
     .split(",")
     .map((p) => p.trim())
     .filter(Boolean);
@@ -297,7 +287,7 @@ const formatLike = (model: string, v: Version) => (model.trim().startsWith("v") 
 export function judgeAdvisories(
   advisories: readonly Advisory[],
   version: string,
-  line: number,
+  { line, editionWildcard = false }: Pick<Upstream, "line" | "editionWildcard">,
 ): AdvisoryVerdict | null {
   const judged = pinnedVersion(version);
   if (!judged) return null;
@@ -330,9 +320,9 @@ export function judgeAdvisories(
    */
   const judgeOne = (advisory: Advisory, v: Version) => {
     const entries = (advisory.vulnerabilities ?? []).filter((e) => e.vulnerable_version_range);
-    const patchedIn = (raw: string | null) => versionsNamed(raw ?? "", v).filter((x) => inLine(x, v));
+    const patchedIn = (raw: string | null) => versionsNamed(raw ?? "", v, editionWildcard).filter((x) => inLine(x, v));
     const announced = top(entries.flatMap((e) => patchedIn(e.patched_versions)));
-    const named = entries.flatMap((e) => versionsNamed(e.vulnerable_version_range!, v)).filter((x) => inLine(x, v));
+    const named = entries.flatMap((e) => versionsNamed(e.vulnerable_version_range!, v, editionWildcard)).filter((x) => inLine(x, v));
     if (named.length === 0 && !announced) return null;
 
     let affected = false;
@@ -341,7 +331,7 @@ export function judgeAdvisories(
     const blind: string[] = [];
     for (const entry of entries) {
       const raw = entry.vulnerable_version_range!;
-      const range = readRange(raw, v);
+      const range = readRange(raw, v, editionWildcard);
       if (!range) {
         blind.push(raw);
         continue;
@@ -554,8 +544,8 @@ const dayOf = (raw: string | null): string | null => {
  * Confronte une version a la fin de vie de sa ligne.
  *
  * Rend null quand rien ne se rapproche : version flottante, ou aucune ligne de
- * la source qui porte la version en service. C'est la regle que la table des
- * amonts s'impose deja : un outil que la source ne connait pas reste muet, un
+ * la source qui porte la version en service. C'est la regle que les modules
+ * d'outil s'imposent deja : un outil que la source ne connait pas reste muet, un
  * faux "supporte" etant pire qu'un "fin de vie inconnue".
  *
  * La ligne en service est celle dont les composants prefixent la version jugee,

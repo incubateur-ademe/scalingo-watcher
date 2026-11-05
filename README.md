@@ -18,7 +18,8 @@ prévenu avant que sa ligne cesse de recevoir des correctifs et quand une nouvel
 ligne de support long est désignée.
 
 Le périmètre éprouvé est Metabase. Le moteur prend en charge tout outil dont le
-buildpack lit sa version dans une variable d'environnement.
+buildpack lit sa version dans une variable d'environnement, et ce qu'il sait de
+chacun tient dans un module (voir [Ajouter un outil](#ajouter-un-outil)).
 
 La liste complète des comportements est dans [FEATURES.md](FEATURES.md).
 
@@ -221,7 +222,8 @@ Les quatre appelants complets sont dans le [template](https://github.com/incubat
 | Preset | Contenu |
 |---|---|
 | [`renovate/base`](renovate/base.json) | Lecture du manifeste par deux customManagers (commit du dépôt applicatif, version de l'outil et `defaults.policy`), aucune montée pour une application en pause, délai de cinq jours, dépôts applicatifs toujours en PR, alertes de vulnérabilité, messages de commit |
-| [`renovate/metabase`](renovate/metabase.json) | Versioning Metabase (lignes OSS et Enterprise séparées), automerge selon `defaults.policy` : sans politique, correctifs fusionnés seuls et montées fonctionnelles en PR |
+| [`renovate/metabase`](renovate/metabase.json) | Module Renovate de Metabase : versioning (lignes OSS et Enterprise séparées), ligne suivie, et politique commune étendue pour `metabase/metabase` |
+| [`renovate/politique`](renovate/politique.json) | Politique de fusion selon `defaults.policy`, commune à tous les outils : sans politique, correctifs fusionnés seuls et montées fonctionnelles en PR, jamais une rupture. Étendue par chaque preset d'outil, jamais par le parc |
 | [`renovate/watcher`](renovate/watcher.json) | Mises à jour de l'outil : workflows épinglés par sha, presets, versions citées par la documentation et le `$schema` du manifeste, une PR groupée, un jour de délai, jamais fusionnée seule |
 
 Le consommateur les étend, épinglés par tag, et active les managers qui les
@@ -242,6 +244,36 @@ lisent :
 
 Le fuseau, le planning et les textes du tableau de bord restent dans la
 configuration du consommateur.
+
+Le preset d'un outil étend `politique` par une référence relative, qui hérite de
+son tag : elle demande Renovate 44.29.0 ou plus récent, ce que l'application
+Mend hébergée fait tourner.
+
+## Ajouter un outil
+
+Ce que le moteur sait d'un outil vit dans un module, un fichier par outil sous
+[`src/tools`](src/tools) : sa variable de version, son nom, le dépôt qui publie
+ses releases, ce qui forme une ligne de versions, son nom chez endoflife.date,
+et la forme de ses avis de sécurité. `init` reconnaît une application à cette
+variable, l'audit et le rapport en tirent l'amont.
+
+1. Créer `src/tools/<outil>.ts` sur le modèle de
+   [`metabase.ts`](src/tools/metabase.ts), et l'ajouter à `TOOLS` dans
+   [`src/tools/index.ts`](src/tools/index.ts). N'y porter que des rapprochements
+   vérifiés : un mauvais dépôt donnerait un « à jour » faux.
+2. Pour que Renovate applique `defaults.policy` à ses versions, créer
+   `renovate/<outil>.json`. Il étend `./politique(<dépôt>)` et pose le versioning
+   qui ramène la numérotation de l'outil au contrat de la politique : `patch`
+   est un correctif, `minor` une montée fonctionnelle, `major` une rupture. Un
+   outil en semver strict n'a besoin d'aucun versioning sur mesure. Le module le
+   nomme dans `renovatePreset`, et les parcs qui le déploient ajoutent ce preset
+   à leurs `extends`.
+3. Sans preset, Renovate suit les versions de l'outil mais ne fusionne jamais
+   seul : la politique ne vaut que pour un versioning vérifié.
+
+Les tests vérifient que chaque preset d'outil étend la politique avec le dépôt
+de son module, qu'il ne pose aucun automerge lui-même, et qu'un outil sans
+preset n'est jamais fusionné seul.
 
 ## Les fichiers d'un parc
 

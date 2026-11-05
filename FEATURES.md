@@ -150,10 +150,16 @@ fonctionnels. Les supprimer coupe la veille silencieusement.
 **[fait]** Région libre, de la forme `^[a-z0-9-]+$` : le schéma ne fige aucune
 liste. Elle finit dans un nom d'hôte, rien d'autre n'y entre.
 
-**[fait]** Une table d'amonts connus, partagée par l'audit et l'apply, dit où
-chaque outil publie ses versions, indexée par sa variable de version. Le champ
-`tool.upstream` la complète pour un outil qu'elle ne connaît pas, ou la
+**[fait]** Un module par outil, sous `src/tools`, partagé par l'audit, l'apply
+et `init`, dit où l'outil publie ses versions, indexé par sa variable de
+version. Le champ `tool.upstream` le complète pour un outil sans module, ou le
 surcharge. Le titre de section du rapport et les liens de release en dérivent.
+
+**[fait]** La lecture du `x` d'édition dans les avis de sécurité est un drapeau
+du module, posé pour Metabase seul. Elle s'appliquait à tous les outils : chez
+un autre, un `x` est un joker sur la fin de la version, et le remplacer
+fabriquait une borne que l'avis ne donne pas. Un manifeste qui désigne un autre
+dépôt pour un outil garde la lecture de son module.
 
 **[fait]** Un champ renommé reste accepté sous son ancien nom, avec un
 avertissement au `--validate` et au plan. Les deux noms présents et en
@@ -264,18 +270,33 @@ donc sa politique, et déplacer la source une nouvelle fois ne demandera pas de
 retoucher ces règles.
 
 **[fait]** Versionnage sur mesure pour Metabase, dans le preset `metabase`, avec
-un groupe `compatibility` qui isole les lignes OSS et Enterprise. Effet de bord
-à connaître : `major` désigne le deuxième chiffre (0.63 vers 0.64, montée
-fonctionnelle) et `minor` le troisième (0.63.15 vers 0.63.16, correctif).
+un groupe `compatibility` qui isole les lignes OSS et Enterprise. Il ramène sa
+numérotation au contrat de la politique commune : le deuxième chiffre est une
+montée fonctionnelle (`minor`, 0.64 vers 0.65), le troisième et le quatrième
+des correctifs (`patch`, 0.64.3 vers 0.64.4 comme 0.64.4.3 vers 0.64.4.4).
+Jusqu'à la v1.3, ce versioning faisait du deuxième chiffre un `major` et du
+troisième un `minor`, et les règles de fusion étaient propres à Metabase. Le
+classement correctif ou montée est resté le même.
 
 **[fait]** Délai de décantation de cinq jours avant toute proposition, pour ne
 pas déployer une release publiée le matin même.
 
 **[fait]** Fusion automatique sur les correctifs, pull request sur les montées
-fonctionnelles. Les deux règles sont restreintes au manifeste : une mise à jour
-de l'outil lui-même n'est jamais fusionnée seule. Elles ne visent que Metabase,
-dont le versioning fait du troisième chiffre un correctif. Un autre outil reste
-en semver, sans fusion automatique.
+fonctionnelles, jamais de fusion seule d'une rupture. Ces règles vivent dans le
+preset `politique`, commun à tous les outils, et sont restreintes au manifeste :
+une mise à jour de l'outil lui-même n'est jamais fusionnée seule. Chaque preset
+d'outil l'étend pour son seul dépôt, `./politique(metabase/metabase)`, après un
+versioning qui fait de `patch` un correctif et de `minor` une montée. Un outil
+sans preset reste en semver, sans fusion automatique.
+
+**[fait]** Correctifs et montées fonctionnelles d'un même outil partent dans des
+branches séparées (`separateMinorPatch`) : sinon Renovate ne propose que la plus
+haute des deux, et un correctif attendrait la relecture d'une montée. Les
+branches de groupe s'appellent `renovate/patch-correctifs-outils` et
+`renovate/montee-fonctionnelle-des-outils`. Jusqu'à la v1.3, c'étaient
+`renovate/correctifs-outils` et `renovate/major-montee-fonctionnelle-des-outils`,
+et la montée des presets ferme une fois les pull requests ouvertes sous ces
+noms pour les rouvrir sous les nouveaux.
 
 **[fait]** Jamais de fusion automatique sur un changement de SHA : un condensat
 n'a ni version sémantique ni journal des modifications, donc rien à classifier.
@@ -1406,5 +1427,5 @@ arrive vide. Vérifié en production sur le premier parc.
 l'organisation de l'outil.
 
 **[à faire]** Outils autres que Metabase de bout en bout. Le moteur les prend en
-charge, mais seul Metabase a un preset de versioning, et la table d'amonts se
-limite aux dépôts vérifiés.
+charge, mais seul Metabase a un preset d'outil, et les modules se limitent aux
+dépôts vérifiés. La recette d'ajout est dans le README.

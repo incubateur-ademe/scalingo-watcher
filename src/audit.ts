@@ -70,7 +70,7 @@ const regionOf = (name: string): Region => ({ name, api: `https://api.${name}.sc
 
 /**
  * Depot amont d'une variable de version : celui que le manifeste declare pour
- * cette app, sinon celui de la table UPSTREAM. Le nom du depot buildpack donne
+ * cette app, sinon celui du module de l'outil. Le nom du depot buildpack donne
  * la variable (<name>-buildpack -> <NAME>_VERSION), mais rien ne dit ou l'outil
  * publie ses versions. Resolu app par app, comme le fait apply : deux apps
  * peuvent lire la meme variable et publier ailleurs.
@@ -666,7 +666,7 @@ async function analyse(report: AppReport, officialBuildpacks: Set<string>, findi
       try {
         const published = await advisoriesFor(upstream.repo, githubJson);
         const current = declared && !FLOATING.has(declared.trim()) ? declared : null;
-        const verdict = published && current ? judgeAdvisories(published, current, upstream.line) : null;
+        const verdict = published && current ? judgeAdvisories(published, current, upstream) : null;
         if (verdict) {
           entry.advisory = {
             hits: verdict.hits.map((h) => h.cve ?? h.ghsa),
