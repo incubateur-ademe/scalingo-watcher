@@ -308,7 +308,7 @@ alpha-metabase, branche main, en 4b7c2f1`.
 **[fait]** Les mises à jour de l'outil sont suivies par le preset `watcher` : sha
 des workflows appelants (gestionnaire `github-actions`) et tag des presets
 (gestionnaire `renovate-config`), avancés ensemble dans une pull request
-`scalingo-watcher`, un jour après la release, jamais fusionnée seule. Les
+`scalingo-watcher`, dès la release, jamais fusionnée seule. Les
 workflows appelants sont épinglés par sha avec la version en commentaire.
 
 **[fait]** Le consommateur n'active que `custom.regex`, `github-actions` et
@@ -688,10 +688,11 @@ déclarant l'environment. Sans politique de branches, toute branche du dépôt
 pouvait les lire.
 
 **[fait]** L'outil est récupéré au sha exact du workflow réutilisable appelé, sans
-conserver d'identifiants dans le clone. Côté consommateur, l'épinglage par sha,
-la décantation d'un jour et l'absence de fusion automatique des mises à jour
-de l'outil limitent l'effet d'un tag malveillant, qui s'exécuterait avec les
-secrets d'accès à Scalingo.
+conserver d'identifiants dans le clone. Côté consommateur, l'épinglage par sha et
+l'absence de fusion automatique des mises à jour de l'outil limitent l'effet
+d'un tag malveillant, qui s'exécuterait avec les secrets d'accès à Scalingo.
+La pull request est proposée sans délai de décantation : c'est sa relecture
+avant fusion qui fait barrage, pas le temps écoulé depuis la release.
 
 **[à faire]** Approbation humaine avant les montées fonctionnelles. L'environment
 la rend possible en une case à cocher, mais l'imposer telle quelle bloquerait

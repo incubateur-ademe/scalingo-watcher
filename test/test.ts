@@ -426,6 +426,7 @@ const preset = (name: string) =>
   JSON.parse(readFileSync(join(import.meta.dirname, "..", "renovate", `${name}.json`), "utf8")) as {
     customManagers?: CustomManager[];
     packageRules?: PackageRule[];
+    minimumReleaseAge?: string | null;
   };
 const regexOf = (pattern: string) => new RegExp(pattern.replace(/^\/|\/$/g, ""));
 function extract(manager: CustomManager | undefined, src: string): Record<string, string>[] {
@@ -583,6 +584,22 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
     "une version de scalingo-watcher arrive dans la PR de l'outil, jamais fusionnee seule",
     [watcher("github-actions", "github-tags", "action"), watcher("renovate-config", "github-tags", ""), watcher("custom.regex", "github-tags", "documentation")],
     Array(3).fill(Array(2).fill([false, "scalingo-watcher"])),
+  );
+  // La regle du preset watcher doit poser null et non s'absenter : absente, la
+  // valeur globale de base s'appliquerait, et un parc attendrait cinq jours
+  // avant de se voir proposer la release.
+  const releaseAge = (manager: string, packageName: string, depType: string) =>
+    ruleValue(RULES, { manager, packageName, datasource: "github-tags", depType, updateType: "minor" }, "minimumReleaseAge");
+  check(
+    "une release de scalingo-watcher est proposee sans decantation, Metabase garde celle de base",
+    [
+      releaseAge("github-actions", "incubateur-ademe/scalingo-watcher", "action"),
+      releaseAge("renovate-config", "incubateur-ademe/scalingo-watcher", ""),
+      releaseAge("custom.regex", "incubateur-ademe/scalingo-watcher", "documentation"),
+      releaseAge("custom.regex", "metabase/metabase", "outil minor= major="),
+      preset("base").minimumReleaseAge,
+    ],
+    [null, null, null, undefined, "5 days"],
   );
   check(
     "Renovate suit les versions de l'outil citees hors des workflows et des presets",

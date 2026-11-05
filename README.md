@@ -222,7 +222,7 @@ Les quatre appelants complets sont dans le [template](https://github.com/incubat
 |---|---|
 | [`renovate/base`](renovate/base.json) | Lecture du manifeste par deux customManagers (commit du dépôt applicatif, version de l'outil et `defaults.policy`), aucune montée pour une application en pause, délai de cinq jours, dépôts applicatifs toujours en PR, alertes de vulnérabilité, messages de commit |
 | [`renovate/metabase`](renovate/metabase.json) | Versioning Metabase (lignes OSS et Enterprise séparées), automerge selon `defaults.policy` : sans politique, correctifs fusionnés seuls et montées fonctionnelles en PR |
-| [`renovate/watcher`](renovate/watcher.json) | Mises à jour de l'outil : workflows épinglés par sha, presets, versions citées par la documentation et le `$schema` du manifeste, une PR groupée, un jour de délai, jamais fusionnée seule |
+| [`renovate/watcher`](renovate/watcher.json) | Mises à jour de l'outil : workflows épinglés par sha, presets, versions citées par la documentation et le `$schema` du manifeste, une PR groupée, proposée dès la release, jamais fusionnée seule |
 
 Le consommateur les étend, épinglés par tag, et active les managers qui les
 lisent :
@@ -317,8 +317,8 @@ facultatif `RELEASE_TOKEN` ouvre cette pull request avec un jeton qui déclenche
 la CI.
 
 Le template est un dépôt à part, seule source de son contenu. Renovate le
-tient à jour comme un parc : une pull request par release, un jour après sa
-publication, dont la validation tourne avec la nouvelle version. La CI de
+tient à jour comme un parc : une pull request par release, dès sa publication,
+dont la validation tourne avec la nouvelle version. La CI de
 l'outil récupère le template et vérifie que chacun de ses appelants mappe les
 secrets du workflow à la version qu'il épingle. Les secrets qu'une version en
 cours ajoute sont signalés en avertissement, à mapper dans le template une fois
