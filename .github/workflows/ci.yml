@@ -39,6 +39,12 @@ jobs:
 
       - run: pnpm test
 
+      # Les presets de renovate/ ne sont lus que par Renovate chez les parcs :
+      # sans ce controle, une cle invalide ne se voit qu'a son passage suivant
+      # chez chaque parc.
+      - name: presets Renovate
+        run: pnpm dlx --package=renovate@44.170.0 renovate-config-validator --strict renovate/*.json
+
       # Le plan parcourt tout le moteur sans rien ecrire : il prend le parc de
       # test quand il existe, et a defaut le manifeste a la racine.
       - name: plan

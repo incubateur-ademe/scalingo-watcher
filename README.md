@@ -338,7 +338,8 @@ directement, sans étape de build. La 26 passe LTS le 28 octobre 2026, la 24
 entre en maintenance le 20 octobre 2026.
 
 Les tests tournent hors ligne sur le parc fictif de `test/fixtures/`. La CI
-([`ci.yml`](.github/workflows/ci.yml)) lance le typecheck, les tests et un plan
+([`ci.yml`](.github/workflows/ci.yml)) lance le typecheck, les tests, la
+validation des presets de `renovate/` par `renovate-config-validator` et un plan
 sur ce parc, sans aucun secret.
 
 Les releases suivent les commits conventionnels (`feat:`, `fix:`, etc.).

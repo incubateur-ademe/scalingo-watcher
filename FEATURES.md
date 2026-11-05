@@ -782,7 +782,9 @@ invariants, pour s'assurer qu'ils échouent quand ils le doivent.
 **[fait]** La CI lance aussi le typecheck et un plan complet sur le parc de test,
 sans aucun secret. Node exécute le TypeScript en retirant les annotations sans
 les vérifier : sans typecheck, une lecture de champ inexistant n'apparaît qu'à
-l'exécution.
+l'exécution. Elle valide enfin les presets de `renovate/` par
+`renovate-config-validator` : Renovate ne les lit que chez les parcs, où une clé
+invalide ne se voit qu'à son passage suivant.
 
 ## 7. Limites connues
 
