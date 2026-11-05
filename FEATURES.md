@@ -268,8 +268,8 @@ un groupe `compatibility` qui isole les lignes OSS et Enterprise. Effet de bord
 à connaître : `major` désigne le deuxième chiffre (0.63 vers 0.64, montée
 fonctionnelle) et `minor` le troisième (0.63.15 vers 0.63.16, correctif).
 
-**[fait]** Délai de décantation de cinq jours avant toute proposition, pour ne
-pas déployer une release publiée le matin même.
+**[fait]** Délai de décantation de cinq jours avant toute proposition d'une
+version d'outil, pour ne pas déployer une release publiée le matin même.
 
 **[fait]** Fusion automatique sur les correctifs, pull request sur les montées
 fonctionnelles. Les deux règles sont restreintes au manifeste : une mise à jour
@@ -280,10 +280,9 @@ en semver, sans fusion automatique.
 **[fait]** Jamais de fusion automatique sur un changement de SHA : un condensat
 n'a ni version sémantique ni journal des modifications, donc rien à classifier.
 
-**[fait]** Les alertes de vulnérabilité passent devant le délai de décantation et
-sont étiquetées `securite`. Elles ne sont pas fusionnées d'office. Renovate
-applique ce réglage à toute dépendance, scalingo-watcher compris chez un
-consommateur, par-dessus ses règles.
+**[fait]** Les alertes de vulnérabilité sont étiquetées `securite`. Elles ne
+sont pas fusionnées d'office. Renovate applique ce réglage à toute dépendance,
+scalingo-watcher compris chez un consommateur, par-dessus ses règles.
 
 **[fait]** Chaque entrée est nommée par son application. Sans cela le tableau de
 bord affichait plusieurs fois `metabase/metabase v0.63.15` sans dire de quelle
@@ -308,7 +307,7 @@ alpha-metabase, branche main, en 4b7c2f1`.
 **[fait]** Les mises à jour de l'outil sont suivies par le preset `watcher` : sha
 des workflows appelants (gestionnaire `github-actions`) et tag des presets
 (gestionnaire `renovate-config`), avancés ensemble dans une pull request
-`scalingo-watcher`, un jour après la release, jamais fusionnée seule. Les
+`scalingo-watcher`, dès la release, jamais fusionnée seule. Les
 workflows appelants sont épinglés par sha avec la version en commentaire.
 
 **[fait]** Le consommateur n'active que `custom.regex`, `github-actions` et
@@ -688,10 +687,11 @@ déclarant l'environment. Sans politique de branches, toute branche du dépôt
 pouvait les lire.
 
 **[fait]** L'outil est récupéré au sha exact du workflow réutilisable appelé, sans
-conserver d'identifiants dans le clone. Côté consommateur, l'épinglage par sha,
-la décantation d'un jour et l'absence de fusion automatique des mises à jour
-de l'outil limitent l'effet d'un tag malveillant, qui s'exécuterait avec les
-secrets d'accès à Scalingo.
+conserver d'identifiants dans le clone. Côté consommateur, l'épinglage par sha et
+l'absence de fusion automatique des mises à jour de l'outil limitent l'effet
+d'un tag malveillant, qui s'exécuterait avec les secrets d'accès à Scalingo.
+La pull request est proposée sans délai de décantation : c'est sa relecture
+avant fusion qui fait barrage, pas le temps écoulé depuis la release.
 
 **[à faire]** Approbation humaine avant les montées fonctionnelles. L'environment
 la rend possible en une case à cocher, mais l'imposer telle quelle bloquerait
