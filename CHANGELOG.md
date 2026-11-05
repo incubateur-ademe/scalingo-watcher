@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.3.0...v1.4.0) (2026-11-05)
+
+
+### Nouveautés
+
+* **apply:** refuser un deploiement qui retire un buildpack en service ([#43](https://github.com/incubateur-ademe/scalingo-watcher/issues/43)) ([897c762](https://github.com/incubateur-ademe/scalingo-watcher/commit/897c762d2670a9a626dfeb6da2a0a597e5a18c6e))
+* **tools:** un module par outil, une politique Renovate commune ([#41](https://github.com/incubateur-ademe/scalingo-watcher/issues/41)) ([24012b6](https://github.com/incubateur-ademe/scalingo-watcher/commit/24012b6ef69666f1aa9413756989dc05e0c01f34))
+
+
+### Corrections
+
+* **apply:** valider toute valeur qui entre dans une URL de l'API GitHub ([#44](https://github.com/incubateur-ademe/scalingo-watcher/issues/44)) ([10a21d6](https://github.com/incubateur-ademe/scalingo-watcher/commit/10a21d62859b1d8f9b91daaa78ddc7f1aae9c511))
+* **renovate:** proposer une release de l'outil des sa publication ([#40](https://github.com/incubateur-ademe/scalingo-watcher/issues/40)) ([5bce04f](https://github.com/incubateur-ademe/scalingo-watcher/commit/5bce04ff60c231c791b63fe853b88ac669ea36e4))
+
 ## [1.3.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.2.2...v1.3.0) (2026-11-04)
 
 
