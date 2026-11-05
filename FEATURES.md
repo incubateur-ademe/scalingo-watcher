@@ -943,8 +943,8 @@ une version épinglée déclenche une alerte.
 sont confrontées aux avis que publie le dépôt d'où sort l'outil
 (`GET /repos/{owner}/{repo}/security-advisories`). C'est la seule source qui
 porte l'information pour un outil hors écosystème de paquets, et le relevé est
-générique par construction : l'amont est déjà déclaré pour chaque outil, par la
-table `UPSTREAM` ou par `tool.upstream`.
+générique par construction : l'amont est déjà déclaré pour chaque outil, par son
+module sous `src/tools` ou par `tool.upstream`.
 
 **[fait]** Renovate ne peut pas tenir ce rôle, pour la raison exacte qui lui
 interdit de suivre les versions de bases Scalingo. Un outil qu'un buildpack
@@ -1074,10 +1074,10 @@ drapeau de la date, `isEol` et `eolFrom`, `isLts` et `ltsFrom`, et porte un
 `schema_version`.
 
 **[fait]** Le rapprochement entre un outil et un produit de la source est déclaré,
-jamais dérivé de sa variable de version. C'est la règle que la table des dépôts
-amont s'impose déjà, pour la même raison : un mauvais rapprochement daterait la
+jamais dérivé de sa variable de version. C'est la règle que les modules d'outil
+s'imposent déjà, pour la même raison : un mauvais rapprochement daterait la
 fin de vie d'un autre produit, ce qui est pire qu'une fin de vie inconnue. Le nom
-vient de la table `UPSTREAM` ou de `tool.upstream.lifecycle`, et un outil qui n'en
+vient du module de l'outil ou de `tool.upstream.lifecycle`, et un outil qui n'en
 a pas n'est pas interrogé du tout. Le dépôt `SonarSource/sonarqube` publie
 aujourd'hui la Community Build numérotée `26.x`, donc `sonarqube-community` et non
 la `sonarqube-server` numérotée par année, qui est un autre produit.

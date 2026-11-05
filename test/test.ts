@@ -650,6 +650,18 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
     ["minor= major=", "minor=auto major=auto"].flatMap((p) => ["patch", "minor", "major"].map((u) => ruleFor("grafana/grafana", u, "automerge", p))),
     Array(6).fill(undefined),
   );
+  // La politique entiere ne vise que le depot de l'outil : etendue au reste, elle
+  // scinderait aussi les branches d'un outil sans preset et des versions de
+  // scalingo-watcher citees par la documentation.
+  check(
+    "correctifs et montees ne sont separes que pour un outil qui a son preset",
+    [
+      ruleFor("grafana/grafana", "patch", "separateMinorPatch"),
+      ruleValue(RULES, { manager: "custom.regex", packageName: "incubateur-ademe/scalingo-watcher", datasource: "github-tags", depType: "documentation", updateType: "patch" }, "separateMinorPatch"),
+      rulesOf("politique", ["exemple/outil"]).every((r) => JSON.stringify(r.matchPackageNames) === JSON.stringify(["exemple/outil"])),
+    ],
+    [undefined, undefined, true],
+  );
 
   // Le preset d'un outil est le pendant Renovate de son module : il etend la
   // politique avec le depot que le module declare, et ne vise que lui.
@@ -1000,6 +1012,16 @@ try {
 } finally {
   rmSync(aliasSandbox, { recursive: true, force: true });
 }
+// Le drapeau d'edition voyage dans l'amont : un appel qui reconstruirait
+// { line } le perdrait, et chez Metabase la plage en `x` deviendrait illisible,
+// une version affectee passant inapercue. Le chemin de l'audit n'est exerce par
+// aucun test de bout en bout, d'ou ce controle sur le source.
+check(
+  "chaque jugement des avis recoit l'amont entier, drapeau d'edition compris",
+  [apply, audit].flatMap((src) => [...src.matchAll(/judgeAdvisories\(([^()]*)\)/g)].map((m) => m[1].trim().split(/\s*,\s*/).at(-1))),
+  ["upstream", "upstream", "upstream"],
+);
+
 // --validate et le plan lisent le manifeste par le meme chemin, qui affiche
 // les avertissements avant toute autre sortie.
 check(
