@@ -2921,6 +2921,9 @@ try {
     lockSrc.apps["osc-fr1/alpha-metabase"].buildpacks = [
       { repo: "https://exemple.test/bp.tgz", ref: null },
       { repo: "Scalingo/metabase|buildpack", ref: null },
+      // Un ref vient de la meme source que le depot : `Using branch:` du
+      // journal, ou le fragment d'une ligne de `.buildpacks`.
+      { repo: "Scalingo/metabase-buildpack", ref: "[x](http://injecte.test)" },
     ];
     writeFileSync(join(b.fleet, "lock.json"), JSON.stringify(lockSrc, null, 2));
     const out = run(b, "apply.ts", [...FLEET, "--out-dir", "../sortie"], {
@@ -2947,6 +2950,13 @@ try {
     // La barre verticale coupait la ligne du tableau, et l'accent grave aurait
     // ferme le code pour laisser passer le reste en markdown.
     check("une barre verticale relevee ne coupe pas la ligne", ligne("metabasebuildpack").split("|").length, 6);
+    // Nettoyer le ref sans le poser en code laissait son lien s'activer dans le
+    // corps de l'issue : entre accents graves, il se lit au lieu d'agir.
+    check(
+      "un ref releve est pose en code, pas en markdown",
+      ligne("injecte.test").includes("@`[x](http://injecte.test)`"),
+      true,
+    );
   }
 
   console.log("\nVersion en service inconnue, contre un fetch simule");

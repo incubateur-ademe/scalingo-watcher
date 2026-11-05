@@ -1607,9 +1607,12 @@ const appUrl = (e: AppEntry) => `https://dashboard.scalingo.com/apps/${e.region}
 
 /**
  * Rend une valeur relevee sur la plateforme posable dans une cellule du
- * tableau de bord. La barre verticale couperait la ligne et l'accent grave
- * fermerait le code, et ce qui suit passerait pour du markdown : ces valeurs
- * sortent du journal de build, personne ne les a declarees.
+ * tableau de bord, **entre accents graves**. La barre verticale couperait la
+ * ligne et l'accent grave fermerait le code, et ce qui suit passerait pour du
+ * markdown : ces valeurs sortent du journal de build, personne ne les a
+ * declarees, et un `#[x](http://...)` sur une ligne de `.buildpacks` arrive
+ * jusqu'au corps de l'issue. Hors code, retirer ces deux caracteres ne suffit
+ * donc pas.
  */
 const inCell = (value: string) => value.replace(/[|`]/g, "").slice(0, 120);
 
@@ -1851,7 +1854,7 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
           : "non";
       lines.push(
         `| [${entry.app}](${appUrl(entry)}) ` +
-          `| ${name}${bp.ref ? `@${inCell(bp.ref)}` : ""} ` +
+          `| ${name}${bp.ref ? `@\`${inCell(bp.ref)}\`` : ""} ` +
           `| ${update} ` +
           `| ${bp.ref ? "épinglé" : "suit sa branche"} |`,
       );
