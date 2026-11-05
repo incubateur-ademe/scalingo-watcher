@@ -46,7 +46,7 @@ import {
   targetReached,
   writeOptions,
 } from "../src/apply.ts";
-import { upstreamKey, upstreamsDeclared } from "../src/audit.ts";
+import { resolveLatest, upstreamKey, upstreamsDeclared } from "../src/audit.ts";
 import { renderManifest } from "../src/init.ts";
 import { compose, matrixPayload, slackPayload, teamsPayload } from "../src/notify.ts";
 import { apiScopes, backupScopes, deniedByProxy } from "../src/fgp-scopes.ts";
@@ -812,6 +812,17 @@ console.log("\nAmont declare par l'audit");
     "deux apps qui lisent la meme variable gardent chacune leur amont",
     [declared.get(upstreamKey("osc-fr1", "a", "APP_VERSION"))?.repo, declared.get(upstreamKey("osc-fr1", "b", "APP_VERSION"))?.repo],
     ["exemple/a", "exemple/b"],
+  );
+}
+
+// Metabase et SonarQube publient des versions a quatre composants.
+{
+  const tags = ["v0.64.4.2", "v0.64.4.3", "64", "v1.64.4.9"].map((tag) => ({ tag, at: "2026-11-01T00:00:00Z" }));
+  const { latestSameMajor, latestOverall } = resolveLatest(tags, [0, 64, 4, 2], 1);
+  check(
+    "l'audit compare le quatrieme composant et ignore un tag d'un seul nombre",
+    [latestSameMajor?.raw, latestOverall?.raw],
+    ["v0.64.4.3", "v1.64.4.9"],
   );
 }
 

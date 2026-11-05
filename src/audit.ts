@@ -5,12 +5,15 @@ import { deniedByProxy, REGENERATE_HINT } from "./fgp-scopes.ts";
 import { accessModes, flagValue, flagValues, readFgpFile, resolvePaths, shown, type Fgp } from "./options.ts";
 import {
   advisoriesFor,
+  cmpVersion,
   compareLines,
   judgeAdvisories,
   lineLabel,
+  parseSemver,
   upstreamOf,
   type ToolDeclaration,
   type Upstream,
+  type Version,
 } from "./upstream.ts";
 
 /**
@@ -282,34 +285,25 @@ async function fetchReleaseTags(repo: string): Promise<Array<{ tag: string; at: 
 
 // ---------------------------------------------------------------- versions
 
-type Semver = { major: number; minor: number; patch: number };
-
-function parseVersion(raw: string): Semver | null {
-  const m = /^v?(\d+)\.(\d+)(?:\.(\d+))?/.exec(raw.trim());
-  if (!m) return null;
-  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3] ?? 0) };
+/** Un nombre seul n'est pas retenu : sans mineure, il ne designe aucune release. */
+function parseVersion(raw: string): Version | null {
+  return /^v?\d+\.\d+/.test(raw.trim()) ? parseSemver(raw) : null;
 }
-
-function compareVersion(a: Semver, b: Semver): number {
-  return a.major - b.major || a.minor - b.minor || a.patch - b.patch;
-}
-
-const parts = (v: Semver) => [v.major, v.minor, v.patch];
 
 /**
  * Un outil peut publier plusieurs lignes en parallele, comme Metabase avec
  * v0.x pour l'OSS et v1.x pour l'EE. Comparer une v0 a une v1 n'a aucun sens,
  * d'ou le "latest dans la meme ligne" en plus du latest absolu.
  */
-function resolveLatest(tags: Array<{ tag: string; at: string }>, current: Semver | null, line: number) {
-  let latestOverall: { raw: string; v: Semver; at: string } | null = null;
-  let latestSameMajor: { raw: string; v: Semver; at: string } | null = null;
+export function resolveLatest(tags: Array<{ tag: string; at: string }>, current: Version | null, line: number) {
+  let latestOverall: { raw: string; v: Version; at: string } | null = null;
+  let latestSameMajor: { raw: string; v: Version; at: string } | null = null;
   for (const { tag: raw, at } of tags) {
     const v = parseVersion(raw);
     if (!v) continue;
-    if (!latestOverall || compareVersion(v, latestOverall.v) > 0) latestOverall = { raw, v, at };
-    if (current && compareLines(parts(v), parts(current), line) === 0) {
-      if (!latestSameMajor || compareVersion(v, latestSameMajor.v) > 0) latestSameMajor = { raw, v, at };
+    if (!latestOverall || cmpVersion(v, latestOverall.v) > 0) latestOverall = { raw, v, at };
+    if (current && compareLines(v, current, line) === 0) {
+      if (!latestSameMajor || cmpVersion(v, latestSameMajor.v) > 0) latestSameMajor = { raw, v, at };
     }
   }
   return { latestOverall, latestSameMajor };
@@ -627,14 +621,14 @@ async function analyse(report: AppReport, officialBuildpacks: Set<string>, findi
         entry.latestOverall = latestOverall?.raw ?? null;
         entry.latestSameMajor = latestSameMajor?.raw ?? null;
 
-        if (current && latestSameMajor && compareVersion(current, latestSameMajor.v) < 0) {
+        if (current && latestSameMajor && cmpVersion(current, latestSameMajor.v) < 0) {
           entry.behind = true;
           push("outdated", `${product} ${declared} -> ${latestSameMajor.raw} disponible`);
         }
         if (current && !latestSameMajor) {
           push(
             "major-line-not-published",
-            `${product} ${declared} : aucune release ${lineLabel(parts(current), upstream.line)}.x publiee sur ${upstream.repo}, retard non calculable`,
+            `${product} ${declared} : aucune release ${lineLabel(current, upstream.line)}.x publiee sur ${upstream.repo}, retard non calculable`,
           );
         }
         // Une ligne superieure ne signifie pas une version plus recente : chez
@@ -646,12 +640,12 @@ async function analyse(report: AppReport, officialBuildpacks: Set<string>, findi
           current &&
           latestOverall &&
           latestSameMajor &&
-          compareLines(parts(latestOverall.v), parts(current), upstream.line) > 0 &&
+          compareLines(latestOverall.v, current, upstream.line) > 0 &&
           Date.parse(latestOverall.at) > Date.parse(latestSameMajor.at)
         ) {
           push(
             "outdated-major-line",
-            `${product} est en ligne majeure ${lineLabel(parts(current), upstream.line)}.x, ${latestOverall.raw} existe en amont et est plus recente`,
+            `${product} est en ligne majeure ${lineLabel(current, upstream.line)}.x, ${latestOverall.raw} existe en amont et est plus recente`,
           );
         }
       } catch (e) {
