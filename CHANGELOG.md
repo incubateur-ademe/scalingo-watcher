@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.4.0...v1.4.1) (2026-11-06)
+
+
+### Documentation
+
+* **fgp:** dire quelle version de l'outil doit regenerer les blobs ([#45](https://github.com/incubateur-ademe/scalingo-watcher/issues/45)) ([96dfe66](https://github.com/incubateur-ademe/scalingo-watcher/commit/96dfe664e4fe3ee698883503d6baf5f75447f7e1))
+
 ## [1.4.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.3.0...v1.4.0) (2026-11-05)
 
 
