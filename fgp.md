@@ -26,6 +26,34 @@ node <outil>/src/fgp-blobs.ts --dry-run   # montre ce qui serait genere
 node <outil>/src/fgp-blobs.ts             # ecrit fgp.json
 ```
 
+`<outil>` est une copie du dépôt de l'outil, et c'est sa version qui décide des
+scopes écrits dans les blobs. Un parc en garde une dans `.scalingo-watcher`,
+épinglée sur la même version que ses workflows appelants : elle est donc d'une
+version de retard au moment précis où l'on monte le parc. La régénération qui
+précède une montée doit tourner sur la version visée et non sur celle-là, sinon
+elle écrit les scopes de l'ancienne, et rien ne le signale à la génération.
+Mettre cette copie à jour avant de régénérer, ou lancer depuis un clone à la
+bonne version :
+
+```bash
+cd .scalingo-watcher && git fetch origin --tags --force && git checkout <tag>
+```
+
+Un blob est opaque : un scope ne se relit pas dans `fgp.json`, il se vérifie par
+un appel au proxy. Sur une application qui n'est pas en pause, `200` dit que le
+scope est là, `403` qu'il manque, `401` que la clé est fausse. Une route que le
+blob ouvre déjà, et la racine de l'application, servent de témoins :
+
+```bash
+url=$(python3 -c "import json;print(json.load(open('fgp.json'))['url'])")
+blob=$(python3 -c "import json;print(json.load(open('fgp.json'))['api']['<region>'])")
+for route in "" /events /ps; do
+  printf '%-10s %s\n' "${route:-/}" "$(curl -s -o /dev/null -w '%{http_code}' \
+    -H "X-FGP-Key: $FGP_KEY" -H "X-FGP-Blob: $blob" \
+    "$url/v1/apps/<app>$route")"
+done
+```
+
 Le proxy visé est `--url`, sinon la variable `FGP_URL`, sinon celui du
 `fgp.json` existant, sinon le proxy par défaut. Il doit être servi en https.
 `--manifest` et `--fgp` désignent d'autres fichiers que ceux du répertoire
