@@ -2883,6 +2883,60 @@ try {
     },
   );
 
+  console.log("\nConseils de deblocage, contre un fetch simule");
+
+  // Les deux gardes renvoyaient vers une edition de `lock.json`. Le releve y
+  // ecrase l'entree par l'etat reel avant que l'application ne la lise, et
+  // l'action commit-lock repousse ce qu'il ecrit : le geste conseille ne
+  // survivait a aucun passage ayant l'acces Scalingo. Le conseil doit donc ne
+  // nommer que des actions en amont, et ces deux passages mesurent la ligne
+  // rendue plutot que le seul fait du refus.
+  const conseilDe = (marqueur: string, env: Record<string, string>, enPlace = false) => {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), movedTo(withoutWait));
+    if (enPlace) {
+      const lockSrc = JSON.parse(readFileSync(join(b.fleet, "lock.json"), "utf8"));
+      lockSrc.apps[DELTA].buildpacks = [{ repo: MB_REPO, ref: null }, { repo: PROXY_REPO, ref: null }];
+      writeFileSync(join(b.fleet, "lock.json"), JSON.stringify(lockSrc, null, 2));
+    }
+    const out = run(b, "apply.ts", [...FLEET, "--app", "delta", "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [DELTA]: { version: "v0.63.18", sha: EN_SERVICE } }),
+      ...env,
+    });
+    const lignes = out.output.split("\n");
+    const at = lignes.findIndex((l) => l.includes(marqueur));
+    const incidentFile = join(b.outDir, "incident.md");
+    const incident = existsSync(incidentFile) ? readFileSync(incidentFile, "utf8") : "";
+    return {
+      conseil: at < 0 ? "(aucun refus)" : (lignes[at + 1] ?? "").trim(),
+      deploiement: out.calls.some((l) => /^POST \S+\/deployments$/.test(l)),
+      ecarteLeLock: /Editer le lock ne debloque rien/.test(incident),
+      renvoieAuLock: /(mettre|mettant) a jour le lock/i.test(out.output + incident),
+    };
+  };
+
+  check(
+    "un commit en service hors de la branche declaree est refuse, et le conseil reste en amont",
+    conseilDe("CHANGEMENT DE BRANCHE", { COMPARE: JSON.stringify({ [VISE]: "identical", [EN_SERVICE]: "diverged" }) }),
+    {
+      conseil: `fusionne ${EN_SERVICE.slice(0, 7)} dans main, ou declare la branche qui le contient`,
+      deploiement: false,
+      ecarteLeLock: true,
+      renvoieAuLock: false,
+    },
+  );
+  check(
+    "un buildpack retire est refuse, et le conseil porte sur le .buildpacks du commit vise",
+    conseilDe("BUILDPACK RETIRE", { BUILDPACKS: FILES([JVM, MB]) }, true),
+    {
+      conseil: `remets ${PROXY_REPO} au .buildpacks de ${VISE.slice(0, 7)}, ou vise un commit qui le declare`,
+      deploiement: false,
+      ecarteLeLock: true,
+      renvoieAuLock: false,
+    },
+  );
+
   console.log("\nValeurs hors forme venues du lock, contre un fetch simule");
 
   // git_ref sait valoir un nom de branche, le lock le recopie, et rien ne
