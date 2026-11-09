@@ -101,3 +101,21 @@ export function accessModes(fgpFile: string): string[] {
     `  soit ${"SCALINGO_API_TOKEN".padEnd(width)}(direct, tout le pouvoir du compte)`,
   ];
 }
+
+/**
+ * Depot et version du moteur, lus dans son package.json.
+ *
+ * Le moteur tourne depuis un clone pris a un tag, dans le depot d'un parc : il
+ * ne peut donc designer sa propre documentation que par une URL absolue, et un
+ * lien relatif publie dans une issue de parc resoudrait vers le parc.
+ */
+export function toolRef(): { slug: string; version: string } {
+  const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")) as {
+    version: string;
+    repository?: string | { url?: string };
+  };
+  const repository = typeof pkg.repository === "string" ? pkg.repository : (pkg.repository?.url ?? "");
+  const slug = /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/.exec(repository)?.[1];
+  if (!slug) throw new Error("package.json ne designe aucun depot GitHub");
+  return { slug, version: `v${pkg.version}` };
+}

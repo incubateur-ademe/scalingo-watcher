@@ -2435,6 +2435,29 @@ try {
   );
   check("une base en pause ne fait pas d'echeance", /beta-metabase : base en/.test(applyRun.output), false);
 
+  // Le corps portait six legendes qui enumeraient tous les etats possibles a
+  // chaque passage, et cinq paragraphes de methode : 28 lignes de prose fixe
+  // pour 16 lignes de donnees. Le vocabulaire vit desormais dans FEATURES.md.
+  const vocabulaire = /\[Vocabulaire des états et méthode des relevés\]\(https:\/\/github\.com\/[^/]+\/[^/)]+\/blob\/v\d+\.\d+\.\d+\/FEATURES\.md#10-tableau-de-bord\)/;
+  check(
+    "le corps renvoie au vocabulaire plutot que de le reciter",
+    [/\*\*État\*\* :/.test(dashboard), vocabulaire.test(dashboard)],
+    [false, true],
+  );
+  // Les notifications ne portent que ce qui suit le marqueur : un lien pose
+  // apres lui partirait dans chaque message Teams, et serait tout le message
+  // d'un parc sain.
+  check(
+    "le lien reste avant le marqueur d'etat",
+    dashboard.indexOf("FEATURES.md#10-tableau-de-bord") < dashboard.indexOf("<!-- etat:"),
+    true,
+  );
+  check(
+    "la section que le lien vise existe",
+    /^## 10\. Tableau de bord$/m.test(readFileSync(join(import.meta.dirname, "..", "FEATURES.md"), "utf8")),
+    true,
+  );
+
   const plannedPaused = sandbox();
   const planRun = run(plannedPaused, "apply.ts", ["--dry-run", ...FLEET], WITH_ACCESS);
   check(
@@ -3297,7 +3320,7 @@ try {
     "une date hors forme se dit telle quelle",
     [
       dateIllisibleRun.status,
-      /osc-fr1\/alpha-metabase : v0\.63\.18 est sur la ligne 0\.63, dont la fin de support s'annonce "bientot" et pas en date/.test(dateIllisibleRun.output),
+      /osc-fr1\/alpha-metabase : v0\.63\.18 est sur la ligne 0\.63, fin de support annoncee "bientot", date illisible/.test(dateIllisibleRun.output),
       /Aucune ligne en service n'approche/.test(dateIllisibleRun.output),
     ],
     [0, true, false],
@@ -3310,7 +3333,7 @@ try {
     [
       horsLtsRun.status,
       /osc-fr1\/alpha-metabase : v0\.63\.18 est sur la ligne 0\.63, supportee jusqu'au 2027-06-01, 0\.64 est de support long jusqu'au 2027-12-01/.test(horsLtsRun.output),
-      /Changer de ligne est une montee fonctionnelle, qui se decide en pull request\./.test(horsLtsRun.output),
+      /Changer de ligne se decide en pull request\./.test(horsLtsRun.output),
       /echeance\(s\) a prevoir/.test(horsLtsRun.output),
     ],
     [0, true, true, false],
@@ -3395,7 +3418,7 @@ try {
     "une date que le calendrier refuse ne passe pas pour une ligne saine",
     [
       dateImpossibleRun.status,
-      /osc-fr1\/alpha-metabase : v0\.63\.18 est sur la ligne 0\.63, dont la fin de support s'annonce "2026-13-01" et pas en date/.test(dateImpossibleRun.output),
+      /osc-fr1\/alpha-metabase : v0\.63\.18 est sur la ligne 0\.63, fin de support annoncee "2026-13-01", date illisible/.test(dateImpossibleRun.output),
       /Aucune ligne en service n'approche/.test(dateImpossibleRun.output),
     ],
     [0, true, false],

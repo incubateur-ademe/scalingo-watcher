@@ -50,7 +50,7 @@ import {
   type AppRef,
 } from "./apply.ts";
 import { FLOATING, REGION_NAME } from "./audit.ts";
-import { accessModes, flagValue, flagValues, resolvePaths, shown, type Paths } from "./options.ts";
+import { accessModes, flagValue, flagValues, resolvePaths, shown, toolRef, type Paths } from "./options.ts";
 import { TOOLS } from "./tools/index.ts";
 import { toolName, upstreamOf } from "./upstream.ts";
 
@@ -84,21 +84,15 @@ function fail(message: string, details: string[] = []): never {
  * serait un 404 que l'editeur ignore sans rien dire.
  */
 async function schemaUrl(): Promise<string> {
-  const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")) as {
-    version: string;
-    repository?: string | { url?: string };
-  };
-  const repository = typeof pkg.repository === "string" ? pkg.repository : (pkg.repository?.url ?? "");
-  const slug = /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/.exec(repository)?.[1];
-  if (!slug) throw new Error("package.json ne designe aucun depot GitHub : l'URL du schema ne peut pas etre construite");
+  const { slug, version } = toolRef();
   const base = `https://raw.githubusercontent.com/${slug}`;
-  const tagged = `${base}/v${pkg.version}/schema/manifest.schema.json`;
+  const tagged = `${base}/${version}/schema/manifest.schema.json`;
   try {
     if ((await fetch(tagged, { method: "HEAD" })).ok) return tagged;
   } catch {
     // injoignable : traite comme absent
   }
-  log(`(aucun schema publie au tag v${pkg.version} : $schema pointe la branche main, a epingler sur un tag de release)`);
+  log(`(aucun schema publie au tag ${version} : $schema pointe la branche main, a epingler sur un tag de release)`);
   return `${base}/main/schema/manifest.schema.json`;
 }
 
@@ -113,17 +107,11 @@ const scalar = (value: string) => stringify(value, { lineWidth: 0 }).trimEnd();
 export function renderManifest(entries: readonly InitEntry[], schema: string): string {
   const lines = [
     `# yaml-language-server: $schema=${schema}`,
-    "# Intention : ce qu'on veut voir tourner sur le parc.",
-    "# Ce que le parc fait reellement vit dans le lock, ecrit par le job d'apply.",
-    "#",
-    "# Genere par init depuis l'etat reel de Scalingo, apps rangees par region puis",
-    "# par nom. L'ordre des entrees de `apps` EST l'ordre de deploiement, du moins",
-    "# critique au plus critique : la premiere sert d'eclaireur, et si elle echoue",
-    "# la vague s'arrete. A reordonner avant le premier apply.",
-    "#",
-    "# Les lignes d'annotation qui precedent `sha:` et `version:` ne sont pas",
-    "# decoratives : elles portent la datasource et le depName que Renovate lit via",
-    "# ses customManagers. Les supprimer coupe la veille sur la ligne qui suit.",
+    "# Intention : ce qu'on veut voir tourner. L'etat constate vit dans le lock.",
+    "# L'ordre de `apps` est l'ordre de deploiement, la premiere sert d'eclaireur.",
+    "# A reordonner avant le premier apply.",
+    "# Les lignes `# renovate:` portent la datasource et le depName. Les supprimer",
+    "# coupe la veille sur la ligne qui suit.",
     "",
     "defaults:",
     "  policy:",

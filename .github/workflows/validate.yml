@@ -82,8 +82,6 @@ jobs:
             echo '```'
             cat "$out/plan.log" 2>/dev/null || echo "le plan n'a pas produit de sortie"
             echo '```'
-            echo
-            echo "_Rien n'est deploye par la fusion. La convergence a lieu a la reconciliation suivante._"
           } > "$out/comment.md"
 
           cat "$out/comment.md" >> "$GITHUB_STEP_SUMMARY"

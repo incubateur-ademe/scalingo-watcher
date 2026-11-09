@@ -1455,3 +1455,69 @@ l'organisation de l'outil.
 **[à faire]** Outils autres que Metabase de bout en bout. Le moteur les prend en
 charge, mais seul Metabase a un preset d'outil, et les modules se limitent aux
 dépôts vérifiés. La recette d'ajout est dans le README.
+
+## 10. Tableau de bord
+
+`writeIncident()` écrit `incident.md` dans le répertoire de sortie, et
+`actions/signaler` le publie tel quel dans une issue étiquetée `etat-parc`,
+réécrite à chaque passage et jamais refermée. Le même fichier sert de rapport
+d'incident. Le marqueur `<!-- etat: sain|intervention -->` sépare les tableaux
+de ce qui demande une intervention, et `src/notify.ts` n'envoie que ce qui le
+suit.
+
+Le corps ne porte que l'état du parc. Le vocabulaire des colonnes et la méthode
+des relevés vivent ici, et le rapport y renvoie par un lien au tag qui tourne.
+
+### États du tableau des applications
+
+| État | Ce qu'il dit |
+| --- | --- |
+| `conforme` | ce qui tourne correspond au manifeste |
+| `en écart` | le manifeste demande autre chose, la convergence le rattrapera |
+| `quarantaine` | une tentative a échoué sur cette cible, et elle ne sera pas retentée tant que le manifeste ne change pas |
+| `en pause` | l'application est lue à chaque passage, jamais modifiée |
+
+### États du tableau des avis de sécurité
+
+| État | Ce qu'il dit |
+| --- | --- |
+| `indemne` | aucun avis ne porte sur la version en service |
+| `affectée` | au moins un avis la couvre, et la colonne `Correctif` donne la version qui en sort |
+| `plage illisible` | un avis existe dont la plage de versions a une forme inattendue, il reste hors du verdict |
+| `sans verdict` | les avis n'ont pas pu être lus, ou la version en service est incomparable |
+
+### États du tableau des bases de données
+
+| État | Ce qu'il dit |
+| --- | --- |
+| `relevée` | la version a été lue sur Scalingo |
+| `non relevée` | la valeur affichée vient du manifeste |
+| `en pause` | la base est lue, jamais sauvegardée ni montée |
+
+### États du tableau des buildpacks
+
+| État | Ce qu'il dit |
+| --- | --- |
+| `suit sa branche` | le buildpack est déclaré sans référence fixe, chaque build reprend la tête de sa branche par défaut, et la colonne de mise à jour compare cette tête à la date du dernier déploiement |
+| `épinglé` | une référence fixe est déclarée, et le build garde la même tant qu'on ne la change pas |
+
+### Méthode des relevés d'avis
+
+Les avis sont lus sur le dépôt amont de l'outil, seule source qui les porte. Un
+outil installé par un buildpack depuis une variable d'environnement
+n'appartient à aucun écosystème de paquets, donc aucune alerte de dépendance ne
+l'atteint et Renovate ne peut pas tenir ce rôle.
+
+La comparaison porte sur la version que le lock dit en service, qui peut
+différer de celle que le manifeste demande. Le correctif indiqué est la version
+la plus basse de la ligne en service qu'aucun de ces avis ne couvre, et
+`--propose-security` ouvre la pull request qui la porte.
+
+Une faille sans correctif atteignable dans sa ligne reste au tableau sans
+demander d'intervention : la réclamer à chaque passage en ferait une alerte
+permanente. Une application en pause y reste pour la même raison, son correctif
+fût-il atteignable, puisque rien n'y est déployé.
+
+Le catalogue KEV de la CISA est consulté à part. Il ne retient que les failles
+exploitées dans la nature, et une entrée qui y figure justifie de monter la
+version sans attendre le délai de décantation.
