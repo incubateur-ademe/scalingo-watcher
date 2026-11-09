@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isMap, isScalar, isSeq, parse, parseDocument, type Document, type ToStringOptions } from "yaml";
 import { Ajv2020 } from "ajv/dist/2020.js";
-import { accessModes, flagValue, outFile, readFgpFile, resolvePaths, shown, type Fgp, type Paths } from "./options.ts";
+import { accessModes, flagValue, outFile, readFgpFile, resolvePaths, shown, toolRef, type Fgp, type Paths } from "./options.ts";
 import { deniedByProxy, REGENERATE_HINT } from "./fgp-scopes.ts";
 import {
   advisoriesFor,
@@ -1358,7 +1358,7 @@ async function applyApp(
   // epingle doit appartenir a la branche qu'il declare suivre.
   if ((await shaIsOnBranch(key, entry.source.repo, entry.source.branch, target.sha)) === false) {
     emit(`    INCOHERENCE : ${target.sha.slice(0, 7)} n'est pas sur la branche ${entry.source.branch} de ${entry.source.repo}`);
-    emit(`    le manifeste se contredit, rien n'est tente`);
+    emit(`    rien n'est tente`);
     note(key, `le manifeste se contredit : ${target.sha.slice(0, 7)} n'est pas sur la branche ${entry.source.branch} de ${entry.source.repo}. Rien n'a ete tente.`);
     return "rejected";
   }
@@ -1483,7 +1483,7 @@ async function applyApp(
       backup = await runBackup(entry, emit);
       emit(`    sauvegarde ${backup.id} disponible`);
     } else {
-      emit(`    sauvegarde non disponible sur cette app, deploiement sans filet`);
+      emit(`    sauvegarde non disponible sur cette app, deploiement non sauvegarde`);
     }
 
     const varState = await setVariable(entry, entry.tool.env, target.version);
@@ -1774,14 +1774,6 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
     fixable.length === 0;
 
   const lines: string[] = await describeTools(targets, lock);
-  lines.push(
-    "**État** : `conforme`, ce qui tourne correspond au manifeste. `en écart`, le",
-    "manifeste demande autre chose et la convergence le rattrapera. `quarantaine`,",
-    "une tentative a échoué sur cette cible et elle ne sera pas retentée tant que le",
-    "manifeste ne change pas. `en pause`, lue à chaque passage mais jamais modifiée :",
-    "l'écart éventuel avec le manifeste est constaté, sans action.",
-    "",
-  );
 
   lines.push("## Avis de sécurité amont", "");
   lines.push("| App | Version | Avis | Correctif | État |");
@@ -1831,27 +1823,7 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
     );
   }
   lines.push("");
-  lines.push(
-    "Le relevé interroge les avis de sécurité du dépôt amont de l'outil, et",
-    "confronte à leurs plages de versions ce que le lock dit tourner, non ce que",
-    "le manifeste demande. Renovate ne peut pas tenir ce rôle : un outil installé",
-    "par un buildpack depuis une variable d'environnement n'est une dépendance",
-    "d'aucun écosystème de paquets.",
-    "",
-    "**État** : `indemne`, aucun avis ne porte sur la version en service.",
-    "`affectée`, au moins un avis la couvre, et la colonne `Correctif` donne la",
-    "version qui en sort, ou dit qu'aucune n'est atteignable dans sa ligne.",
-    "`plage illisible`, un avis existe dont la plage de versions n'a",
-    "pas la forme attendue : il n'est ni retenu ni écarté. `sans verdict`, les",
-    "avis n'ont pas pu être lus, ou la version en service n'est pas comparable.",
-    "",
-    "Seule une faille dont le correctif est atteignable demande une intervention.",
-    "Une faille sans correctif atteignable reste à ce tableau : la réclamer à",
-    "chaque passage en ferait l'alerte permanente qu'on apprend à ignorer. Une",
-    "application `en pause` y reste aussi, son correctif fût-il atteignable :",
-    "rien n'y est déployé, donc aucune pull request ne la concernera.",
-    "",
-  );
+  lines.push("Avis lus sur le dépôt amont de l'outil, comparés à la version que le lock dit en service.", "");
 
   lines.push("## Bases de données", "");
   lines.push("| App | Version | Mise à jour ? | État |");
@@ -1876,12 +1848,6 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
     );
   }
   lines.push("");
-  lines.push(
-    "**État** : `relevée`, la version a été lue sur Scalingo. `non relevée`, la",
-    "valeur affichée vient du manifeste et non d'un constat. `en pause`, la base",
-    "est lue mais jamais sauvegardée ni montée.",
-    "",
-  );
 
   lines.push("## Buildpacks", "");
   lines.push("| App | Buildpack | Mise à jour ? | État |");
@@ -1915,11 +1881,16 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
     }
   }
   lines.push("");
+
+  // Au tag qui tourne, sans verifier qu'il existe : contrairement au $schema
+  // qu'init ecrit une fois chez le parc, ce rapport est reecrit a chaque
+  // passage, et le seul tag absent est celui d'un passage depuis une main non
+  // publiee, c'est-a-dire l'integration continue du moteur. Pose avant le
+  // marqueur, ce lien reste hors des notifications, qui ne portent que ce qui
+  // le suit.
+  const { slug, version } = toolRef();
   lines.push(
-    "**État** : `suit sa branche`, le buildpack n'est pas épinglé et chaque build",
-    "reprend la tête de sa branche par défaut, donc la colonne de mise à jour",
-    "compare cette tête à la date du dernier déploiement. `épinglé`, une référence",
-    "fixe est déclarée et le build ne bougera pas sans qu'on la change.",
+    `[Vocabulaire des états et méthode des relevés](https://github.com/${slug}/blob/${version}/FEATURES.md#10-tableau-de-bord)`,
     "",
   );
 
@@ -1933,13 +1904,7 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
   if (security.length > 0) {
     lines.push(`### Faille activement exploitee`, "");
     for (const { key, detail } of security) lines.push(`- **${key}** : ${detail}`);
-    lines.push(
-      "",
-      "Ces failles figurent au catalogue KEV de la CISA, qui ne retient que ce",
-      "qui est exploite dans la nature. Monter la version prime sur le delai de",
-      "decantation habituel.",
-      "",
-    );
+    lines.push("", "Monter la version sans attendre le delai de decantation.", "");
   }
   if (fixable.length > 0) {
     lines.push(`### Avis de sécurité amont`, "");
@@ -1953,14 +1918,7 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
         );
       }
     }
-    lines.push(
-      "",
-      "Ces avis viennent du dépôt amont de l'outil, seule source qui les porte",
-      "pour un outil hors écosystème de paquets. La version indiquée est la plus",
-      "basse de la ligne en service qu'aucun de ces avis ne couvre. La pull request",
-      "qui fait avancer le manifeste est ouverte par `propose-security`.",
-      "",
-    );
+    lines.push("", "La pull request qui fait avancer le manifeste est ouverte par `propose-security`.", "");
   }
   if (broken > 0) {
     lines.push(`${broken} application(s) n'ont pas abouti :`, "");
@@ -1977,24 +1935,13 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
         `  > ${q.reason.split("\n")[0].slice(0, 300)}`,
       );
     }
-    lines.push(
-      "",
-      "Une application en quarantaine est laissee telle quelle tant que la cible",
-      "ne change pas. Corriger le manifeste, ou relancer avec `--force` une fois",
-      "la cause levee.",
-      "",
-    );
+    lines.push("", "Corriger le manifeste, ou relancer avec `--force` une fois la cause levee.", "");
   }
 
   if (warnings.length > 0) {
     lines.push(`${warnings.length} echeance(s) a prevoir :`, "");
     for (const { key, detail } of warnings) lines.push(`- **${key}** : ${detail}`);
-    lines.push(
-      "",
-      "Rien ne casse aujourd'hui. Ces lignes signalent ce qui cessera de",
-      "fonctionner si personne n'agit d'ici la.",
-      "",
-    );
+    lines.push("");
   }
   writeFileSync(outFile(paths, INCIDENT_FILE), lines.join("\n") + "\n");
 }
@@ -2844,7 +2791,7 @@ function lifecycleDeadline(v: LifecycleVerdict, version: string): string {
     ? v.eol
       ? `en fin de support depuis le ${v.eol}`
       : v.unreadableEol
-        ? `en fin de support, annoncee "${v.unreadableEol}" et pas une date`
+        ? `en fin de support, date annoncee "${v.unreadableEol}" illisible`
         : `en fin de support, sans date annoncee`
     : v.days !== null && v.days > 0
       ? `fin de support dans ${v.days} jour(s), le ${v.eol}`
@@ -2869,7 +2816,7 @@ const lifecycleLine = (l: AppLifecycle): string => {
     eol !== null
       ? `, supportee jusqu'au ${eol}`
       : unreadableEol !== null
-        ? `, dont la fin de support s'annonce "${unreadableEol}" et pas en date`
+        ? `, fin de support annoncee "${unreadableEol}", date illisible`
         : `, dont ${l.product} ne date aucune fin de support`;
   const after = nextLts?.eol ? ` jusqu'au ${nextLts.eol}` : "";
   const next = nextLts ? `, ${nextLts.cycle} est de support long${after}` : "";
@@ -3380,7 +3327,7 @@ async function main() {
     // vague soit visible sans rien deployer
     if (outcome === "deployed" || (OPT.dryRun && outcome === "planned")) scoutDone = true;
     if (outcome === "failed") {
-      log(`\nEchec sur l'eclaireur. La cible est probablement en cause, la vague s'arrete ici.`);
+      log(`\nEchec sur l'eclaireur, la vague s'arrete ici.`);
       stopped = true;
     } else if (outcome !== "error" && outcome !== "paused") {
       // Une app menee a son terme prouve que Scalingo repond, et rompt la serie.
@@ -3396,12 +3343,12 @@ async function main() {
       interruptedScouts++;
       if (interruptedScouts >= MAX_INTERRUPTED_SCOUTS) {
         log(
-          `\n${interruptedScouts} eclaireurs interrompus. C'est l'acces a Scalingo qui est en cause, pas une app, la vague s'arrete ici.`,
+          `\n${interruptedScouts} eclaireurs interrompus d'affilee, acces a Scalingo en cause, la vague s'arrete ici.`,
         );
         stopped = true;
       } else {
         log(
-          `\nOperation interrompue sur ${keyOf(targets[i])}, rien ne dit que la cible est en cause. L'app suivante prend le role d'eclaireur.`,
+          `\nOperation interrompue sur ${keyOf(targets[i])}, l'app suivante prend le role d'eclaireur.`,
         );
       }
     }
@@ -3458,7 +3405,7 @@ async function main() {
   if (security.length > 0) {
     log(`\n${security.length} faille(s) activement exploitee(s) :`);
     for (const { key, detail } of security) log(`  ${key} : ${detail}`);
-    log(`Monter la version prime sur le delai de decantation habituel.`);
+    log(`Monter la version sans attendre le delai de decantation.`);
   }
 
   // Comme pour les stacks : un amont sans avis sur les versions en service et un
@@ -3494,7 +3441,7 @@ async function main() {
     log(`\n${remarked.length} application(s) au regard de la fin de vie de leur ligne :`);
     for (const [key, l] of remarked) log(`  ${key} : ${lifecycleLine(l)}`);
     if (remarked.some(([, l]) => l.verdict?.nextLts)) {
-      log(`Changer de ligne est une montee fonctionnelle, qui se decide en pull request.`);
+      log(`Changer de ligne se decide en pull request.`);
     }
   }
   const due = [...observedLifecycle.values()].filter((l) => l.verdict && lifecycleDue(l.verdict)).length;
@@ -3508,7 +3455,6 @@ async function main() {
   if (warnings.length > 0) {
     log(`\n${warnings.length} echeance(s) a prevoir :`);
     for (const { key, detail } of warnings) log(`  ${key} : ${detail}`);
-    log(`Rien ne casse aujourd'hui, mais personne ne le verra venir sans cela.`);
   }
 
   const wanted = new Map(targets.map((e) => [keyOf(e), { sha: e.source.sha, version: e.tool.version }]));
@@ -3518,7 +3464,7 @@ async function main() {
     log("");
     log(`${orphans.length} entree(s) de lock sans app correspondante dans le manifeste :`);
     for (const k of orphans) log(`  ${k}`);
-    log(`Elles ne sont plus suivies. Un passage --prune les retire du lock si l'abandon est definitif.`);
+    log(`Un passage --prune les retire du lock si l'abandon est definitif.`);
   }
 
   const stuck = Object.entries(lock.apps).filter(([k, v]) => {
@@ -3529,7 +3475,7 @@ async function main() {
   if (stuck.length > 0) {
     log(`\n${stuck.length} app(s) en quarantaine :`);
     for (const [k, v] of stuck) log(`  ${k} : ${v.quarantine!.reason} (cible ${v.quarantine!.target.version})`);
-    log(`Elles repartiront d'elles-memes des que le manifest pointera une autre cible.`);
+    log(`Corriger la cible au manifeste, ou relancer avec --force une fois la cause levee.`);
   }
 
   if (!OPT.dryRun) await writeIncident(lock, targets);

@@ -126,7 +126,7 @@ const FINDINGS = [
   ["floating-version-env", "Variable de version flottante (* ou latest)"],
   ["unpinned-buildpack", "Buildpack non pinne (suit la branche par defaut)"],
   ["outdated", "Version en retard dans sa ligne majeure"],
-  ["outdated-major-line", "Ligne majeure en retard (a arbitrer, pas forcement un bug)"],
+  ["outdated-major-line", "Ligne majeure en retard (a arbitrer)"],
   ["major-line-not-published", "Ligne majeure absente des releases upstream (retard non calculable)"],
   ["database-upgradable", "Base de donnees : une version plus recente existe (aucune echeance connue)"],
   ["last-deploy-failed", "Dernier deploiement en echec"],
@@ -679,7 +679,7 @@ async function analyse(report: AppReport, officialBuildpacks: Set<string>, findi
             push(
               "advisory-unreadable",
               `${product} : ${verdict.unreadable.length} plage(s) de ${upstream.repo} illisible(s), ` +
-                `dont ${verdict.unreadable[0].ghsa} "${verdict.unreadable[0].range}" : ni retenue, ni ecartee`,
+                `dont ${verdict.unreadable[0].ghsa} "${verdict.unreadable[0].range}", hors verdict`,
             );
           }
         }
@@ -741,7 +741,7 @@ function render(reports: AppReport[], findings: Finding[]) {
         );
       }
       if (advisory && advisory.unreadable > 0) {
-        log(`  ${"".padEnd(28)} ${advisory.unreadable} plage(s) d'avis illisible(s) : ni retenue(s), ni ecartee(s)`);
+        log(`  ${"".padEnd(28)} ${advisory.unreadable} plage(s) d'avis illisible(s), hors verdict`);
       }
     }
   }
