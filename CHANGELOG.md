@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.5.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.4.0...v1.5.0) (2026-11-09)
+
+
+### Nouveautés
+
+* **apply:** le tableau de bord donne l'etat, la doc porte le vocabulaire ([#49](https://github.com/incubateur-ademe/scalingo-watcher/issues/49)) ([665b0de](https://github.com/incubateur-ademe/scalingo-watcher/commit/665b0de1cb7e64977b3a71213cfd1c4063c7f7f7))
+
+
+### Corrections
+
+* **apply:** dire ce qui a ete lu quand l'attente de sauvegarde abandonne ([#48](https://github.com/incubateur-ademe/scalingo-watcher/issues/48)) ([c693a29](https://github.com/incubateur-ademe/scalingo-watcher/commit/c693a299c9b8a107a7b1f57d0ee944cfab157776))
+* **apply:** ne conseiller que des deblocages qui aboutissent ([#47](https://github.com/incubateur-ademe/scalingo-watcher/issues/47)) ([cfefc28](https://github.com/incubateur-ademe/scalingo-watcher/commit/cfefc28c9ce5d9978609c3e9a3af4142a28b183d))
+
+
+### Documentation
+
+* **fgp:** dire quelle version de l'outil doit regenerer les blobs ([#45](https://github.com/incubateur-ademe/scalingo-watcher/issues/45)) ([96dfe66](https://github.com/incubateur-ademe/scalingo-watcher/commit/96dfe664e4fe3ee698883503d6baf5f75447f7e1))
+
 ## [1.4.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.3.0...v1.4.0) (2026-11-05)
 
 
