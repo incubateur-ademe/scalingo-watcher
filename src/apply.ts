@@ -235,6 +235,21 @@ let paths: Paths;
 const log = (...a: unknown[]) => console.log(...a);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Duree en clair, pour les messages. */
+export function elapsed(ms: number): string {
+  const min = Math.floor(Math.max(0, ms) / 60000);
+  if (min < 1) return "moins d'une minute";
+  if (min < 60) return `${min} min`;
+  return `${Math.floor(min / 60)} h ${min % 60} min`;
+}
+
+/** Duree ecoulee depuis un horodatage ISO. */
+export function elapsedSince(iso: string, now = Date.now()): string {
+  const started = Date.parse(iso);
+  if (Number.isNaN(started) || Number.isNaN(now)) return "date illisible";
+  return elapsed(now - started);
+}
+
 // ---------------------------------------------------------------- http
 
 async function req<T>(url: string, token: string, init: RequestInit = {}): Promise<T> {
@@ -490,6 +505,8 @@ export async function backupAddon(
   entry: AppEntry,
   addonId: string,
   emit: (line: string) => void = () => {},
+  // Delais ouverts pour que l'abandon soit exerce sans attendre une demi-heure.
+  { timeoutMs = BACKUP_TIMEOUT_MS, pollMs = POLL_INTERVAL_MS } = {},
 ): Promise<{ id: string; at: string }> {
   const backupsUrl = `${dbApiHost(entry.region)}/api/databases/${addonId}/backups`;
 
@@ -502,8 +519,16 @@ export async function backupAddon(
     }>(backupsUrl, dbToken, { headers: dbAuth.headers });
     return database_backups;
   };
-  const inFlight = (backups: Array<{ id: string; status: string }>) =>
-    backups.find((b) => BACKUP_IN_FLIGHT.test(b.status))?.id ?? null;
+  const inFlight = (backups: Array<{ id: string; status: string; created_at: string }>) =>
+    backups.find((b) => BACKUP_IN_FLIGHT.test(b.status)) ?? null;
+
+  // L'age de la sauvegarde adoptee est le premier chiffre qui dit si l'attente
+  // a un sens : une sauvegarde en vol depuis des heures n'aboutira pas dans la
+  // demi-heure qui vient.
+  const attach = (b: { id: string; created_at: string }) => {
+    emit(`    sauvegarde ${b.id} deja en cours depuis ${elapsedSince(b.created_at)}, rattachement`);
+    return b.id;
+  };
 
   // Se rattacher a une sauvegarde deja lancee plutot que d'en demander une
   // seconde, que db-api refuserait de toute facon.
@@ -529,26 +554,35 @@ export async function backupAddon(
       // Pas BACKUP_IN_FLIGHT ici : db-api vient d'affirmer qu'une sauvegarde
       // tourne, un statut qu'on n'aurait pas prevu ne doit pas le contredire.
       // La selection s'aligne sur la boucle d'attente, qui raisonne a l'envers.
-      const concurrent = (await listBackups()).find((b) => b.status !== "done" && b.status !== "error")?.id;
+      const concurrent = (await listBackups()).find((b) => b.status !== "done" && b.status !== "error");
       if (!concurrent) throw e;
-      emit(`    sauvegarde ${concurrent} deja en cours, rattachement`);
-      return concurrent;
+      return attach(concurrent);
     }
   };
 
   const existing = inFlight(await listBackups());
-  if (existing) emit(`    sauvegarde ${existing} deja en cours, rattachement`);
-  const id = existing ?? (await requestBackup());
+  const id = existing ? attach(existing) : await requestBackup();
 
-  const deadline = Date.now() + BACKUP_TIMEOUT_MS;
+  // Ce qui a ete lu, et rien de plus : la boucle ne distingue pas une
+  // sauvegarde qui progresse d'une entree absente de la liste ou d'un statut
+  // hors du jeu connu. Les 8 et 9 novembre 2026, trois passages ont annonce
+  // « toujours en cours » sur des sauvegardes que la plateforme donnait
+  // terminees, et le message ne laissait aucune prise pour trancher.
+  const start = Date.now();
+  const deadline = start + timeoutMs;
+  let reads = 0;
   for (;;) {
     const b = (await listBackups()).find((x) => x.id === id);
+    reads++;
     if (b?.status === "done") return { id, at: b.created_at };
     if (b?.status === "error") throw new Error(`sauvegarde ${id} en erreur`);
     if (Date.now() > deadline) {
-      throw new Error(`sauvegarde ${id} toujours en cours apres ${BACKUP_TIMEOUT_MS / 60000} min`);
+      const seen = b ? `${b.status}, en vol depuis ${elapsedSince(b.created_at)}` : "absente de la liste";
+      throw new Error(
+        `sauvegarde ${id} non conclue apres ${elapsed(Date.now() - start)}, statut relu ${reads} fois, dernier : ${seen}`,
+      );
     }
-    await sleep(POLL_INTERVAL_MS);
+    await sleep(pollMs);
   }
 }
 
