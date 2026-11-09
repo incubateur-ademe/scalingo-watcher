@@ -1373,11 +1373,27 @@ async function applyApp(
   // vaut qu'a depot constant : quand le manifeste change de depot, le commit en
   // place lui est forcement etranger, et ce n'est pas une anomalie mais la
   // consequence du changement voulu.
+  //
+  // Ni ce controle ni celui des buildpacks ne renvoient vers le lock. La phase
+  // de releve y ecrase l'entree par l'etat reel avant que l'application ne la
+  // lise, et commit-lock repousse ce qu'elle a ecrit : une edition a la main ne
+  // survit pas au premier passage qui a l'acces Scalingo. Le seul moyen d'y
+  // faire passer la garde serait d'inscrire un commit que l'app ne sert pas, ce
+  // qui desarme du meme coup le controle des buildpacks, lequel ne regarde que
+  // les entrees dont le commit differe de la cible.
   if (sameRepo && current?.source.sha && current.source.sha !== target.sha) {
     if ((await shaIsOnBranch(key, entry.source.repo, entry.source.branch, current.source.sha)) === false) {
-      emit(`    CHANGEMENT DE BRANCHE : l'app tourne ${current.source.sha.slice(0, 7)}, absent de ${entry.source.branch}`);
-      emit(`    corrige la branche du manifeste, ou assume le changement en mettant a jour le lock`);
-      note(key, `changement de branche : l'app tourne ${current.source.sha.slice(0, 7)}, absent de ${entry.source.branch}. Corriger la branche du manifeste, ou assumer le changement en mettant a jour le lock.`);
+      const running = current.source.sha.slice(0, 7);
+      emit(`    CHANGEMENT DE BRANCHE : l'app tourne ${running}, absent de ${entry.source.branch}`);
+      emit(`    fusionne ${running} dans ${entry.source.branch}, ou declare la branche qui le contient`);
+      note(
+        key,
+        `changement de branche : l'app tourne ${running}, absent de ${entry.source.branch}. ` +
+          `Fusionner ${running} dans ${entry.source.branch}, un cherry-pick en fabriquant un autre, ` +
+          `ou declarer au manifeste la branche qui le contient. Si ce commit est a abandonner, ` +
+          `deployer ${entry.source.branch} a la main une fois pour y ramener le reel. ` +
+          `Editer le lock ne debloque rien : le releve le reecrit depuis l'etat reel au passage suivant.`,
+      );
       return "rejected";
     }
   }
@@ -1395,12 +1411,16 @@ async function applyApp(
       await declaredBuildpacks(key, entry.source.repo, target.sha),
     );
     if (dropped.length > 0) {
-      emit(`    BUILDPACK RETIRE : ${target.sha.slice(0, 7)} ne declare plus ${dropped.join(", ")}`);
-      emit(`    corrige la branche ou le sha du manifeste, ou assume le retrait en mettant a jour le lock`);
+      const aimed = target.sha.slice(0, 7);
+      const lost = dropped.join(", ");
+      emit(`    BUILDPACK RETIRE : ${aimed} ne declare plus ${lost}`);
+      emit(`    remets ${lost} au .buildpacks de ${aimed}, ou vise un commit qui le declare`);
       note(
         key,
-        `buildpack retire : ${target.sha.slice(0, 7)} ne declare plus ${dropped.join(", ")}, en service sur cette app. ` +
-          `Corriger la branche ou le sha du manifeste, ou assumer le retrait en mettant a jour le lock.`,
+        `buildpack retire : ${aimed} ne declare plus ${lost}, en service sur cette app. ` +
+          `Remettre ${lost} au .buildpacks de ${aimed}, ou viser par le manifeste un commit qui le declare. ` +
+          `Si le retrait est voulu, deployer ${aimed} a la main une fois pour que le releve le constate. ` +
+          `Editer le lock ne debloque rien : le releve le reecrit depuis l'etat reel au passage suivant.`,
       );
       return "rejected";
     }
@@ -3498,7 +3518,7 @@ async function main() {
     log("");
     log(`${orphans.length} entree(s) de lock sans app correspondante dans le manifeste :`);
     for (const k of orphans) log(`  ${k}`);
-    log(`Elles ne sont plus suivies. Les retirer du lock si l'abandon est definitif.`);
+    log(`Elles ne sont plus suivies. Un passage --prune les retire du lock si l'abandon est definitif.`);
   }
 
   const stuck = Object.entries(lock.apps).filter(([k, v]) => {

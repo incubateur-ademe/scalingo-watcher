@@ -56,6 +56,10 @@ const lifecycle = JSON.parse(
 ) as unknown[];
 
 const buildpacks = JSON.parse(process.env.BUILDPACKS ?? "null") as Record<string, string[]> | null;
+// Sans cette table, l'API rendait 500 sur la comparaison, donc shaIsOnBranch
+// rendait null, donc les deux gardes de branche ne pouvaient refuser dans aucun
+// passage de test.
+const compared = JSON.parse(process.env.COMPARE ?? "null") as Record<string, string> | null;
 const built = (process.env.BUILT ?? "https://github.com/Scalingo/metabase-buildpack")
   .split(",")
   .filter((u) => u.length > 0);
@@ -79,6 +83,10 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   // Tout vient de la premiere page, les suivantes sont vides.
   if (m === "GET" && /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/security-advisories\?/.test(u)) {
     return json(u.includes("page=1") ? advisories : []);
+  }
+  if (compared && m === "GET" && (r = /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/compare\/.+\.\.\.([0-9a-f]{40})$/.exec(u))) {
+    const status = compared[r[1]];
+    return status ? json({ status }) : json({ message: "Not Found" }, 404);
   }
   if (buildpacks && m === "GET" && (r = /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/contents\/\.buildpacks\?ref=(\w+)$/.exec(u))) {
     const lines = buildpacks[r[1]];
