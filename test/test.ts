@@ -37,6 +37,7 @@ import {
   describeAdvisoryProposal,
   describeProposal,
   describeTools,
+  elapsedSince,
   isBranchRef,
   isRepoRef,
   isShaRef,
@@ -197,9 +198,16 @@ const srcBackupAddon = apply.slice(
 // de la premiere, et chaque passage reconduisait le blocage.
 check(
   "la sauvegarde n'est demandee qu'a defaut d'une sauvegarde en cours",
-  /\?\?\s*\(await requestBackup\(\)\)/.test(srcBackupAddon),
+  /existing[^;]*await requestBackup\(\)/.test(srcBackupAddon),
   true,
 );
+// L'age de la sauvegarde adoptee est le chiffre qui dit si l'attente a un sens.
+const born = "2026-11-09T00:00:30Z";
+check("sous la minute, l'age reste vague", elapsedSince(born, Date.parse("2026-11-09T00:00:50Z")), "moins d'une minute");
+check("sous l'heure, l'age est en minutes", elapsedSince(born, Date.parse("2026-11-09T00:42:30Z")), "42 min");
+check("au-dela, l'age est en heures", elapsedSince(born, Date.parse("2026-11-09T03:33:00Z")), "3 h 32 min");
+check("un horodatage illisible le dit", elapsedSince("pas une date"), "date illisible");
+check("un maintenant illisible le dit aussi", elapsedSince(born, Date.parse("pas une date")), "date illisible");
 check("le refus de sauvegarde concurrente est rattrape", /a backup is running/i.test(srcBackupAddon), true);
 
 // Ce rattrapage lit le corps de la reponse, que req() ecrasait dans son message.
@@ -1722,7 +1730,12 @@ check(
   { id: "orpheline", at: "2026-09-23T05:04:00Z" },
 );
 check("aucune seconde sauvegarde n'est demandee", trace.includes("demande"), false);
-check("le rattachement est annonce", announced, ["sauvegarde orpheline deja en cours, rattachement"]);
+check("une seule ligne est annoncee", announced.length, 1);
+check(
+  "le rattachement annonce depuis quand elle tourne",
+  /^sauvegarde orpheline deja en cours depuis .+, rattachement$/.test(announced[0] ?? ""),
+  true,
+);
 
 // Une sauvegarde peut demarrer entre le releve et la demande, la plateforme en
 // lancant elle-meme periodiquement.
@@ -1776,6 +1789,81 @@ try {
   thrown = (e as Error).message;
 }
 check("tout autre refus remonte", /plan does not allow backups/.test(thrown), true);
+
+simulate({
+  [`POST ${URL_TOKEN}`]: [{ body: { addon: { token: "tok" } } }],
+  [`GET ${URL_BACKUPS}`]: [
+    { body: { database_backups: [running("lente")] } },
+    { body: { database_backups: [running("lente")] } },
+  ],
+});
+let abandoned = "";
+try {
+  await backupAddon(app, "ad-1", () => {}, { timeoutMs: -1, pollMs: 0 });
+} catch (e) {
+  abandoned = (e as Error).message;
+}
+check(
+  "l'abandon dit le statut lu, son age et le nombre de lectures",
+  /^sauvegarde lente non conclue apres .+, statut relu 1 fois, dernier : running, en vol depuis .+$/.test(abandoned),
+  true,
+);
+
+// Une entree absente de la liste etait rendue par le meme message que le statut
+// en vol : rien ne permettait de les distinguer dans un rapport d'incident.
+simulate({
+  [`POST ${URL_TOKEN}`]: [{ body: { addon: { token: "tok" } } }],
+  [`GET ${URL_BACKUPS}`]: [{ body: { database_backups: [] } }, { body: { database_backups: [] } }],
+  [`POST ${URL_BACKUPS}`]: [{ body: { database_backup: { id: "fantome" } } }],
+});
+let ghost = "";
+try {
+  await backupAddon(app, "ad-1", () => {}, { timeoutMs: -1, pollMs: 0 });
+} catch (e) {
+  ghost = (e as Error).message;
+}
+check(
+  "une entree absente de la liste n'est pas donnee en cours",
+  /^sauvegarde fantome non conclue apres .+, statut relu 1 fois, dernier : absente de la liste$/.test(ghost),
+  true,
+);
+
+// Les constats ci-dessus sortent au premier releve de la boucle : sans les deux
+// suivants, ni le sommeil ni le compteur de relectures n'etait exerce, et
+// deplacer `let reads = 0` dans la boucle sortait vert.
+trace = simulate({
+  [`POST ${URL_TOKEN}`]: [{ body: { addon: { token: "tok" } } }],
+  [`GET ${URL_BACKUPS}`]: [
+    { body: { database_backups: [] } },
+    { body: { database_backups: [running("patiente")] } },
+    { body: { database_backups: [running("patiente")] } },
+    { body: { database_backups: [done("patiente")] } },
+  ],
+  [`POST ${URL_BACKUPS}`]: [{ body: { database_backup: { id: "patiente" } } }],
+});
+check(
+  "la boucle attend plusieurs releves avant de conclure",
+  await backupAddon(app, "ad-1", () => {}, { timeoutMs: 5000, pollMs: 1 }),
+  { id: "patiente", at: "2026-09-23T05:04:00Z" },
+);
+check("elle a relu jusqu'a la conclusion", trace.filter((t) => t === "releve").length, 4);
+
+simulate({
+  [`POST ${URL_TOKEN}`]: [{ body: { addon: { token: "tok" } } }],
+  // Large file : la patience expire bien avant, un sommeil valant au moins une
+  // milliseconde. Une file juste assez longue rendrait le constat tributaire de
+  // la machine.
+  [`GET ${URL_BACKUPS}`]: Array.from({ length: 400 }, () => ({
+    body: { database_backups: [running("interminable")] },
+  })),
+});
+let reread = 0;
+try {
+  await backupAddon(app, "ad-1", () => {}, { timeoutMs: 30, pollMs: 1 });
+} catch (e) {
+  reread = Number(/statut relu (\d+) fois/.exec((e as Error).message)?.[1] ?? 0);
+}
+check("le compteur de relectures suit la boucle", reread > 1, true);
 
 console.log("\nSections du rapport, contre un fetch simule");
 
