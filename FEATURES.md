@@ -326,9 +326,20 @@ des workflows appelants (gestionnaire `github-actions`) et tag des presets
 workflows appelants sont épinglés par sha avec la version en commentaire.
 
 **[fait]** Le consommateur n'active que `custom.regex`, `github-actions` et
-`renovate-config`. Le fuseau, le planning, le tableau de bord et ses textes
-restent dans sa configuration : les presets ne portent que ce qui dépend de
-l'outil.
+`renovate-config`. Le fuseau reste dans sa configuration : les presets ne
+portent que ce qui dépend de l'outil.
+
+**[fait]** Le titre, l'en-tête et le pied du tableau de bord Renovate, ainsi que
+la plage de fusion automatique (`automergeSchedule`, entre 2h et 6h dans le
+fuseau du parc), vivent dans le preset `base`. Le texte cite le délai de
+décantation, l'éclaireur, les trois déploiements de front et cette plage : ce
+sont des comportements de l'outil, et un texte recopié dans chaque parc
+divergeait à la première évolution. Un parc créé depuis le starter affichait
+ainsi le tableau de bord par défaut de Renovate, faute de textes. Un parc peut
+toujours redéclarer ces clés, mais il les remplace en entier et ne reçoit plus
+leurs mises à jour. Renovate retrouve son issue par le titre : un parc qui
+change de titre renomme d'abord son issue existante, sinon il en obtient une
+seconde.
 
 ---
 

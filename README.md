@@ -242,8 +242,17 @@ lisent :
 }
 ```
 
-Le fuseau, le planning et les textes du tableau de bord restent dans la
-configuration du consommateur.
+Le preset `base` porte le titre et les textes du tableau de bord Renovate, ainsi
+que la plage de fusion automatique des correctifs (entre 2h et 6h). Ils décrivent
+ce que fait l'outil et avancent avec son tag. Un parc qui les redéclare dans son
+`renovate.json` les remplace en entier et ne reçoit plus leurs mises à jour. Le
+fuseau reste dans la configuration du consommateur, et la plage se lit dans ce
+fuseau.
+
+Renovate retrouve son issue de tableau de bord par son titre. Un parc dont
+l'issue porte encore le titre par défaut, `Dependency Dashboard`, la renomme en
+`Parc Scalingo : etat des versions` avant de fusionner la montée du preset.
+Sinon Renovate en ouvre une nouvelle et laisse l'ancienne ouverte, figée.
 
 Le preset d'un outil étend `politique` par une référence relative, qui hérite de
 son tag : elle demande Renovate 44.29.0 ou plus récent, ce que l'application
