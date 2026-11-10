@@ -2,7 +2,7 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "description": [
     "Veille du manifeste scalingo-watcher : version de l'outil et commit du depot applicatif de chaque app, lus dans les annotations # renovate: du manifeste.",
-    "Le fuseau, le planning et les textes du tableau de bord restent dans la configuration du depot consommateur.",
+    "Le preset porte aussi le titre, les textes du tableau de bord et la plage de fusion automatique, qui decrivent le comportement de l'outil et avancent avec lui. Un parc qui les redeclare dans son renovate.json les remplace en entier et ne recoit plus leurs mises a jour. Le fuseau reste dans la configuration du depot consommateur : la plage de fusion se lit dans ce fuseau, en UTC s'il manque.",
     "Aucune veille de securite sur la version de l'outil : un outil installe par un buildpack depuis une variable d'environnement n'est une dependance d'aucun ecosysteme de paquets. osvVulnerabilityAlerts a ete retire pour cette raison, ses alertes ne couvrant qu'une dizaine de datasources de paquets, aucune de celles que ce preset suit. C'est le watcher qui releve les avis de securite du depot amont de l'outil, et qui ouvre la pull request de montee : voir --propose-security."
   ],
   "minimumReleaseAge": "5 days",
@@ -68,6 +68,12 @@
     ]
   },
   "automergeStrategy": "squash",
+  "automergeSchedule": [
+    "after 2am and before 6am"
+  ],
+  "dependencyDashboardTitle": "Parc Scalingo : etat des versions",
+  "dependencyDashboardHeader": "Cette page liste ce que chaque application Scalingo devrait faire tourner. Elle\nest tenue par Renovate et ne se modifie pas a la main.\n\n**Deux axes bougent independamment.** `outil` est la version de l'outil installe\npar le buildpack, portee par une variable d'environnement. `source` est le commit\ndu depot applicatif deploye. Une entree porte le nom de l'application Scalingo,\npas celui du depot amont, pour qu'on sache de quelle instance il s'agit.\n\n**Ce qui se passe apres une fusion.** Fusionner ne deploie pas directement. La\nfusion d'un changement du manifeste declenche la\n[reconciliation](../actions/workflows/reconcile.yml), qui releve l'etat reel\ndu parc et fait converger ce qui doit l'etre. Elle repasse aussi a l'heure, mais\nGitHub saute une partie de ses creneaux : compter plutot quelques heures entre\ndeux passages. La premiere application de la liste sert d'eclaireur et passe\nseule ; les suivantes avancent trois de front une fois qu'elle est passee.\nUne application dont le manifeste exige une sauvegarde (`backup: required`) en\nrecoit une avant chaque deploiement.\n\n**Pourquoi une mise a jour reste en attente.** Une version publiee depuis moins\nde cinq jours n'est pas proposee, le temps qu'un correctif de derniere minute\napparaisse s'il doit apparaitre. Les correctifs sont fusionnes automatiquement,\nentre 2h et 6h seulement. Les montees fonctionnelles attendent une relecture.\n\n**Etat de la convergence.** L'[issue etiquetee `etat-parc`](../issues?q=label%3Aetat-parc)\ndecrit l'etat du parc. Elle est reecrite a chaque passage et n'est jamais\nrefermee. Si le parc a configure une notification, l'equipe est prevenue aux\nseuls changements d'etat.",
+  "dependencyDashboardFooter": "- [ ] <!-- manual job -->Check this box to trigger a request for Renovate to run again on this repository\n\nUne application peut etre absente de la convergence pour trois raisons : elle est\n`paused` dans le manifeste, elle est arretee sur Scalingo, ou son manifeste se\ncontredit. Le journal de la reconciliation le dit dans tous les cas.\n\n`manifest.yaml` decrit la cible, `lock.json` ce qui tourne reellement. Ni l'un ni\nl'autre ne s'edite depuis cette page.",
   "commitMessageAction": "monter",
   "commitMessageExtra": "en {{newValue}}",
   "commitMessageLowerCase": "never",

@@ -108,6 +108,8 @@ const STARTUP_TIMEOUT_MS = 5 * 60_000;
 const MAX_INTERRUPTED_SCOUTS = 2;
 // Au-dela, on empile les builds et les sauvegardes simultanees sur une infra
 // qu'on ne maitrise pas. Trois suffit a diviser le temps d'une vague par trois.
+// L'en-tete du tableau de bord du preset renovate/base l'annonce en toutes
+// lettres : le changer ici demande de le changer la-bas.
 const DEPLOY_CONCURRENCY = 3;
 const INCIDENT_FILE = "incident.md";
 const PROPOSAL_FILE = "db-proposal.json";
