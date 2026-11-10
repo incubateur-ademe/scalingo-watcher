@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.5.0...v1.6.0) (2026-11-10)
+
+
+### Nouveautés
+
+* **renovate:** le preset base porte le tableau de bord et la plage de fusion ([#51](https://github.com/incubateur-ademe/scalingo-watcher/issues/51)) ([218f77e](https://github.com/incubateur-ademe/scalingo-watcher/commit/218f77e1fe6be99d01a0da95b34fdbf84069ab43))
+
 ## [1.5.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.4.0...v1.5.0) (2026-11-09)
 
 
