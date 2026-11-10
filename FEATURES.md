@@ -341,6 +341,13 @@ leurs mises à jour. Renovate retrouve son issue par le titre : un parc qui
 change de titre renomme d'abord son issue existante, sinon il en obtient une
 seconde.
 
+**[fait]** Le pied du preset commence par la case de relance
+(`<!-- manual job -->`), recopiée mot pour mot. Ce n'est pas Renovate qui
+l'écrit mais le pied par défaut de Mend, sur l'app hébergée comme sur Renovate
+CE : un pied défini par le parc le remplace et la case disparaît. Cochée, elle
+lance un passage sans attendre le planning de l'instance. Le texte ne commence
+pas par `---` : Renovate en place déjà un devant le pied.
+
 ---
 
 ## 5. Déploiement (`src/apply.ts`)
