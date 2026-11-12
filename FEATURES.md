@@ -325,6 +325,16 @@ des workflows appelants (gestionnaire `github-actions`) et tag des presets
 `scalingo-watcher`, dès la release, jamais fusionnée seule. Les
 workflows appelants sont épinglés par sha avec la version en commentaire.
 
+**[fait]** Cette pull request attend toujours une fusion humaine, quelle que
+soit la politique du manifeste. `defaults.policy` règle les versions des outils
+déployés, jamais celle de scalingo-watcher. Une version de l'outil s'exécute
+avec les secrets du parc (accès à Scalingo ou clé du proxy, jeton Tchap). Une
+release fautive, fusionnée seule, agirait sur tout le parc dès le passage
+suivant. La relecture du CHANGELOG dans la pull request est donc le seul point
+d'arrêt. Pour la même raison, aucun délai de décantation ne s'y applique : un
+parc doit pouvoir prendre un correctif de l'outil dès sa publication, et les
+cinq jours du preset `base` restent réservés aux versions des outils déployés.
+
 **[fait]** Le consommateur n'active que `custom.regex`, `github-actions` et
 `renovate-config`. Le fuseau reste dans sa configuration : les presets ne
 portent que ce qui dépend de l'outil.
