@@ -839,6 +839,38 @@ console.log("\nStarter : appelants, versions citees, managers");
   }
 }
 
+console.log("\nRunner des workflows reutilisables");
+
+// GitHub ne laisse pas l'appelant surcharger le runs-on d'un job appele : sans
+// cet input, un parc ne peut pas passer sur ses propres runners. Un appelant qui
+// ne le passe pas doit garder ubuntu-latest, le runner des versions precedentes.
+{
+  const dir = join(import.meta.dirname, "..", ".github", "workflows");
+  type Called = {
+    on?: unknown;
+    jobs: Record<string, { "runs-on"?: unknown }>;
+  };
+  type CallInputs = { workflow_call?: { inputs?: Record<string, { type?: string; required?: boolean; default?: unknown }> } | null };
+  let called = 0;
+  const off = readdirSync(dir)
+    .filter((f) => /\.ya?ml$/.test(f))
+    .flatMap((f) => {
+      const wf = parse(readFileSync(join(dir, f), "utf8")) as Called;
+      // `on: workflow_call`, `on: [workflow_call]` et un `workflow_call:` sans
+      // corps sont aussi des workflows reutilisables, souvent sans input.
+      const triggers = typeof wf.on === "string" ? [wf.on] : Array.isArray(wf.on) ? wf.on : Object.keys(wf.on ?? {});
+      if (!triggers.includes("workflow_call")) return [];
+      called++;
+      const input = (wf.on as CallInputs | undefined)?.workflow_call?.inputs?.["runs-on"];
+      const bad = input?.type === "string" && input.required !== true && input.default === "ubuntu-latest" ? [] : [`${f} : input runs-on`];
+      for (const [name, job] of Object.entries(wf.jobs)) {
+        if (job["runs-on"] !== "${{ inputs.runs-on || 'ubuntu-latest' }}") bad.push(`${f} : job ${name}`);
+      }
+      return bad;
+    });
+  check("chaque workflow reutilisable laisse l'appelant choisir son runner, ubuntu-latest par defaut", [called > 0, off], [true, []]);
+}
+
 console.log("\nAmont declare par l'audit");
 
 // Indexe par variable seule, l'amont de la derniere app ecrasait celui des

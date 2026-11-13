@@ -155,6 +155,18 @@ Inputs :
 | `lock-commit-message` | `reconcile`, `apply` | `chore(lock): etat du parc apres reconciliation` (ou `apres deploiement`) |
 | `branch`, `commit-message` | `propose-db` | `montee-base`, `chore(base): proposer la montee de version des bases` |
 | `branch`, `commit-message` | `propose-security` | `montee-securite`, `fix(securite): monter les versions couvertes par un avis amont` |
+| `runs-on` | tous | `ubuntu-latest` |
+
+`runs-on` prend un seul label. GitHub ne laisse pas l'appelant surcharger le
+`runs-on` d'un job appelé, d'où cet input. Une valeur vide retombe sur
+`ubuntu-latest`. L'appelant peut donc passer une variable de dépôt avant de
+l'avoir définie. Un runner hébergé par GitHub est toujours attribué dans le
+contexte de l'appelant. Un runner auto-hébergé de l'appelant, un scale set par
+exemple, n'est accessible au job appelé que si le dépôt appelant et l'outil ont
+le même propriétaire, utilisateur ou organisation
+([documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#self-hosted-runners)).
+Le runner choisi doit fournir `bash`, `git` et `gh`. L'action `setup` installe
+Node et pnpm.
 
 Secrets, tous facultatifs : `SCALINGO_API_TOKEN` ou `FGP_KEY` pour l'accès,
 `TEAMS_WEBHOOK`, `SLACK_WEBHOOK` et `MATRIX_ACCESS_TOKEN` pour les

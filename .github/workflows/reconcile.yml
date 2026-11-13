@@ -44,6 +44,10 @@ on:
       lock-commit-message:
         type: string
         default: "chore(lock): etat du parc apres reconciliation"
+      runs-on:
+        description: Label unique du runner qui execute le job, ubuntu-latest si vide
+        type: string
+        default: ubuntu-latest
     secrets:
       SCALINGO_API_TOKEN:
         required: false
@@ -60,7 +64,9 @@ on:
 
 jobs:
   reconcile:
-    runs-on: ubuntu-latest
+    # GitHub refuse un runs-on vide. Une variable que l'appelant n'a pas encore
+    # definie arrive vide et retombe donc sur ubuntu-latest.
+    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
     # Les secrets d'acces vivent dans cet environment et non dans le depot :
     # seuls les jobs qui le declarent peuvent les lire. Le job n'y lit pourtant
     # que les secrets que l'appelant lui passe : un secret non mappe arrive

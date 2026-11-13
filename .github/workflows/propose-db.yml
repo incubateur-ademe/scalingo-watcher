@@ -30,6 +30,10 @@ on:
       commit-message:
         type: string
         default: "chore(base): proposer la montee de version des bases"
+      runs-on:
+        description: Label unique du runner qui execute le job, ubuntu-latest si vide
+        type: string
+        default: ubuntu-latest
     secrets:
       SCALINGO_API_TOKEN:
         required: false
@@ -40,7 +44,9 @@ on:
 
 jobs:
   propose:
-    runs-on: ubuntu-latest
+    # GitHub refuse un runs-on vide. Une variable que l'appelant n'a pas encore
+    # definie arrive vide et retombe donc sur ubuntu-latest.
+    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
     environment: ${{ inputs.environment }}
     permissions:
       contents: write

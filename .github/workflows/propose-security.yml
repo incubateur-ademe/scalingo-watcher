@@ -27,13 +27,19 @@ on:
       commit-message:
         type: string
         default: "fix(securite): monter les versions couvertes par un avis amont"
+      runs-on:
+        description: Label unique du runner qui execute le job, ubuntu-latest si vide
+        type: string
+        default: ubuntu-latest
     secrets:
       PUSH_TOKEN:
         required: false
 
 jobs:
   propose:
-    runs-on: ubuntu-latest
+    # GitHub refuse un runs-on vide. Une variable que l'appelant n'a pas encore
+    # definie arrive vide et retombe donc sur ubuntu-latest.
+    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
     permissions:
       contents: write
       pull-requests: write

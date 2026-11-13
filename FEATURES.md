@@ -1422,6 +1422,18 @@ qu'une fois cette version publiée, comme pour tout ce que l'outil ajoute.
 workflow appelé, et installe Node et pnpm aux versions déclarées par l'outil
 (action `setup`). Le dépôt consommateur n'a ni `package.json` ni `.nvmrc`.
 
+**[fait]** Runner choisi par l'appelant. GitHub ne laisse pas un appelant
+surcharger le `runs-on` d'un job appelé. Chaque workflow réutilisable prend
+donc un input `runs-on` : un seul label, `ubuntu-latest` par défaut et quand la
+valeur est vide.
+
+**[à faire]** Passage complet sur un runner auto-hébergé. Seul `ubuntu-latest`
+a été éprouvé. Les étapes appellent `bash`, `git` et `gh` sans les installer.
+La documentation de GitHub n'ouvre les runners auto-hébergés de l'appelant
+qu'à un workflow appelé du même propriétaire, utilisateur ou organisation. Un
+parc hors de l'organisation de l'outil n'y aurait donc pas accès. Un passage
+réel depuis une autre organisation doit le confirmer.
+
 **[fait]** Actions composites dans `actions/` : `setup`, `signaler` (tableau de
 bord et notification), `commit-lock` (push du lock rejoué, et arbitré par sa date
 quand deux passages l'ont écrit).
