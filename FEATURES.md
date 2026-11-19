@@ -626,9 +626,11 @@ repart d'elle-même, sans intervention.
 cible courante, pas celles déjà levées par un changement de cible.
 
 **[fait]** Réconciliation périodique (`--reconcile`), demandée à l'heure. GitHub
-ne garantit pas ses crons et en saute une partie : mesuré sur deux jours, les
-passages réels s'espacent de trois à six heures et demie. La cadence déclarée est
-donc un plancher de demande, pas une promesse de délai.
+ne garantit pas ses crons et en saute une partie. Mesuré sur deux parcs du
+15 octobre au 19 novembre 2026, hors une période que l'API des runs ne liste
+plus, l'écart entre deux déclenchements du cron a une médiane de six à sept
+heures, un 90e centile de huit à neuf heures et un maximum de 11 heures. La
+cadence déclarée est donc un plancher de demande, pas une promesse de délai.
 Elle relève l'état réel de chaque application, signale ce qui a bougé hors du
 watcher, met le lock en accord avec le parc, puis laisse l'application converger.
 Elle existe parce que Renovate fusionne le manifeste et s'arrête là : il ne
@@ -638,6 +640,40 @@ repasse jamais sur une application restée en arrière après un échec.
 réconciliation tout de suite, au lieu d'attendre le prochain créneau. Le filtre
 sur le manifeste évite la boucle : le commit de lock que la réconciliation
 produit ne la redéclenche pas.
+
+**[fait]** Battement vers une veille de silence (secret `HEARTBEAT_URL`), à
+partir de la 2.0.0. Aucune version 1.x ne le porte. Les
+notifications partent du job de réconciliation. Un job refusé pour facturation
+ne démarre plus et ne prévient personne. Après chaque passage planifié dont le
+tableau de bord a été publié, `reconcile` envoie un GET à chaque URL du secret.
+Le service de veille alerte quand les battements cessent, quelle qu'en soit la
+cause : facturation, cron arrêté, workflow cassé, panne de GitHub Actions.
+
+Seule la première tentative d'un passage planifié bat. Un lancement à la main,
+ou la relance d'un run planifié vieux de plusieurs jours, masquerait un cron
+arrêté, par exemple quand le compte de son auteur est suspendu.
+
+Un battement refusé donne un avertissement sans faire échouer le job. Les
+redirections sont suivies jusqu'au service. Un `Retry-After` du service ne
+retient pas le job plus de 30 secondes par URL. Seul un code HTTP final en 2xx
+compte comme reçu. curl 8.18, celui d'`ubuntu-latest`, sort en succès quand il
+renonce à réessayer devant un `Retry-After` plus long que cette borne.
+
+Seul l'hôte de l'URL est affiché, sans identifiants ni requête. Le reste peut
+porter le secret du service, et le runner ne masque que la valeur entière du
+secret. curl part avec `-g`. Sans lui, il développe `[]` et `{}` en plusieurs
+URL et affiche l'URL entière sur un motif invalide. Une URL dont l'hôte n'a pas
+une forme valide n'est pas envoyée et donne un avertissement, car l'hôte lu par
+l'étape et celui lu par curl n'y sont plus les mêmes. La mise en place de
+référence, un check pulse updown.io de 24 heures, est dans le README.
+
+Le battement remplace une sentinelle qui lirait l'état des parcs depuis GitHub.
+Logée dans un autre parc, elle demandait un jeton approuvé par chaque
+organisation, et une cause commune aux deux parcs l'arrêtait en même temps
+qu'eux.
+Logée dans le dépôt public de l'outil, elle aurait exposé les parcs dans ses
+logs. L'API des runs ne convient pas non plus. Elle a cessé de lister près de
+deux semaines de runs d'un parc qui tournait.
 
 **[fait]** La quarantaine survit au relevé, sinon chaque passage la lèverait et
 la même cible serait retentée indéfiniment. Elle tombe en revanche si
@@ -828,6 +864,19 @@ lignes de support long qui régressent, l'arrondi du seuil, la distinction des
 raisons d'un verdict absent, le sens du rapprochement numérique, et la fin de la
 ligne en service dans le constat.
 
+**[fait]** Le battement est exercé par le script même de son étape, contre un
+serveur local : l'URL atteinte entière, identifiants, chemin et requête jamais
+affichés, plusieurs URL séparées par des blancs ou des fins de ligne Windows, le
+secret absent, un refus qui avertit sans faire échouer le job, une redirection
+suivie, un `Retry-After` d'une heure, des crochets et des accolades envoyés
+tels quels, des URL mal formées non envoyées. Un faux curl qui sort en 0, comme
+curl 8.18, rejoue un 204, un 503, un 429, un 301 et un 000 : seul le 204 est
+reçu, quelle que soit la version de curl du poste. Son câblage est vérifié sur
+le YAML, et sa condition comparée à l'identique. La condition et les gardes du
+script (hôte seul, identifiants, refus sans échec, redirection, `Retry-After`,
+code 2xx, `-g`, forme de l'hôte, fins de ligne Windows) ont chacune été cassées
+pour vérifier que la suite échoue.
+
 **[fait]** Les tests ont été vérifiés en cassant volontairement chacun des
 invariants, pour s'assurer qu'ils échouent quand ils le doivent.
 
@@ -963,7 +1012,15 @@ information non dérivable : elle vit dans les modules d'outil du moteur, dans
 **GitHub coupe les crons d'un dépôt public sans activité depuis 60 jours.** Un
 parc stable dont le lock ne bouge plus et sans pull request Renovate perd sa
 réconciliation planifiée sans prévenir. Un lancement manuel ou toute activité
-sur le dépôt la rétablit.
+sur le dépôt la rétablit. Avec une veille de silence, l'arrêt est signalé au
+bout de sa période.
+
+**Le battement dit qu'un parc a été regardé, pas qu'il va bien.** L'état reste
+au tableau de bord et dans ses notifications. Sans service de veille configuré,
+rien ne surveille le silence. Un service de veille en panne, ou un canal
+d'alerte mort, n'alerte pas non plus. Un parc ne bat qu'une fois migré en
+2.0.0, avec `HEARTBEAT_URL` passé à `reconcile`. Mappé dans un appelant 1.x, le
+secret fait refuser l'appel par GitHub, et chaque passage échoue au démarrage.
 
 **Workflows réutilisables indisponibles sur GitHub Enterprise Server.** Le job
 appelé récupère l'outil par `job.workflow_repository` et `job.workflow_sha`, que
@@ -1427,6 +1484,10 @@ branches de proposition sont des inputs.
 **[à faire]** Appelant de `propose-security.yml` dans le dépôt starter. Le
 workflow voyage avec l'outil dès maintenant, mais le starter ne pourra l'épingler
 qu'une fois cette version publiée, comme pour tout ce que l'outil ajoute.
+
+**[à faire]** `HEARTBEAT_URL` mappé dans l'appelant `reconcile.yml` du starter,
+et la veille de silence dans sa checklist d'installation. Le starter ne pourra
+le faire qu'avec sa migration en 2.0.0.
 
 **[fait]** Le job appelé récupère le dépôt consommateur, puis l'outil au sha du
 workflow appelé, et installe Node et pnpm aux versions déclarées par l'outil
