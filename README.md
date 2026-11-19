@@ -98,7 +98,9 @@ poussent sur deux branches distinctes : un passage ne peut pas porter les deux.
 Par commande :
 
 - `apply.ts` : `--dry-run`, `--app <fragment>`, `--force` (redéploie une app
-  conforme, exige `--app`), `--reconcile`, `--prune`, `--validate`, `--adopt`
+  conforme, exige `--app`), `--rebuild` (relève puis refait à l'identique le
+  build d'une app conforme, sans sauvegarde, exige `--app`), `--reconcile`, `--prune`,
+  `--validate`, `--adopt`
   (amorce le lock depuis l'état réel, sans déployer), `--propose-db`,
   `--propose-security`.
 - `audit.ts` : `--app <fragment>`, `--region <nom>` (répétable, prime sur les

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { resolveAliases } from "./apply.ts";
+import { readRuntimes, type Runtime } from "./build-log.ts";
 import { deniedByProxy, REGENERATE_HINT } from "./fgp-scopes.ts";
 import { accessModes, flagValue, flagValues, readFgpFile, resolvePaths, shown, type Fgp } from "./options.ts";
 import {
@@ -154,6 +155,13 @@ type AppReport = {
   versionEnv: Record<string, string>;
   products: ProductReport[];
   lastDeployment: { id: string; status: string; createdAt: string; gitRef: string | null } | null;
+  /**
+   * Image de pile et runtimes du dernier deploiement, seulement quand il a
+   * reussi : un build rate annonce deja ce qu'il aurait installe, alors que
+   * Scalingo garde les conteneurs precedents. null quand rien n'a ete releve.
+   */
+  stackImage: string | null;
+  runtimes: Runtime[] | null;
   databases: Array<{ version: string; upgradable: boolean }>;
   errors: string[];
   outOfScope?: boolean;
@@ -464,6 +472,8 @@ async function collectApp(app: ScalingoApp, region: Region, token: string): Prom
     versionEnv: {},
     products: [],
     lastDeployment: null,
+    stackImage: null,
+    runtimes: null,
     databases: [],
     errors: [],
   };
@@ -487,7 +497,7 @@ async function collectApp(app: ScalingoApp, region: Region, token: string): Prom
 
   try {
     const deps = await httpJson<{
-      deployments: Array<{ id: string; status: string; created_at: string; git_ref: string | null }>;
+      deployments: Array<{ id: string; status: string; created_at: string; git_ref: string | null; stack_base_image?: string }>;
     }>(`${hostFor(region)}/v1/apps/${app.name}/deployments?per_page=1`, bearer(token, region.name));
     const last = (deps.deployments ?? [])[0];
     if (last) {
@@ -497,6 +507,7 @@ async function collectApp(app: ScalingoApp, region: Region, token: string): Prom
         createdAt: last.created_at,
         gitRef: last.git_ref ?? null,
       };
+      if (last.status === "success") report.stackImage = last.stack_base_image ?? null;
     }
   } catch (e) {
     report.errors.push(`deployments: ${(e as Error).message}`);
@@ -511,6 +522,7 @@ async function collectApp(app: ScalingoApp, region: Region, token: string): Prom
       if (res.ok) {
         const text = (await res.text()).slice(0, BUILD_LOG_MAX_BYTES);
         const fromLog = parseBuildpacksFromLog(text);
+        if (report.lastDeployment.status === "success") report.runtimes = readRuntimes(text);
         if (fromLog.length > 0) {
           report.buildpacks = fromLog;
           report.buildpackSource = "build-log";
@@ -714,6 +726,10 @@ function render(reports: AppReport[], findings: Finding[]) {
         const label = bp.owner && bp.repo ? `${bp.owner}/${bp.repo}` : bp.url;
         log(`    - ${label} ${bp.ref ? `@ ${bp.ref}` : "@ <non pinne>"}`);
       }
+    }
+    if (r.stackImage) log(`  image de pile       : ${r.stackImage}`);
+    for (const rt of r.runtimes ?? []) {
+      log(`  ${rt.name.padEnd(19)} : ${rt.version}${rt.exact === false ? " (demande, version installee non ecrite au journal)" : ""}`);
     }
     for (const db of r.databases) {
       log(`  base                : ${db.version}${db.upgradable ? "  =>  une version plus recente est disponible" : "  (a jour)"}`);

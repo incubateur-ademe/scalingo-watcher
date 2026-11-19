@@ -8,6 +8,8 @@
  *                                   monte les versions que les avis de l'amont couvrent
  *   node src/apply.ts               applique
  *   node src/apply.ts --app alpha   restreint aux apps dont le nom contient alpha
+ *   node src/apply.ts --rebuild --app alpha
+ *                                   refait le build d'une app conforme, a l'identique
  *
  * Requiert SCALINGO_API_TOKEN.
  *
@@ -28,6 +30,16 @@ import { isMap, isScalar, isSeq, parse, parseDocument, type Document, type ToStr
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { accessModes, flagValue, outFile, readFgpFile, resolvePaths, shown, toolRef, type Fgp, type Paths } from "./options.ts";
 import { deniedByProxy, REGENERATE_HINT } from "./fgp-scopes.ts";
+import { parseBuildpackRef, readBuildpackLines, readRuntimes, type Runtime } from "./build-log.ts";
+import {
+  cmpJdk,
+  forecastJdk,
+  inventoryTarget,
+  JVM_COMMON,
+  upstreamLag,
+  type Fetched,
+  type JdkForecast,
+} from "./buildpacks/jvm-common.ts";
 import {
   advisoriesFor,
   cmpVersion,
@@ -81,8 +93,24 @@ type LockEntry = {
   tool: { env: string; version: string | null };
   buildpacks: Array<{ repo: string; ref: string | null }>;
   deployment: { id: string; status: string; at: string } | null;
+  /**
+   * Ce que le dernier build reussi a installe : la pile, lue sur le deploiement,
+   * et les runtimes, lus dans son journal, null quand le journal n'a pas pu
+   * etre lu. Absent tant qu'aucun build reussi n'a ete releve.
+   *
+   * Un build rate n'y entre jamais : Scalingo garde alors les conteneurs
+   * precedents, alors que son journal annonce deja le nouveau JDK et que son
+   * deploiement porte deja la nouvelle pile. Les consigner ferait passer pour a
+   * jour une app qui tourne l'ancien build.
+   */
+  build?: { deployment: string; stack: string | null; runtimes: Runtime[] | null };
   backup: { id: string; at: string } | null;
-  quarantine: { target: Target; reason: string; at: string; deploymentId: string | null } | null;
+  /**
+   * `rebuild` distingue l'echec d'un build refait a l'identique, dont la cible
+   * est celle que l'app servait deja : il suspend les rebuilds par age de tout
+   * le parc, sans quoi chaque passage en casserait une app de plus.
+   */
+  quarantine: { target: Target; reason: string; at: string; deploymentId: string | null; rebuild?: true } | null;
 };
 
 // generatedAt date le dernier changement d'etat, pas la derniere verification :
@@ -222,6 +250,7 @@ const OPT = {
   reconcile: argv.includes("--reconcile"),
   prune: argv.includes("--prune"),
   force: argv.includes("--force"),
+  rebuild: argv.includes("--rebuild"),
   proposeDb: argv.includes("--propose-db"),
   proposeSecurity: argv.includes("--propose-security"),
   validateOnly: argv.includes("--validate"),
@@ -609,10 +638,10 @@ async function deploy(entry: AppEntry, target: Target) {
   const deadline = Date.now() + DEPLOY_TIMEOUT_MS;
   for (;;) {
     const { deployment } = await reqApi<{
-      deployment: { id: string; status: string; created_at: string };
+      deployment: { id: string; status: string; created_at: string; stack_base_image?: string };
     }>(`${apiHost(entry.region)}/v1/apps/${entry.app}/deployments/${id}`, entry.region);
     if (TERMINAL.test(deployment.status)) {
-      return { id, status: deployment.status, at: deployment.created_at };
+      return { id, status: deployment.status, at: deployment.created_at, stack: deployment.stack_base_image ?? null };
     }
     if (Date.now() > deadline) {
       throw new Error(
@@ -762,19 +791,13 @@ async function settleOut(
   }
 }
 
-/**
- * Depot et ref d'une entree de buildpack. La meme forme d'URL s'ecrit dans le
- * `.buildpacks` du depot applicatif et se relit dans le journal de build : un
- * seul parseur garde les deux releves comparables entre eux.
- */
-export const parseBuildpackRef = (url: string): { repo: string; ref: string | null } => {
-  const [bare, ref] = url.split("#");
-  const m = /github\.com[/:]([^/]+\/[^/#]+?)(?:\.git)?$/.exec(bare);
-  return { repo: m ? m[1] : bare, ref: ref || null };
-};
+export { parseBuildpackRef };
 
-/** Les buildpacks reellement utilises ne sont lisibles que dans les logs du build. */
-async function readBuildpacks(entry: AppEntry, deploymentId: string) {
+/**
+ * Journal d'un build, ou null quand il n'a pas pu etre lu. Les buildpacks
+ * reellement utilises et ce qu'ils ont installe ne se lisent que la.
+ */
+async function readBuildOutput(entry: AppEntry, deploymentId: string): Promise<string | null> {
   // Cette route rend du texte brut, pas du JSON : elle ne passe pas par req().
   const auth = fgp
     ? fgpHeaders(fgp.api[entry.region])
@@ -783,19 +806,36 @@ async function readBuildpacks(entry: AppEntry, deploymentId: string) {
     `${apiHost(entry.region)}/v1/apps/${entry.app}/deployments/${deploymentId}/output`,
     { headers: auth },
   );
-  if (!res.ok) return [];
-  const text = (await res.text()).slice(0, 512 * 1024);
-  const out: Array<{ repo: string; ref: string | null }> = [];
-  for (const line of text.split("\n")) {
-    const dl = /Downloading Buildpack:\s*(\S+)/.exec(line);
-    if (dl) {
-      out.push(parseBuildpackRef(dl[1]));
-      continue;
-    }
-    const br = /Using branch:\s*(\S+)/.exec(line);
-    if (br && out.length > 0) out[out.length - 1].ref = br[1];
+  if (!res.ok) return null;
+  return (await res.text()).slice(0, 512 * 1024);
+}
+
+/**
+ * Ce que le releve d'un build reussi consigne : la pile lue sur le
+ * deploiement, les runtimes lus dans son journal.
+ */
+const buildOf = (deploymentId: string, stack: string | null | undefined, output: string | null): NonNullable<LockEntry["build"]> => ({
+  deployment: deploymentId,
+  stack: stack ?? null,
+  runtimes: output === null ? null : readRuntimes(output),
+});
+
+/**
+ * Le build a consigner apres un releve. Un releve qui n'a pas trouve de build
+ * reussi garde celui que le lock connaissait, qui est encore ce qui tourne. Un
+ * journal illisible garde les runtimes deja lus pour ce meme deploiement : sans
+ * quoi une erreur passagere les effacerait, puis le passage suivant les
+ * reecrirait, et chaque aller-retour ferait un commit de lock.
+ */
+export function keptBuild(
+  seen: LockEntry["build"] | undefined,
+  known: LockEntry["build"] | undefined,
+): LockEntry["build"] | undefined {
+  if (!seen) return known;
+  if (seen.runtimes === null && known?.deployment === seen.deployment && known.runtimes !== null) {
+    return { ...seen, runtimes: known.runtimes };
   }
-  return out;
+  return seen;
 }
 
 /**
@@ -816,7 +856,14 @@ export function buildpacksLost(
   return lost.length > 0 ? `buildpack retire par le build : ${lost.join(", ")}` : null;
 }
 
-type Deployment = { id: string; status: string; created_at: string; git_ref: string | null };
+type Deployment = {
+  id: string;
+  status: string;
+  created_at: string;
+  git_ref: string | null;
+  /** Image de pile du build, `scalingo/scalingo-22:v21`. */
+  stack_base_image?: string;
+};
 
 /** Deploiement le plus recent d'une app, quel qu'en soit le statut, ou null. */
 export async function lastDeployment(entry: AppRef): Promise<Deployment | null> {
@@ -851,19 +898,46 @@ async function adoptApp(
   const last = await lastDeployment(entry);
   const deployed = deployedSha(last);
   const sha = deployed ?? fallbackSha;
+  if (!deployed) shaNotRead.add(keyOf(entry));
   if (!deployed) {
     emit(
       `    (git_ref "${last?.git_ref || "absent"}" illisible, sha ${fallbackSha === entry.source.sha ? "du manifeste" : "du lock"} retenu par defaut)`,
     );
   }
 
+  const output = last ? await readBuildOutput(entry, last.id) : null;
   return {
     source: { repo: entry.source.repo, sha },
     tool: { env: entry.tool.env, version: declared },
-    buildpacks: last ? await readBuildpacks(entry, last.id) : [],
+    buildpacks: output === null ? [] : readBuildpackLines(output),
     deployment: last ? { id: last.id, status: last.status, at: last.created_at } : null,
+    ...(last?.status === "success" ? { build: buildOf(last.id, last.stack_base_image, output) } : {}),
     backup: null,
     quarantine: null,
+  };
+}
+
+/**
+ * Entree de lock issue d'un releve, completee de ce que le releve ne voit pas
+ * ou n'a pas pu voir : la sauvegarde, qui ne se lit pas sur l'app, et ce que le
+ * lock savait du journal quand celui-ci est illisible.
+ *
+ * Un releve de buildpacks vide vaut journal illisible, comme apres un
+ * deploiement : l'ecrire tel quel effacait ce que le lock savait, et le
+ * passage suivant le reecrivait.
+ */
+function afterSurvey(real: LockEntry, known: LockEntry | undefined, quarantine: LockEntry["quarantine"]): LockEntry {
+  const build = keptBuild(real.build, known?.build);
+  // Construite cle par cle : le lock se compare en texte d'un passage a
+  // l'autre, et un ordre de cles qui bouge ferait un commit sans changement.
+  return {
+    source: real.source,
+    tool: real.tool,
+    buildpacks: real.buildpacks.length > 0 ? real.buildpacks : (known?.buildpacks ?? []),
+    deployment: real.deployment,
+    ...(build ? { build } : {}),
+    backup: known?.backup ?? null,
+    quarantine,
   };
 }
 
@@ -1132,6 +1206,10 @@ type Outcome =
   | "up-to-date"
   | "quarantined-skip"
   | "deployed"
+  // Un build refait a l'identique ne dit rien d'une cible nouvelle : il ne
+  // tient pas lieu d'eclaireur, sinon les montees partiraient de front derriere
+  // lui sans qu'aucune app ait valide leur version.
+  | "rebuilt"
   | "failed"
   | "error"
   | "planned"
@@ -1183,17 +1261,28 @@ async function readAppStatus(
  * C'est exactement le genre d'echeance qu'on ne voit pas venir sans la
  * surveiller, d'ou sa place ici plutot que dans une note quelque part.
  */
-const stackCache = new Map<string, Map<string, { name: string; deprecatedAt: string | null }>>();
+type Stack = {
+  name: string;
+  deprecatedAt: string | null;
+  /** Image courante de la pile, `scalingo/scalingo-22:v21`, qu'un build prendrait. */
+  baseImage: string | null;
+};
 
-async function readStacks(region: string): Promise<Map<string, { name: string; deprecatedAt: string | null }>> {
+const stackCache = new Map<string, Map<string, Stack>>();
+
+// Pile de chaque app, relevee avec son etat : un rebuild la reprend, et c'est
+// elle qui dit quel inventaire et quelle image il prendrait.
+const appStacks = new Map<string, string>();
+
+async function readStacks(region: string): Promise<Map<string, Stack>> {
   const cached = stackCache.get(region);
   if (cached) return cached;
-  const out = new Map<string, { name: string; deprecatedAt: string | null }>();
+  const out = new Map<string, Stack>();
   try {
     const { stacks } = await reqApi<{
-      stacks: Array<{ id: string; name: string; deprecated_at: string | null }>;
+      stacks: Array<{ id: string; name: string; deprecated_at: string | null; base_image?: string }>;
     }>(`${apiHost(region)}/v1/features/stacks`, region);
-    for (const s of stacks) out.set(s.id, { name: s.name, deprecatedAt: s.deprecated_at });
+    for (const s of stacks) out.set(s.id, { name: s.name, deprecatedAt: s.deprecated_at, baseImage: s.base_image ?? null });
   } catch (e) {
     // Une echeance qu'on n'a pas pu lire ne doit pas empecher de deployer, mais
     // elle ne doit pas non plus passer pour une absence d'echeance : sans ce
@@ -1225,7 +1314,10 @@ async function observePaused(
     return "paused";
   }
   const state = await readAppStatus(entry);
-  if (!("unreadable" in state) && state.stack) await warnDeprecatedStack(entry, state.stack);
+  if (!("unreadable" in state) && state.stack) {
+    appStacks.set(key, state.stack);
+    await warnDeprecatedStack(entry, state.stack);
+  }
 
   let real: LockEntry;
   try {
@@ -1255,7 +1347,7 @@ async function observePaused(
   // Sans cette ligne, une quarantaine maintenue sur une app dont le pin
   // correspond ne s'expliquait nulle part.
   if (samePin && quarantine) emit(`    quarantaine maintenue, aucun deploiement reussi sur cette cible`);
-  lock.apps[key] = { ...real, backup: current?.backup ?? null, quarantine };
+  lock.apps[key] = afterSurvey(real, current, quarantine);
   return "paused";
 }
 
@@ -1269,6 +1361,83 @@ async function warnDeprecatedStack(entry: AppEntry, stackId: string): Promise<vo
       ? `tourne sur le stack ${stack.name}, deprecie dans ${days} jour(s), le ${stack.deprecatedAt.slice(0, 10)}`
       : `tourne sur le stack ${stack.name}, deprecie depuis le ${stack.deprecatedAt.slice(0, 10)}`,
   );
+}
+
+/**
+ * Age au-dela duquel la reconciliation refait a l'identique le build d'une app
+ * conforme.
+ *
+ * Ce que le build installe sans que le manifeste le dise, le JDK, l'image de la
+ * pile, un binaire dont le buildpack fixe la version, n'avance qu'a un nouveau
+ * build : un redemarrage relance la meme image. Les correctifs de l'outil
+ * rebuildent d'ordinaire le parc tous les un a trois jours, et cette regle ne
+ * fait que borner la queue, une ligne qui ne recoit plus de correctif.
+ *
+ * Aucune source externe : la regle ne depend que de la date du dernier build,
+ * et couvre ce qu'on saurait prevoir comme ce qu'on ne saurait pas.
+ */
+export const REBUILD_AFTER_DAYS = 7;
+
+/**
+ * Heures UTC ou la reconciliation refait un build par age, de 0 h inclus a 5 h
+ * exclus : la nuit en France, sur la plage ou la fusion automatique des
+ * correctifs place deja les deploiements. Sans plage, le rebuild partirait au
+ * premier passage apres sept jours, et les passages reels s'espacant de trois a
+ * six heures et demie, son heure glisserait d'une semaine a l'autre vers la
+ * journee. Le moteur ne connait pas le fuseau du parc : la plage est fixe.
+ */
+export const REBUILD_HOURS_UTC = { from: 0, to: 5 } as const;
+
+export const inRebuildWindow = (now: number): boolean => {
+  const hour = new Date(now).getUTCHours();
+  return hour >= REBUILD_HOURS_UTC.from && hour < REBUILD_HOURS_UTC.to;
+};
+
+/** Age en jours entiers d'un build qui a depasse le seuil, ou null. */
+export function staleBuildDays(at: string | null | undefined, now: number): number | null {
+  if (!at) return null;
+  const t = Date.parse(at);
+  if (Number.isNaN(t)) return null;
+  const days = Math.floor((now - t) / 86_400_000);
+  return days >= REBUILD_AFTER_DAYS ? days : null;
+}
+
+// Apps dont le releve de ce passage vient de constater l'etat, commit deploye
+// compris. Un build n'est refait que sur un etat constate : dans le doute on ne
+// deploie pas, et un lock non verifie peut dater d'avant un deploiement fait
+// hors du watcher. Un commit deploye que le releve n'a pas pu lire, un git_ref
+// qui n'est pas un sha, n'est pas un etat constate.
+const surveyed = new Set<string>();
+const shaNotRead = new Set<string>();
+
+// App dont un rebuild a echoue, ou null. Tant qu'elle reste en quarantaine,
+// aucun build n'est refait par age : une quarantaine n'arrete pas la vague, et
+// chaque app vieillie casserait sinon sur la meme cause, un JDK ou une tete de
+// buildpack defectueux, sans frein declaratif puisque ni l'un ni l'autre n'est
+// dans le manifeste. Mise a jour des l'echec, pour que les apps suivantes du
+// meme passage s'arretent aussi.
+let rebuildSuspension: string | null = null;
+
+/**
+ * Pourquoi refaire a l'identique le build d'une app conforme (`due`), pourquoi
+ * pas encore alors qu'il a l'age (`later`), ou null.
+ *
+ * --rebuild passe outre l'age, la plage et la suspension, mais pas le releve :
+ * sans lui, un lock en retard sur le reel ferait redescendre la version de
+ * l'outil sans sauvegarde.
+ */
+function rebuildPlan(key: string, current: LockEntry): { due: string } | { later: string } | null {
+  if (OPT.rebuild) return surveyed.has(key) ? { due: "demande par --rebuild" } : null;
+  if (!OPT.reconcile || !surveyed.has(key)) return null;
+  const at = current.deployment?.at;
+  const days = staleBuildDays(at, Date.now());
+  if (days === null) return null;
+  const age = `build du ${at!.slice(0, 10)}, vieux de ${days} jours`;
+  if (rebuildSuspension) return { later: `${age}, rebuilds par age suspendus` };
+  if (!inRebuildWindow(Date.now())) {
+    return { later: `${age}, refait entre ${REBUILD_HOURS_UTC.from} h et ${REBUILD_HOURS_UTC.to} h UTC` };
+  }
+  return { due: age };
 }
 
 async function applyApp(
@@ -1299,7 +1468,10 @@ async function applyApp(
       note(key, `etat illisible : ${state.unreadable.slice(0, 240)}`);
       return "rejected";
     }
-    if (state.stack) await warnDeprecatedStack(entry, state.stack);
+    if (state.stack) {
+      appStacks.set(key, state.stack);
+      await warnDeprecatedStack(entry, state.stack);
+    }
 
     if (NOT_DEPLOYABLE.has(state.status)) {
       emit(`  ${key} : etat "${state.status}", non deployable, laissee en l'etat`);
@@ -1310,21 +1482,30 @@ async function applyApp(
   // Une entree sans deploiement reussi ne vaut pas conformite : elle peut avoir
   // ete creee par un echec, auquel cas elle ne decrit aucun etat reellement atteint.
   const everDeployed = current?.deployment?.status === "success";
-  if (
-    !OPT.force &&
-    current &&
-    everDeployed &&
-    current.source.sha === target.sha &&
-    current.tool.version === target.version &&
-    !current.quarantine
-  ) {
-    emit(`  ${key} : deja conforme`);
-    return "up-to-date";
+  const onTarget = Boolean(current && current.source.sha === target.sha && current.tool.version === target.version);
+  let rebuild: string | null = null;
+
+  // Un rebuild rate se leve par --rebuild, par la meme branche sans
+  // sauvegarde : --force, la sortie ordinaire d'une quarantaine, sauvegarderait
+  // et remplacerait le point de restauration d'avant la derniere montee.
+  const lift =
+    OPT.rebuild &&
+    onTarget &&
+    surveyed.has(key) &&
+    Boolean(current?.quarantine?.rebuild && current.build && sameTarget(current.quarantine.target, target));
+  if (lift) rebuild = "demande par --rebuild, sortie de quarantaine";
+  else if (!OPT.force && current && everDeployed && onTarget && !current.quarantine) {
+    const plan = rebuildPlan(key, current);
+    if (!plan || "later" in plan) {
+      emit(`  ${key} : deja conforme${plan ? `, ${plan.later}` : ""}`);
+      return "up-to-date";
+    }
+    rebuild = plan.due;
   }
 
   // La quarantaine memorise la cible qui a echoue. Elle se libere d'elle-meme
   // des que le manifest pointe ailleurs, sans intervention.
-  if (!OPT.force && current?.quarantine && sameTarget(current.quarantine.target, target)) {
+  if (!OPT.force && !lift && current?.quarantine && sameTarget(current.quarantine.target, target)) {
     emit(`  ${key} : en quarantaine sur cette cible depuis ${current.quarantine.at.slice(0, 10)} (${current.quarantine.reason}), ignoree`);
     return "quarantined-skip";
   }
@@ -1338,7 +1519,9 @@ async function applyApp(
   }
 
   const changes: string[] = [];
-  if (OPT.force && everDeployed && current!.source.sha === target.sha && current!.tool.version === target.version) {
+  if (rebuild) {
+    changes.push(`rebuild a l'identique, ${rebuild}, ${target.version} @ ${target.sha.slice(0, 7)}`);
+  } else if (OPT.force && everDeployed && current!.source.sha === target.sha && current!.tool.version === target.version) {
     changes.push(`redeploiement force a l'identique, ${target.version} @ ${target.sha.slice(0, 7)}`);
   } else if (!everDeployed) {
     changes.push(`premiere prise en charge, cible ${target.version} @ ${target.sha.slice(0, 7)}`);
@@ -1480,7 +1663,13 @@ async function applyApp(
     await readEvents(entry);
     await readContainers(entry, null);
 
-    if (backupMode === "required") {
+    // Un rebuild a l'identique ne migre rien : meme version de l'outil, meme
+    // commit. Sauvegarder ne protegerait de rien, et remplacerait dans le lock
+    // le point de restauration d'avant la derniere montee, celui dont on a
+    // besoin quand une migration a mal tourne.
+    if (rebuild) {
+      emit(`    rebuild a l'identique, sans sauvegarde, la derniere reste le point de restauration`);
+    } else if (backupMode === "required") {
       emit(`    sauvegarde de la base...`);
       backup = await runBackup(entry, emit);
       emit(`    sauvegarde ${backup.id} disponible`);
@@ -1503,8 +1692,10 @@ async function applyApp(
     // d'ailleurs, d'un BUILDPACK_URL change sur Scalingo a une ligne que le
     // parseur n'a pas su lire. L'instance a deja tourne un moment sans ce que
     // le buildpack apportait : c'est le prix d'un controle qui mesure.
-    const buildpacks = failure ? [] : await readBuildpacks(entry, dep.id);
+    const output = failure ? null : await readBuildOutput(entry, dep.id);
+    const buildpacks = output === null ? [] : readBuildpackLines(output);
     failure ??= buildpacksLost(current?.buildpacks ?? [], buildpacks);
+    const suspends = Boolean(rebuild || current?.quarantine?.rebuild);
 
     if (failure) {
       lock.apps[key] = {
@@ -1517,10 +1708,26 @@ async function applyApp(
           quarantine: null,
         }),
         backup,
-        quarantine: { target, reason: failure, at: new Date().toISOString(), deploymentId: dep.id },
+        quarantine: {
+          target,
+          reason: failure,
+          at: new Date().toISOString(),
+          deploymentId: dep.id,
+          // Un echec qui suit un rebuild rate garde la suspension : seul un
+          // deploiement reussi de l'app dit que la cause commune est levee.
+          ...(suspends ? { rebuild: true as const } : {}),
+        },
       };
+      if (suspends) rebuildSuspension ??= key;
       emit(`    ECHEC (${failure}), mise en quarantaine`);
-      note(key, `deploiement en echec (${failure}), mise en quarantaine.`);
+      note(
+        key,
+        suspends
+          ? `${rebuild ? "rebuild a l'identique" : "deploiement"} en echec (${failure}), mise en quarantaine. Les rebuilds par age ` +
+              `sont suspendus sur tout le parc tant qu'un deploiement de cette app n'a pas reussi : --rebuild --app ` +
+              `une fois la cause levee, ou une montee de version.`
+          : `deploiement en echec (${failure}), mise en quarantaine.`,
+      );
       return "failed";
     }
 
@@ -1543,11 +1750,12 @@ async function applyApp(
       tool: { env: entry.tool.env, version: entry.tool.version },
       buildpacks: known,
       deployment: { id: dep.id, status: dep.status, at: dep.at },
+      build: buildOf(dep.id, dep.stack, output),
       backup,
       quarantine: null,
     };
     emit(`    succes`);
-    return "deployed";
+    return rebuild ? "rebuilt" : "deployed";
   } catch (e) {
     // Volontairement sans quarantaine ni ecriture de version : on ne sait pas ou
     // l'operation s'est arretee, donc le lock reste sur ce qu'il savait.
@@ -1884,6 +2092,38 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
   }
   lines.push("");
 
+  lines.push("## Runtimes", "");
+  lines.push("| App | Composant | En service | Un rebuild installerait | Dernier build | État |");
+  lines.push("| --- | --- | --- | --- | --- | --- |");
+  for (const entry of targets) {
+    const key = keyOf(entry);
+    const known = lock.apps[key];
+    const rows = observedRuntimes.get(key);
+    if (!known?.build || !rows) {
+      lines.push(`| [${entry.app}](${appUrl(entry)}) | inconnus | | | | pas de build réussi relevé |`);
+      continue;
+    }
+    // Le dernier deploiement peut etre un echec posterieur au build en service :
+    // sa date n'est alors pas celle de ce build.
+    const at = known.deployment?.at.slice(0, 10) ?? "";
+    const built = known.deployment?.id === known.build.deployment ? at : `avant le ${at}`;
+    for (const r of rows) {
+      const shown = (v: string | null, image: boolean) => (v ? `\`${inCell(image ? shortImage(v) : v)}\`` : "");
+      const image = r.component === "pile";
+      const next = r.state === "sans verdict" ? inCell(r.next ?? "") : r.state === "relevé" ? "non prévu" : shown(r.next, image);
+      lines.push(
+        `| [${entry.app}](${appUrl(entry)}) | ${inCell(r.component)} | ${shown(r.installed, image) || "non relevée"} ` +
+          `| ${next} | ${built} | ${entry.paused ? "en pause, " : ""}${r.state} |`,
+      );
+    }
+  }
+  lines.push("");
+  lines.push(
+    `Un build de plus de ${REBUILD_AFTER_DAYS} jours est refait à l'identique par la réconciliation.` +
+      (rebuildSuspension ? ` Suspendu : le dernier a échoué sur ${rebuildSuspension}.` : ""),
+    "",
+  );
+
   // Au tag qui tourne, sans verifier qu'il existe : contrairement au $schema
   // qu'init ecrit une fois chez le parc, ce rapport est reecrit a chaque
   // passage, et le seul tag absent est celui d'un passage depuis une main non
@@ -1933,7 +2173,8 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
       const q = entry!.quarantine!;
       lines.push(
         `- **${key}** depuis le ${q.at.slice(0, 10)}, cible ` +
-          `${q.target.version ?? "non epinglee"} @ ${q.target.sha.slice(0, 7)}`,
+          `${q.target.version ?? "non epinglee"} @ ${q.target.sha.slice(0, 7)}` +
+          `${q.rebuild ? ", rebuilds par âge suspendus" : ""}`,
         `  > ${q.reason.split("\n")[0].slice(0, 300)}`,
       );
     }
@@ -2786,6 +3027,215 @@ async function checkLifecycle(targets: AppEntry[], lock: Lock): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------- runtimes
+
+/** Un runtime, ou l'image de la pile, tel que le passage le juge. */
+type RuntimeRow = {
+  component: string;
+  installed: string | null;
+  /** Ce qu'un rebuild installerait, ou la raison de ne pas le savoir. */
+  next: string | null;
+  state: "à jour" | "rebuild utile" | "sans verdict" | "relevé";
+};
+
+const observedRuntimes = new Map<string, RuntimeRow[]>();
+
+/**
+ * Au-dela, Scalingo n'a pas repris une version qu'Heroku publie depuis une
+ * semaine. Le retard ordinaire va de quelques heures a deux semaines, et le
+ * seuil en leve une partie, au prix d'une echeance de plus, pour attraper le cas
+ * de 2025 : la ligne 17 a saute toute une mise a jour de securite pendant 108
+ * jours.
+ */
+export const SCALINGO_LAG_DAYS = 7;
+
+const textCache = new Map<string, Promise<Fetched>>();
+
+/**
+ * Texte brut d'une adresse, ou null quand elle n'a pas repondu. Memorise par
+ * adresse, echec compris : les apps d'un parc partagent le meme inventaire et
+ * souvent le meme commit, et relire la meme panne ne dirait rien de plus.
+ */
+function fetchText(url: string): Promise<Fetched> {
+  let pending = textCache.get(url);
+  if (!pending) {
+    pending = fetch(url)
+      .then(async (res) => ({ status: res.status, body: res.ok ? await res.text() : "" }))
+      .catch(() => null);
+    textCache.set(url, pending);
+  }
+  return pending;
+}
+
+/** Image de pile telle qu'affichee : `scalingo-22:v21`. */
+const shortImage = (image: string) => image.replace(/^scalingo\//, "");
+
+/**
+ * Pile de l'app et son image courante. La pile vient de l'etat de l'app quand
+ * le passage l'a lu, a defaut de l'image du dernier build, qui en porte le nom.
+ */
+async function stackOfApp(entry: AppEntry, built: string | null): Promise<{ name: string; baseImage: string | null } | null> {
+  const id = appStacks.get(keyOf(entry));
+  if (id) {
+    const stack = (await readStacks(entry.region)).get(id);
+    if (stack) return { name: stack.name, baseImage: stack.baseImage };
+  }
+  const named = built ? /scalingo-\d+(?:-minimal)?/.exec(built) : null;
+  return named ? { name: named[0], baseImage: null } : null;
+}
+
+/**
+ * Confronte ce que le dernier build reussi a installe a ce qu'un rebuild
+ * installerait.
+ *
+ * Le verdict ne declenche rien : la regle d'age refait les builds, qu'il y ait
+ * prevision ou non. Il dit ce qui tourne, et ce qu'un rebuild changerait, pour
+ * qu'on puisse l'avancer par --rebuild sans attendre.
+ *
+ * Seul le retard de Scalingo sur Heroku devient une echeance : aucun rebuild ne
+ * le resout, et il n'a pas de fin connue.
+ */
+async function checkRuntimes(targets: AppEntry[], lock: Lock): Promise<void> {
+  try {
+    await judgeRuntimes(targets, lock);
+  } catch (e) {
+    // Une prevision qui leve ne doit pas emporter l'ecriture du rapport, que le
+    // passage a de toute facon a rendre : le releve du KEV l'a fait une fois,
+    // apres une vague deja deployee.
+    warn(JVM_COMMON, `veille des runtimes interrompue, aucune prevision n'est sure : ${(e as Error).message.slice(0, 200)}`);
+  }
+}
+
+const isRepo = (a: string | null | undefined, b: string) => a?.toLowerCase() === b.toLowerCase();
+
+async function judgeRuntimes(targets: AppEntry[], lock: Lock): Promise<void> {
+  const unread = new Set<string>();
+  // Alias que les apps suivent sur l'inventaire principal du buildpack, sans
+  // l'epingler, avec la version que Scalingo y associe : ce sont ceux dont un
+  // retard sur Heroku prive le parc. L'inventaire de scalingo-20 est fige par
+  // choix et n'est pas un retard.
+  const followed = new Map<string, string>();
+  for (const entry of targets) {
+    const key = keyOf(entry);
+    const known = lock.apps[key];
+    const build = known?.build;
+    if (!known || !build) continue;
+    const stack = await stackOfApp(entry, build.stack);
+    const rows: RuntimeRow[] = [];
+    const used = known.buildpacks.find((b) => isRepo(b.repo, JVM_COMMON));
+
+    // Un journal illisible ou une ligne de JDK introuvable ne valent pas un
+    // parc sans JDK : sans ligne ni echeance, le JDK disparaitrait du tableau et
+    // le passage se dirait complet. Une ligne introuvable dit aussi que le
+    // buildpack a change de format, ce qui est deja arrive le 2025-02-26.
+    if (build.runtimes === null) {
+      rows.push({ component: "runtimes", installed: null, next: "journal du build illisible", state: "sans verdict" });
+      unread.add("journal du build illisible");
+    } else if (used && !build.runtimes.some((r) => r.component === "jdk")) {
+      rows.push({ component: "JDK", installed: null, next: "ligne du JDK absente du journal", state: "sans verdict" });
+      unread.add("ligne du JDK absente du journal de build");
+    }
+
+    for (const r of build.runtimes ?? []) {
+      if (r.component !== "jdk") {
+        rows.push({ component: r.name, installed: r.version, next: null, state: "relevé" });
+        continue;
+      }
+      const row: RuntimeRow = { component: r.name, installed: r.version, next: null, state: "sans verdict" };
+      rows.push(row);
+      if (r.exact === false) row.next = "version installée non écrite au journal";
+      else if (!isRepo(r.buildpack, JVM_COMMON)) row.next = "buildpack non suivi";
+      else if (r.refHidden) row.next = "référence du buildpack non écrite au journal";
+      else if (!isRepoRef(known.source.repo) || !isShaRef(known.source.sha)) row.next = "commit déployé illisible";
+      else if (used?.ref && !isBranchRef(used.ref)) row.next = "référence du buildpack illisible";
+      else if (!stack) row.next = "pile inconnue";
+      else {
+        const forecast: JdkForecast = await forecastJdk(
+          { ref: used?.ref ?? null, stack: stack.name, source: known.source },
+          fetchText,
+        );
+        if ("none" in forecast) {
+          row.next = forecast.none;
+          if (forecast.failed) unread.add(forecast.none);
+        } else {
+          row.next = forecast.version;
+          row.state = cmpJdk(forecast.version, r.version) > 0 ? "rebuild utile" : "à jour";
+          if (forecast.alias && !used?.ref && inventoryTarget(stack.name).file === "inventory.json") {
+            followed.set(forecast.alias, forecast.version);
+          }
+        }
+      }
+    }
+
+    const image: RuntimeRow = { component: "pile", installed: build.stack, next: null, state: "sans verdict" };
+    if (!build.stack) image.next = "image du build non relevée";
+    else if (!stack?.baseImage) image.next = "image courante non relevée";
+    else {
+      image.next = stack.baseImage;
+      image.state = stack.baseImage === build.stack ? "à jour" : "rebuild utile";
+    }
+    rows.push(image);
+    observedRuntimes.set(key, rows);
+  }
+
+  for (const [alias, version] of followed) {
+    const seen = await upstreamLag(alias, version, fetchText, ghJson);
+    if ("unreadable" in seen) {
+      unread.add(seen.unreadable);
+      continue;
+    }
+    const lag = seen.lag;
+    if (!lag) continue;
+    const behind = `JDK ${alias} : Heroku publie ${lag.upstream}, Scalingo en est a ${lag.scalingo}`;
+    const remedy = `Aucun rebuild ne l'installera tant que Scalingo ne l'a pas repris : le signaler au support Scalingo.`;
+    // Un retard etabli dont la date manque reste un retard : le taire parce que
+    // l'historique ne repond pas ferait repasser le rapport en etat sain.
+    if (!lag.since) {
+      warn(JVM_COMMON, `${behind}, depuis une date inconnue, l'historique de l'inventaire d'Heroku etant illisible. ${remedy}`);
+      continue;
+    }
+    const days = Math.floor((Date.now() - Date.parse(lag.since)) / 86_400_000);
+    const since = `${lag.atLeast ? "au moins " : ""}le ${lag.since.slice(0, 10)}`;
+    if (days < SCALINGO_LAG_DAYS) {
+      log(`\n${behind}, depuis ${since}, sous le seuil de ${SCALINGO_LAG_DAYS} jours.`);
+      continue;
+    }
+    warn(JVM_COMMON, `${behind}, publie par Heroku ${since}, il y a ${days} jours. ${remedy}`);
+  }
+
+  // Une source muette n'est pas un parc a jour : sans echeance, le rapport
+  // repasserait en etat sain sur une prevision qu'on n'a pas pu faire. Meme
+  // raison, et meme forme, qu'une liste de stacks ou une fin de vie illisibles.
+  for (const reason of unread) warn(JVM_COMMON, `${reason}, la prevision du JDK d'un rebuild n'a pas pu etre faite`);
+
+  const paused = new Set(targets.filter((e) => e.paused).map(keyOf));
+  const useful = [...observedRuntimes].filter(
+    ([key, rows]) => !paused.has(key) && rows.some((r) => r.state === "rebuild utile"),
+  );
+  if (useful.length > 0) {
+    log(`\n${useful.length} app(s) qu'un rebuild mettrait a jour :`);
+    for (const [key, rows] of useful) {
+      const moves = rows.filter((r) => r.state === "rebuild utile").map((r) => `${r.component} ${r.installed} -> ${r.next}`);
+      log(`  ${key} : ${moves.join(", ")}`);
+    }
+    log(
+      `La reconciliation refait a l'identique tout build de plus de ${REBUILD_AFTER_DAYS} jours, entre ` +
+        `${REBUILD_HOURS_UTC.from} h et ${REBUILD_HOURS_UTC.to} h UTC. --rebuild --app le fait sans attendre.`,
+    );
+  } else if (observedRuntimes.size > 0) {
+    // Une surveillance muette dit qu'elle a regarde, et sur quoi elle n'a pas pu
+    // conclure : sans ce decompte, un parc a jour et un releve sans verdict
+    // rendraient le meme silence.
+    const all = [...observedRuntimes.values()].flat();
+    const judged = all.filter((r) => r.state === "à jour").length;
+    const blind = all.filter((r) => r.state === "sans verdict").length;
+    log(
+      `\nAucun rebuild utile : ${judged} composant(s) sur ${all.length} confronte(s) a ce qu'un rebuild installerait` +
+        `${blind > 0 ? `, ${blind} sans verdict` : ""}.`,
+    );
+  }
+}
+
 /** L'echeance que porte une ligne en fin de support, en une ligne. */
 function lifecycleDeadline(v: LifecycleVerdict, version: string): string {
   const where = `${version} est sur la ${v.lts ? "ligne de support long" : "ligne"} ${v.cycle}`;
@@ -3203,6 +3653,10 @@ async function main() {
     log("--force redeploierait tout le parc. Restreins la cible avec --app.");
     process.exit(1);
   }
+  if (OPT.rebuild && !OPT.appFilter) {
+    log("--rebuild referait le build de tout le parc. Restreins la cible avec --app.");
+    process.exit(1);
+  }
 
   if (targets.length === 0) {
     log("aucune app ne correspond au filtre.");
@@ -3250,7 +3704,7 @@ async function main() {
   // parc, puisqu'une variable peut avoir ete changee a la main. La
   // reconciliation traite les deux : elle releve le reel, signale ce qui a
   // bouge hors du watcher, puis laisse l'application converger.
-  if (OPT.reconcile && (token || fgp)) {
+  if ((OPT.reconcile || OPT.rebuild) && (token || fgp)) {
     log("RELEVE DE L'ETAT REEL\n");
     let drifts = 0;
     for (const entry of targets) {
@@ -3281,11 +3735,8 @@ async function main() {
       // adoptApp ne releve pas les sauvegardes, qui ne se lisent pas sur l'app :
       // les ecraser par null faisait perdre le point de restauration, c'est-a-dire
       // ce dont on a besoin precisement quand une migration a mal tourne.
-      lock.apps[key] = {
-        ...real,
-        backup: known?.backup ?? null,
-        quarantine: keptQuarantine(real, targetOf(entry), known?.quarantine ?? null),
-      };
+      lock.apps[key] = afterSurvey(real, known, keptQuarantine(real, targetOf(entry), known?.quarantine ?? null));
+      if (!shaNotRead.has(key)) surveyed.add(key);
     }
     // Sans cette precision, "Aucune derive." precedait la derive d'une app en
     // pause, annoncee juste apres dans l'application.
@@ -3295,6 +3746,16 @@ async function main() {
     log(drifts === 0 ? `\nAucune derive${scope}.${pausedNote}\n` : `\n${drifts} derive(s) relevee(s)${scope}.${pausedNote}\n`);
   }
 
+  // Apres le releve, qui a pu lever une quarantaine, et sur toutes les apps
+  // actives du manifeste : un rebuild rate sur une app hors du filtre --app
+  // suspend aussi les autres. Une entree orpheline ou une app en pause ne
+  // suspend rien : aucun deploiement ne viendrait jamais lever sa quarantaine.
+  const active = new Set(manifest.apps.filter((e) => !e.paused).map(keyOf));
+  rebuildSuspension = Object.entries(lock.apps).find(([k, e]) => active.has(k) && e.quarantine?.rebuild)?.[0] ?? null;
+  if (OPT.reconcile && rebuildSuspension) {
+    log(`Rebuilds par age suspendus : le dernier a echoue sur ${rebuildSuspension}, encore en quarantaine.\n`);
+  }
+
   log(OPT.dryRun ? "PLAN (aucune ecriture)" : "APPLICATION");
   log(`${targets.length} app(s), dans l'ordre du manifest\n`);
 
@@ -3302,6 +3763,7 @@ async function main() {
     "up-to-date": 0,
     "quarantined-skip": 0,
     deployed: 0,
+    rebuilt: 0,
     failed: 0,
     error: 0,
     planned: 0,
@@ -3379,7 +3841,7 @@ async function main() {
 
   log("");
   log(
-    `conformes ${tally["up-to-date"]}  deployees ${tally.deployed}  echecs ${tally.failed}  ` +
+    `conformes ${tally["up-to-date"]}  deployees ${tally.deployed}  refaites ${tally.rebuilt}  echecs ${tally.failed}  ` +
       `interrompues ${tally.error}  quarantaine ${tally["quarantined-skip"]}  ` +
       `rejetees ${tally.rejected}  en pause ${tally.paused}  ` +
       `non deployables ${tally["skipped-state"]}  planifiees ${tally.planned}`,
@@ -3391,6 +3853,7 @@ async function main() {
   await checkAdvisories(targets, lock);
   await checkLifecycle(targets, lock);
   await checkDatabases(targets, token);
+  await checkRuntimes(targets, lock);
 
   // Une surveillance silencieuse doit dire qu'elle a regarde, sinon son silence
   // se confond avec son absence.

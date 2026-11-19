@@ -41,19 +41,35 @@ import {
   isBranchRef,
   isRepoRef,
   isShaRef,
+  keptBuild,
   loadLock,
   parseBuildpackRef,
   policyReadByRenovate,
   readManifest,
+  inRebuildWindow,
+  REBUILD_AFTER_DAYS,
   RENAMED_FIELDS,
   resolveAliases,
   runningVersionUnknown,
   settleOf,
+  staleBuildDays,
   targetGoesBack,
   targetReached,
   writeOptions,
 } from "../src/apply.ts";
 import { resolveLatest, upstreamKey, upstreamsDeclared } from "../src/audit.ts";
+import { readRuntimes } from "../src/build-log.ts";
+import jvmCommon, {
+  cmpJdk,
+  forecastJdk,
+  inventoryTarget,
+  readSelector,
+  resolveJdk,
+  upstreamLag,
+  type Fetched,
+  type Inventory,
+} from "../src/buildpacks/jvm-common.ts";
+import oauth2Proxy from "../src/buildpacks/oauth2-proxy.ts";
 import { renderManifest } from "../src/init.ts";
 import { compose, matrixPayload, slackPayload, teamsPayload } from "../src/notify.ts";
 import { apiScopes, backupScopes, deniedByProxy } from "../src/fgp-scopes.ts";
@@ -143,7 +159,7 @@ const literalFields = (decl: string, pattern: RegExp, source: string): Set<strin
   const line = pattern.exec(source)?.[1];
   const literal = line && /\{(.+)\}/.exec(line);
   if (!literal) throw new Error(`declaration de ${decl} introuvable ou non litterale`);
-  return new Set([...literal[1].matchAll(/(\w+)\s*:/g)].map((m) => m[1]));
+  return new Set([...literal[1].matchAll(/(\w+)\??\s*:/g)].map((m) => m[1]));
 };
 
 const FIELDS: Record<string, Set<string>> = {
@@ -1932,6 +1948,246 @@ check(
   "une branche hors forme n'atteint pas l'API GitHub",
   simulatedUrls.filter((u) => u.includes("/branches/")),
   [],
+);
+
+console.log("\nCe que le journal de build dit des runtimes");
+
+// Extrait d'un vrai journal du 2026-11-18, noms d'app retires, codes de
+// couleur compris : multi-buildpack les laisse en tete de certaines lignes.
+const VRAI_JOURNAL = [
+  " \x1b[1m<-- Start deployment of exemple-metabase -->\x1b[0m",
+  "       Fetching source code",
+  "       Fetching deployment cache",
+  "-----> Downloading custom buildpack https://github.com/Scalingo/multi-buildpack",
+  "=====> Downloading Buildpack: https://github.com/Scalingo/buildpack-jvm-common.git",
+  "=====> Detected Framework: JVM Common",
+  "-----> Installing Azul Zulu OpenJDK 25.0.5.1",
+  "=====> Downloading Buildpack: https://github.com/Scalingo/metabase-buildpack.git",
+  "=====> Detected Framework: Metabase",
+  "Downloading Metabase v0.64.5.6",
+  "Installing Metabase v0.64.5.6",
+  "Done",
+  "=====> Downloading Buildpack: https://github.com/betagouv/oauth2-proxy-buildpack.git",
+  "=====> Detected Framework: Oauth2Proxy",
+  "downloading oauth2-proxy v7.15.5 from GitHub...",
+  "/tmp/tmp.Lu8xRRETLy/oauth2-proxy.tar.gz: OK",
+  " \x1b[0;36m Build complete, shipping your container...\x1b[0m",
+].join("\n");
+
+check("un vrai journal donne le JDK et oauth2-proxy, chacun rattache a son buildpack", readRuntimes(VRAI_JOURNAL), [
+  { component: "jdk", name: "Azul Zulu OpenJDK", version: "25.0.5.1", buildpack: "Scalingo/buildpack-jvm-common" },
+  { component: "oauth2-proxy", name: "oauth2-proxy", version: "v7.15.5", buildpack: "betagouv/oauth2-proxy-buildpack" },
+]);
+check(
+  "la forme d'avant 2025-02-26 est lue comme une demande, pas comme une version installee",
+  jvmCommon.read("-----> Installing OpenJDK 17... done"),
+  { name: "OpenJDK", version: "17", exact: false },
+);
+check("un JDK fourni par l'app n'annonce aucune version", jvmCommon.read("-----> Using provided JDK"), null);
+check("la ligne de Metabase n'est pas un JDK", jvmCommon.read("Installing Metabase v0.64.5.6"), null);
+check("oauth2-proxy se lit sur sa propre ligne", oauth2Proxy.read("downloading oauth2-proxy v7.15.5 from GitHub..."), {
+  name: "oauth2-proxy",
+  version: "v7.15.5",
+});
+check(
+  "les codes de couleur et une barre finale ne changent rien a la lecture",
+  readRuntimes("=====> Downloading Buildpack: https://github.com/Scalingo/buildpack-jvm-common.git/\n\x1b[1m-----> Installing Azul Zulu OpenJDK 25.0.5.1\x1b[0m"),
+  [{ component: "jdk", name: "Azul Zulu OpenJDK", version: "25.0.5.1", buildpack: "Scalingo/buildpack-jvm-common" }],
+);
+check(
+  "une URL sans .git cache sa reference : le journal ne dit pas si le buildpack est epingle",
+  readRuntimes("=====> Downloading Buildpack: https://github.com/Scalingo/buildpack-jvm-common\n-----> Installing Azul Zulu OpenJDK 25.0.4.1")[0]?.refHidden,
+  true,
+);
+check("un journal sans runtime connu n'en invente pas", readRuntimes("-----> Downloading Buildpack: https://github.com/Scalingo/nodejs-buildpack\n-----> Installing binaries"), []);
+
+console.log("\nPrevision du JDK d'un rebuild");
+
+check(
+  "le selecteur se lit comme java_properties::get",
+  [
+    readSelector("java.runtime.version=25\n"),
+    readSelector("# commentaire\njava.runtime.version = zulu-21 \r\n"),
+    readSelector("java.runtime.version 17"),
+    readSelector("java.runtime.versionx=1\n"),
+    readSelector("maven.version=3.9\n"),
+    readSelector("java.runtime.version=\n"),
+  ],
+  ["25", "zulu-21", "17", null, null, null],
+);
+check(
+  "la pile Scalingo devient la pile et l'inventaire d'Heroku",
+  [inventoryTarget("scalingo-22"), inventoryTarget("scalingo-24-minimal"), inventoryTarget("scalingo-20")],
+  [
+    { file: "inventory.json", stack: "heroku-22" },
+    { file: "inventory.json", stack: "heroku-24" },
+    { file: "inventory-20.json", stack: "heroku-20" },
+  ],
+);
+
+const artefact = (version: string, stacks = ["heroku-22", "heroku-24"]) => ({
+  version,
+  os: "linux",
+  arch: "amd64",
+  url: `https://exemple.test/${version}.tar.gz`,
+  metadata: { distribution: "zulu", cedar_stacks: stacks },
+});
+const inventaire = (alias25: string): Inventory => ({
+  version_aliases: { "25": alias25, "25.0.0": "25" },
+  artifacts: [artefact("25"), artefact("25.0.4.1"), artefact("25.0.5.0.3"), artefact("25.0.5.1"), artefact("1.8.0_514", ["heroku-20"])],
+});
+check(
+  "l'inventaire se resout comme inventory::query",
+  [
+    resolveJdk(inventaire("25.0.5.1"), "25", "heroku-22"),
+    resolveJdk(inventaire("25.0.5.1"), "zulu-25", "heroku-24"),
+    resolveJdk(inventaire("25.0.5.1"), "25.0.4.1", "heroku-22"),
+    resolveJdk(inventaire("25.0.5.1"), "25.0.0", "heroku-22"),
+    resolveJdk(inventaire("25.0.5.1"), "temurin-25", "heroku-22"),
+    resolveJdk(inventaire("25.0.5.1"), "25", "heroku-20"),
+  ],
+  [
+    { version: "25.0.5.1", alias: "25" },
+    { version: "25.0.5.1", alias: "25" },
+    { version: "25.0.4.1", alias: null },
+    { version: "25", alias: "25.0.0" },
+    null,
+    null,
+  ],
+);
+check(
+  "les versions de JDK se comparent composant par composant, quelle que soit leur forme",
+  [cmpJdk("25.0.5.1", "25.0.5.0.3") > 0, cmpJdk("25.0.5.0.3", "25.0.5") > 0, cmpJdk("1.8.0_514", "1.8.0_512") > 0, cmpJdk("25.0.5.1", "25.0.5.1")],
+  [true, true, true, 0],
+);
+
+const reponses = (table: Record<string, Fetched>) => async (url: string): Promise<Fetched> => (url in table ? table[url] : { status: 404, body: "" });
+const RAW = "https://raw.githubusercontent.com";
+const SOURCE = { repo: "exemple/metabase-scalingo", sha: "a".repeat(40) };
+const PROPS = `${RAW}/exemple/metabase-scalingo/${"a".repeat(40)}/system.properties`;
+const INV_SCALINGO = `${RAW}/Scalingo/buildpack-jvm-common/HEAD/inventory.json`;
+const prevoir = (table: Record<string, Fetched>, ref: string | null = null) =>
+  forecastJdk({ ref, stack: "scalingo-22", source: SOURCE }, reponses(table));
+check(
+  "la prevision suit le system.properties du commit deploye et l'inventaire du buildpack",
+  [
+    await prevoir({ [PROPS]: { status: 200, body: "java.runtime.version=25\n" }, [INV_SCALINGO]: { status: 200, body: JSON.stringify(inventaire("25.0.5.1")) } }),
+    await prevoir({ [INV_SCALINGO]: { status: 200, body: JSON.stringify(inventaire("25.0.5.1")) } }),
+    await prevoir({ [PROPS]: null }),
+    await prevoir({ [PROPS]: { status: 502, body: "" } }),
+    await prevoir({ [PROPS]: { status: 200, body: "java.runtime.version=25\n" } }),
+    await prevoir({ [PROPS]: { status: 200, body: "java.runtime.version=25\n" }, [INV_SCALINGO]: { status: 200, body: "<html>" } }),
+    await prevoir(
+      {
+        [PROPS]: { status: 200, body: "java.runtime.version=25\n" },
+        [`${RAW}/Scalingo/buildpack-jvm-common/v189/inventory.json`]: { status: 200, body: JSON.stringify(inventaire("25.0.4.1")) },
+      },
+      "v189",
+    ),
+  ],
+  [
+    { version: "25.0.5.1", alias: "25" },
+    { none: "majeure non fixée par system.properties", failed: false },
+    { none: "system.properties illisible", failed: true },
+    { none: "system.properties illisible", failed: true },
+    { none: "inventaire illisible", failed: true },
+    { none: "inventaire illisible", failed: true },
+    { version: "25.0.4.1", alias: "25" },
+  ],
+);
+
+const INV_HEROKU = `${RAW}/heroku/heroku-buildpack-jvm-common/HEAD/inventory.json`;
+const enHistoire = (sha: string, alias: string): Record<string, Fetched> => ({
+  [`${RAW}/heroku/heroku-buildpack-jvm-common/${sha}/inventory.json`]: { status: 200, body: JSON.stringify(inventaire(alias)) },
+});
+const commits = (...shas: Array<[string, string]>) => async <T>() => shas.map(([sha, date]) => ({ sha, commit: { committer: { date } } })) as T;
+const sansHistorique = async <T>() => null as T | null;
+const SHA_C = "c".repeat(40);
+const SHA_D = "d".repeat(40);
+const SHA_E = "e".repeat(40);
+check(
+  "le retard de Scalingo se date au premier commit d'Heroku qui porte la version",
+  [
+    await upstreamLag("25", "25.0.5.1", reponses({ [INV_HEROKU]: { status: 200, body: JSON.stringify(inventaire("25.0.5.1")) } }), sansHistorique),
+    await upstreamLag(
+      "25",
+      "25.0.5.0.3",
+      reponses({
+        [INV_HEROKU]: { status: 200, body: JSON.stringify(inventaire("25.0.5.1")) },
+        ...enHistoire(SHA_C, "25.0.5.1"),
+        ...enHistoire(SHA_D, "25.0.5.1"),
+        ...enHistoire(SHA_E, "25.0.5.0.3"),
+      }),
+      commits([SHA_C, "2026-11-18T03:45:59Z"], [SHA_D, "2026-11-10T00:00:00Z"], [SHA_E, "2026-10-29T10:10:45Z"]),
+    ),
+    await upstreamLag(
+      "25",
+      "25.0.5.0.3",
+      reponses({ [INV_HEROKU]: { status: 200, body: JSON.stringify(inventaire("25.0.5.1")) }, ...enHistoire(SHA_C, "25.0.5.1") }),
+      commits([SHA_C, "2026-11-18T03:45:59Z"]),
+    ),
+    await upstreamLag("25", "25.0.5.0.3", reponses({ [INV_HEROKU]: { status: 200, body: JSON.stringify(inventaire("25.0.5.1")) } }), sansHistorique),
+    await upstreamLag("25", "25.0.5.0.3", reponses({}), sansHistorique),
+    await upstreamLag(
+      "25",
+      "25.0.5.0.3",
+      reponses({ [INV_HEROKU]: { status: 200, body: JSON.stringify(inventaire("25.0.5.1")) }, ...enHistoire(SHA_C, "25.0.5.1") }),
+      commits([SHA_C, "2026-11-18T03:45:59Z"], [SHA_D, "2026-11-10T00:00:00Z"]),
+    ),
+    await upstreamLag(
+      "25",
+      "25.0.5.0.3",
+      reponses({ [INV_HEROKU]: { status: 200, body: JSON.stringify(inventaire("25.0.5.1")) }, ...enHistoire(SHA_C, "25.0.5.0.3") }),
+      commits([SHA_C, "2026-11-18T03:45:59Z"]),
+    ),
+  ],
+  [
+    { lag: null },
+    { lag: { alias: "25", scalingo: "25.0.5.0.3", upstream: "25.0.5.1", since: "2026-11-10T00:00:00Z", atLeast: false } },
+    { lag: { alias: "25", scalingo: "25.0.5.0.3", upstream: "25.0.5.1", since: "2026-11-18T03:45:59Z", atLeast: true } },
+    { lag: { alias: "25", scalingo: "25.0.5.0.3", upstream: "25.0.5.1", since: null, atLeast: false } },
+    { unreadable: "inventaire de heroku/heroku-buildpack-jvm-common illisible" },
+    { lag: { alias: "25", scalingo: "25.0.5.0.3", upstream: "25.0.5.1", since: "2026-11-18T03:45:59Z", atLeast: true } },
+    { lag: null },
+  ],
+);
+
+console.log("\nRegle d'age et build consigne");
+
+const MAINTENANT = Date.parse("2026-11-19T12:00:00Z");
+check(
+  `un build se refait a partir de ${REBUILD_AFTER_DAYS} jours pleins, et seulement sur une date lisible`,
+  [
+    staleBuildDays("2026-11-12T12:00:01Z", MAINTENANT),
+    staleBuildDays("2026-11-12T12:00:00Z", MAINTENANT),
+    staleBuildDays("2026-10-01T00:00:00Z", MAINTENANT),
+    staleBuildDays("pas une date", MAINTENANT),
+    staleBuildDays(null, MAINTENANT),
+  ],
+  [null, 7, 49, null, null],
+);
+check(
+  "la plage des rebuilds par age va de 0 h inclus a 5 h exclus, en UTC",
+  ["2026-11-19T23:59:00Z", "2026-11-19T00:00:00Z", "2026-11-19T04:59:00Z", "2026-11-19T05:00:00Z", "2026-11-19T03:00:00+02:00"].map((t) =>
+    inRebuildWindow(Date.parse(t)),
+  ),
+  [false, true, true, false, true],
+);
+const JDK_LU = [{ component: "jdk", name: "Azul Zulu OpenJDK", version: "25.0.5.0.3", buildpack: "Scalingo/buildpack-jvm-common" }];
+check(
+  "un journal illisible garde les runtimes du meme deploiement, jamais ceux d'un autre",
+  [
+    keptBuild({ deployment: "dep-1", stack: "img", runtimes: null }, { deployment: "dep-1", stack: "img", runtimes: JDK_LU }),
+    keptBuild({ deployment: "dep-2", stack: "img", runtimes: null }, { deployment: "dep-1", stack: "img", runtimes: JDK_LU }),
+    keptBuild(undefined, { deployment: "dep-1", stack: "img", runtimes: JDK_LU }),
+    keptBuild({ deployment: "dep-2", stack: "img", runtimes: [] }, { deployment: "dep-1", stack: "img", runtimes: JDK_LU }),
+  ],
+  [
+    { deployment: "dep-1", stack: "img", runtimes: JDK_LU },
+    { deployment: "dep-2", stack: "img", runtimes: null },
+    { deployment: "dep-1", stack: "img", runtimes: JDK_LU },
+    { deployment: "dep-2", stack: "img", runtimes: [] },
+  ],
 );
 
 console.log("\nCommandes lancees hors du depot, contre un fetch simule");
@@ -3872,9 +4128,520 @@ try {
     [proxied.output.split("Compte de l'acces illisible").length - 1, pausedApps(readGenerated(viaProxy).manifest)],
     [1, []],
   );
+
+  console.log("\nVeille des runtimes et rebuild par age, contre un fetch simule");
+
+  // Alpha seule est relevable, et sans fenetre de garde : ses deux minutes ne
+  // tiendraient pas dans le delai d'un test. Sa sauvegarde reste exigee, et le
+  // fetch simule ne sait pas en faire : un rebuild qui en demanderait une
+  // serait interrompu.
+  const RT = "osc-fr1/alpha-metabase";
+  const sansAttenteAlpha = fixtureSrc.replace(
+    "  - app: alpha-metabase\n    region: osc-fr1\n",
+    "  - app: alpha-metabase\n    region: osc-fr1\n    settle:\n      window: 0\n",
+  );
+  const ilYa = (jours: number) => new Date(Date.now() - jours * 86_400_000).toISOString();
+  // Les rebuilds par age ne partent que la nuit, en UTC : l'horloge du moteur
+  // est figee a 3 h ou a midi, et les ages se comptent depuis elle.
+  const aHeure = (h: number) => {
+    const d = new Date();
+    d.setUTCHours(h, 0, 0, 0);
+    return d.toISOString();
+  };
+  const NUIT = aHeure(3);
+  const MIDI = aHeure(12);
+  const avant = (base: string, jours: number) => new Date(Date.parse(base) - jours * 86_400_000).toISOString();
+  const inventaireJson = (alias25: string) => JSON.stringify(inventaire(alias25));
+  const lockAvec = (edit: (alpha: Record<string, unknown>, apps: Record<string, Record<string, unknown>>) => void) => {
+    const l = JSON.parse(lockFixture) as { apps: Record<string, Record<string, unknown>> };
+    edit(l.apps[RT], l.apps);
+    return JSON.stringify(l, null, 2) + "\n";
+  };
+  const passage = (args: string[], env: Record<string, string> = {}, lockSrc?: string) => {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), sansAttenteAlpha);
+    if (lockSrc) writeFileSync(join(b.fleet, "lock.json"), lockSrc);
+    const out = run(b, "apply.ts", [...args, ...FLEET, "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40) } }),
+      JDK: "25.0.5.0.3",
+      STACK_IMAGE: "scalingo/scalingo-24:v10",
+      STACK_CURRENT: "scalingo/scalingo-24:v11",
+      SYSTEM_PROPERTIES: "java.runtime.version=25\n",
+      INVENTORY: inventaireJson("25.0.5.1"),
+      UPSTREAM_INVENTORY: inventaireJson("25.0.5.1"),
+      ...env,
+    });
+    const incidentFile = join(b.outDir, "incident.md");
+    return {
+      out,
+      entry: loadLock(join(b.fleet, "lock.json")).apps[RT],
+      incident: existsSync(incidentFile) ? readFileSync(incidentFile, "utf8") : "",
+      deployments: out.calls.filter((l) => /^POST \S+\/deployments$/.test(l)).length,
+      backups: out.calls.filter((l) => /backup/i.test(l)).length,
+    };
+  };
+  const ligne = (incident: string, composant: string) =>
+    incident
+      .slice(incident.indexOf("## Runtimes"))
+      .split("\n")
+      .find((l) => l.startsWith("| [alpha-metabase]") && l.includes(`| ${composant} |`)) ?? null;
+
+  const recent = passage(["--reconcile"]);
+  check(
+    "le releve consigne le build reussi : image de pile et JDK lus au journal",
+    [recent.out.status, recent.entry.build, recent.deployments],
+    [
+      0,
+      {
+        deployment: "dep-alpha-metabase",
+        stack: "scalingo/scalingo-24:v10",
+        runtimes: [{ component: "jdk", name: "Azul Zulu OpenJDK", version: "25.0.5.0.3", buildpack: "Scalingo/buildpack-jvm-common" }],
+      },
+      0,
+    ],
+  );
+  check(
+    "le tableau de bord dit ce qu'un rebuild installerait, sans en faire une intervention",
+    [
+      /\| `25\.0\.5\.0\.3` \| `25\.0\.5\.1` \| \d{4}-\d{2}-\d{2} \| rebuild utile \|$/.test(ligne(recent.incident, "Azul Zulu OpenJDK") ?? ""),
+      /\| `scalingo-24:v10` \| `scalingo-24:v11` \| \d{4}-\d{2}-\d{2} \| rebuild utile \|$/.test(ligne(recent.incident, "pile") ?? ""),
+      /prevision du JDK|Heroku publie/.test(recent.incident),
+      /1 app\(s\) qu'un rebuild mettrait a jour/.test(recent.out.output),
+    ],
+    [true, true, false, true],
+  );
+
+  const aJour = passage(["--reconcile"], { JDK: "25.0.5.1", STACK_CURRENT: "scalingo/scalingo-24:v10" });
+  check(
+    "un build qui installe deja ce qu'un rebuild installerait est a jour, et le passage dit qu'il a regarde",
+    [
+      / \| à jour \|$/.test(ligne(aJour.incident, "Azul Zulu OpenJDK") ?? ""),
+      / \| à jour \|$/.test(ligne(aJour.incident, "pile") ?? ""),
+      /Aucun rebuild utile : 2 composant\(s\) sur 2 confronte\(s\)/.test(aJour.out.output),
+    ],
+    [true, true, true],
+  );
+
+  const sauvegardee = lockAvec((alpha) => {
+    alpha.backup = { id: "bkp-42", at: "2026-11-01T03:00:00.000Z" };
+  });
+  const vieux = passage(
+    ["--reconcile"],
+    { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10), JDK_AFTER: "25.0.5.1", STACK_IMAGE_AFTER: "scalingo/scalingo-24:v11" },
+    sauvegardee,
+  );
+  check(
+    "un build de plus de sept jours est refait a l'identique, sans sauvegarde ni ecriture de variable",
+    {
+      status: vieux.out.status,
+      annonce: /alpha-metabase : rebuild a l'identique, build du \d{4}-\d{2}-\d{2}, vieux de 10 jours, v0\.63\.18 @ aaaaaaa/.test(vieux.out.output),
+      deploiements: vieux.deployments,
+      sauvegardes: vieux.backups,
+      variables: vieux.out.calls.filter((l) => /^(POST|PATCH|PUT) \S+\/variables/.test(l)).length,
+      backup: vieux.entry.backup,
+      build: vieux.entry.build,
+    },
+    {
+      status: 0,
+      annonce: true,
+      deploiements: 1,
+      sauvegardes: 0,
+      variables: 0,
+      backup: { id: "bkp-42", at: "2026-11-01T03:00:00.000Z" },
+      build: {
+        deployment: "dep-alpha-metabase",
+        stack: "scalingo/scalingo-24:v11",
+        runtimes: [{ component: "jdk", name: "Azul Zulu OpenJDK", version: "25.0.5.1", buildpack: "Scalingo/buildpack-jvm-common" }],
+      },
+    },
+  );
+  check(
+    "en plan, le rebuild est annonce sans rien ecrire",
+    (() => {
+      const plan = passage(["--reconcile", "--dry-run"], { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10) });
+      return [plan.out.status, /rebuild a l'identique, build du/.test(plan.out.output), writeCalls(plan.out.calls)];
+    })(),
+    [0, true, []],
+  );
+  check(
+    "hors reconciliation, un vieux build ne se refait pas",
+    passage([], { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10) }).deployments,
+    0,
+  );
+  const deJour = passage(["--reconcile"], { NOW: MIDI, DEPLOYED_AT: avant(MIDI, 10) });
+  check(
+    "hors de la plage de nuit, un vieux build attend, et le passage le dit",
+    [deJour.deployments, /alpha-metabase : deja conforme, build du \d{4}-\d{2}-\d{2}, vieux de 10 jours, refait entre 0 h et 5 h UTC/.test(deJour.out.output)],
+    [0, true],
+  );
+  const refNonLue = passage(["--reconcile"], {
+    NOW: NUIT,
+    DEPLOYED_AT: avant(NUIT, 10),
+    REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "main" } }),
+  });
+  check("un commit deploye que le releve n'a pas lu n'est pas refait", refNonLue.deployments, 0);
+
+  const manuel = passage(["--rebuild", "--app", "alpha"]);
+  check(
+    "--rebuild --app refait le build d'une app conforme sans attendre",
+    [manuel.out.status, /alpha-metabase : rebuild a l'identique, demande par --rebuild/.test(manuel.out.output), manuel.deployments, manuel.backups],
+    [0, true, 1, 0],
+  );
+  const parcEntier = passage(["--rebuild"]);
+  check(
+    "--rebuild sans --app est refuse avant tout appel",
+    [parcEntier.out.status, /--rebuild referait le build de tout le parc/.test(parcEntier.out.output), parcEntier.out.calls],
+    [1, true, []],
+  );
+
+  const rate = passage(["--reconcile"], { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10), CONTAINER: "crashed" }, sauvegardee);
+  check(
+    "un rebuild rate met en quarantaine, marquee rebuild, et le dit",
+    {
+      status: rate.out.status,
+      rebuild: rate.entry.quarantine?.rebuild ?? null,
+      cible: rate.entry.quarantine?.target ?? null,
+      backup: rate.entry.backup,
+      signale: /rebuild a l'identique en echec .*suspendus sur tout le parc/.test(rate.incident),
+      liste: /cible v0\.63\.18 @ aaaaaaa, rebuilds par âge suspendus/.test(rate.incident),
+    },
+    {
+      status: 1,
+      rebuild: true,
+      cible: { sha: "a".repeat(40), version: "v0.63.18" },
+      backup: { id: "bkp-42", at: "2026-11-01T03:00:00.000Z" },
+      signale: true,
+      liste: true,
+    },
+  );
+  const GAMMA = "osc-secnum-fr1/gamma-metabase";
+  const suspendu = passage(
+    ["--reconcile"],
+    { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10) },
+    lockAvec((_, apps) => {
+      apps[GAMMA].quarantine = {
+        target: { sha: (apps[GAMMA].source as { sha: string }).sha, version: "v0.63.18" },
+        reason: "build-error",
+        at: "2026-11-18T03:00:00.000Z",
+        deploymentId: "dep-rate",
+        rebuild: true,
+      };
+    }),
+  );
+  check(
+    "un rebuild rate ailleurs dans le parc suspend tous les rebuilds par age, et le tableau de bord le dit",
+    [
+      suspendu.deployments,
+      /Rebuilds par age suspendus : le dernier a echoue sur osc-secnum-fr1\/gamma-metabase/.test(suspendu.out.output),
+      /alpha-metabase : deja conforme, build du .*, rebuilds par age suspendus/.test(suspendu.out.output),
+      /Suspendu : le dernier a échoué sur osc-secnum-fr1\/gamma-metabase/.test(suspendu.incident),
+    ],
+    [0, true, true, true],
+  );
+  const orpheline = passage(
+    ["--reconcile"],
+    { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10) },
+    lockAvec((alpha, apps) => {
+      apps["osc-fr1/omega-metabase"] = {
+        ...alpha,
+        quarantine: { target: { sha: "a".repeat(40), version: "v0.63.18" }, reason: "build-error", at: "2026-11-18T03:00:00.000Z", deploymentId: "dep-rate", rebuild: true },
+      };
+    }),
+  );
+  check(
+    "une entree orpheline en quarantaine de rebuild ne suspend rien : aucun deploiement ne la leverait",
+    [orpheline.deployments, /suspendus/.test(orpheline.out.output)],
+    [1, false],
+  );
+  const pendantSuspension = passage(
+    ["--rebuild", "--app", "alpha"],
+    {},
+    lockAvec((_, apps) => {
+      apps[GAMMA].quarantine = {
+        target: { sha: (apps[GAMMA].source as { sha: string }).sha, version: "v0.63.18" },
+        reason: "build-error",
+        at: "2026-11-18T03:00:00.000Z",
+        deploymentId: "dep-rate",
+        rebuild: true,
+      };
+    }),
+  );
+  check("--rebuild --app passe outre la suspension, decision humaine", pendantSuspension.deployments, 1);
+
+  // Le lock dit v0.63.18 alors que l'app tourne v0.64.0 sur une base deja
+  // migree : un checkout local non tire. Sans releve, --rebuild la redescendait
+  // sans sauvegarde.
+  const enRetardSurLeReel = passage(["--rebuild", "--app", "alpha"], { REAL: JSON.stringify({ [RT]: { version: "v0.64.0", sha: "a".repeat(40) } }) });
+  check(
+    "--rebuild releve l'app d'abord : un lock en retard sur le reel ne la fait pas redescendre",
+    [enRetardSurLeReel.deployments, /DESCENTE DE VERSION : METABASE_VERSION porte v0\.64\.0/.test(enRetardSurLeReel.out.output)],
+    [0, true],
+  );
+  const sansAcces = (() => {
+    const b = sandbox();
+    const out = run(b, "apply.ts", ["--rebuild", "--app", "alpha", ...FLEET]);
+    return [out.status, /Aucun acces configure/.test(out.output), out.calls];
+  })();
+  check("--rebuild sans acces a Scalingo est refuse avant tout appel", sansAcces, [1, true, []]);
+
+  const enQuarantaineDeRebuild = lockAvec((alpha) => {
+    alpha.backup = { id: "bkp-42", at: "2026-11-01T03:00:00.000Z" };
+    alpha.build = { deployment: "dep-ancien", stack: "scalingo/scalingo-24:v10", runtimes: JDK_LU };
+    alpha.quarantine = {
+      target: { sha: "a".repeat(40), version: "v0.63.18" },
+      reason: "build-error",
+      at: "2026-11-18T03:00:00.000Z",
+      deploymentId: "dep-alpha-metabase",
+      rebuild: true,
+    };
+  });
+  const levee = passage(["--rebuild", "--app", "alpha"], {
+    REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40), status: "build-error" } }),
+    AFTER_STATUS: JSON.stringify({ "alpha-metabase": "success" }),
+  }, enQuarantaineDeRebuild);
+  check(
+    "--rebuild --app leve une quarantaine de rebuild, sans sauvegarde",
+    [levee.out.status, /rebuild a l'identique, demande par --rebuild, sortie de quarantaine/.test(levee.out.output), levee.deployments, levee.backups, levee.entry.quarantine, levee.entry.backup],
+    [0, true, 1, 0, null, { id: "bkp-42", at: "2026-11-01T03:00:00.000Z" }],
+  );
+  const sansSauvegardeAlpha = sansAttenteAlpha.replace(
+    "  - app: alpha-metabase\n    region: osc-fr1\n",
+    "  - app: alpha-metabase\n    region: osc-fr1\n    backup: not-available\n",
+  );
+  const monteeRatee = (() => {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), sansSauvegardeAlpha.replace("version: v0.63.18\n\n  - app: beta-metabase", "version: v0.63.19\n\n  - app: beta-metabase"));
+    writeFileSync(join(b.fleet, "lock.json"), enQuarantaineDeRebuild);
+    run(b, "apply.ts", ["--reconcile", ...FLEET, "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40), status: "build-error" } }),
+      AFTER_STATUS: JSON.stringify({ "alpha-metabase": "build-error" }),
+    });
+    return loadLock(join(b.fleet, "lock.json")).apps[RT].quarantine;
+  })();
+  check(
+    "une montee ratee sur une app en quarantaine de rebuild garde la suspension",
+    [monteeRatee?.target.version, monteeRatee?.rebuild],
+    ["v0.63.19", true],
+  );
+
+  // Le rebuild d'alpha passe, puis delta monte vers une version qui echoue :
+  // c'est delta qui doit servir d'eclaireur, et son echec arreter la vague.
+  const eclaireur = (() => {
+    const b = sandbox();
+    const monteeDelta = sansAttenteAlpha.replace(
+      "    backup: not-available\n    source:\n      repo: exemple/metabase-scalingo\n      branch: main\n      # renovate: datasource=git-refs depName=exemple/metabase-scalingo\n      sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    tool:\n      env: METABASE_VERSION\n      # renovate: datasource=github-releases depName=metabase/metabase\n      version: v0.63.18",
+      "    backup: not-available\n    settle:\n      window: 0\n    source:\n      repo: exemple/metabase-scalingo\n      branch: main\n      # renovate: datasource=git-refs depName=exemple/metabase-scalingo\n      sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    tool:\n      env: METABASE_VERSION\n      # renovate: datasource=github-releases depName=metabase/metabase\n      version: v0.63.19",
+    );
+    writeFileSync(join(b.fleet, "manifest.yaml"), monteeDelta);
+    const out = run(b, "apply.ts", ["--reconcile", ...FLEET, "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      NOW: NUIT,
+      DEPLOYED_AT: avant(NUIT, 10),
+      REAL: JSON.stringify({
+        [RT]: { version: "v0.63.18", sha: "a".repeat(40) },
+        "osc-secnum-fr1/delta-metabase": { version: "v0.63.18", sha: "a".repeat(40) },
+      }),
+      AFTER_STATUS: JSON.stringify({ "delta-metabase": "build-error" }),
+    });
+    return [
+      monteeDelta !== sansAttenteAlpha,
+      /alpha-metabase : rebuild a l'identique/.test(out.output),
+      /Echec sur l'eclaireur, la vague s'arrete ici\./.test(out.output),
+    ];
+  })();
+  check("un rebuild ne tient pas lieu d'eclaireur pour une montee", eclaireur, [true, true, true]);
+
+  const enRetard = (jours: number) =>
+    passage(["--reconcile"], {
+      INVENTORY: inventaireJson("25.0.5.0.3"),
+      UPSTREAM_HISTORY: JSON.stringify([
+        { sha: "c".repeat(40), date: ilYa(jours), inventory: inventaire("25.0.5.1") },
+        { sha: "d".repeat(40), date: ilYa(40), inventory: inventaire("25.0.5.0.3") },
+      ]),
+    });
+  const longtemps = enRetard(12);
+  check(
+    "Scalingo en retard de plus de sept jours sur Heroku est une echeance",
+    [
+      /\*\*Scalingo\/buildpack-jvm-common\*\* : JDK 25 : Heroku publie 25\.0\.5\.1, Scalingo en est a 25\.0\.5\.0\.3, publie par Heroku le \d{4}-\d{2}-\d{2}, il y a 12 jours/.test(longtemps.incident),
+      /<!-- etat: intervention -->/.test(longtemps.incident),
+      / \| à jour \|$/.test(ligne(longtemps.incident, "Azul Zulu OpenJDK") ?? ""),
+    ],
+    [true, true, true],
+  );
+  const peu = enRetard(2);
+  check(
+    "un retard ordinaire reste au journal",
+    [/Heroku publie/.test(peu.incident), /JDK 25 : Heroku publie 25\.0\.5\.1, Scalingo en est a 25\.0\.5\.0\.3, depuis le .*sous le seuil de 7 jours/.test(peu.out.output)],
+    [false, true],
+  );
+
+  const muet = passage(["--reconcile"], { RAW_OUTAGE: "1" });
+  check(
+    "une source muette laisse une echeance, et la ligne dit sans verdict",
+    [
+      /system\.properties illisible, la prevision du JDK d'un rebuild n'a pas pu etre faite/.test(muet.incident),
+      /<!-- etat: intervention -->/.test(muet.incident),
+      / \| system\.properties illisible \| [^|]+ \| sans verdict \|$/.test(ligne(muet.incident, "Azul Zulu OpenJDK") ?? ""),
+    ],
+    [true, true, true],
+  );
+  const verdict = (env: Record<string, string>, lockSrc?: string) => {
+    const p = passage(["--reconcile"], env, lockSrc);
+    const runtimes = p.incident.slice(p.incident.indexOf("## Runtimes"));
+    const row = runtimes.split("\n").find((l) => l.startsWith("| [alpha-metabase]") && !l.includes("| pile |")) ?? "";
+    return { row: row.split("|").slice(2, -1).map((c) => c.trim()).filter((_, i) => i !== 3), heroku: /Heroku publie/.test(p.incident), intervention: /<!-- etat: intervention -->/.test(p.incident) };
+  };
+  const herokuEnAvance = {
+    UPSTREAM_INVENTORY: inventaireJson("25.0.5.1"),
+    UPSTREAM_HISTORY: JSON.stringify([
+      { sha: "c".repeat(40), date: ilYa(30), inventory: inventaire("25.0.5.1") },
+      { sha: "d".repeat(40), date: ilYa(60), inventory: inventaire("25.0.4.1") },
+    ]),
+  };
+  check(
+    "les gardes de la prevision disent chacune pourquoi elles se taisent",
+    [
+      verdict({ JDK_LINE: "-----> Installing OpenJDK 25... done" }).row,
+      verdict({ JVM_DOWNLOAD: "https://github.com/Scalingo/gradle-buildpack.git" }).row,
+      verdict({ JVM_DOWNLOAD: "https://github.com/Scalingo/buildpack-jvm-common" }).row,
+      verdict({ JDK: "25.0.5.1", INVENTORY: inventaireJson("25.0.5.0.3"), UPSTREAM_INVENTORY: inventaireJson("25.0.5.0.3") }).row,
+      verdict({ JVM_BRANCH: "v1..v2" }).row,
+      verdict(
+        { REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "main" } }) },
+        lockAvec((alpha) => {
+          alpha.source = { repo: "exemple/metabase-scalingo", sha: "pas-un-sha" };
+        }),
+      ).row,
+    ],
+    [
+      ["OpenJDK", "`25`", "version installée non écrite au journal", "sans verdict"],
+      ["Azul Zulu OpenJDK", "`25.0.5.0.3`", "buildpack non suivi", "sans verdict"],
+      ["Azul Zulu OpenJDK", "`25.0.5.0.3`", "référence du buildpack non écrite au journal", "sans verdict"],
+      ["Azul Zulu OpenJDK", "`25.0.5.1`", "`25.0.5.0.3`", "à jour"],
+      ["Azul Zulu OpenJDK", "`25.0.5.0.3`", "référence du buildpack illisible", "sans verdict"],
+      ["Azul Zulu OpenJDK", "`25.0.5.0.3`", "commit déployé illisible", "sans verdict"],
+    ],
+  );
+  const epingle = verdict({ JVM_BRANCH: "v189", INVENTORY: inventaireJson("25.0.4.1"), JDK: "25.0.4.1", ...herokuEnAvance });
+  check("un buildpack epingle se prevoit a sa reference, et son retard sur Heroku est un choix", [epingle.row, epingle.heroku], [["Azul Zulu OpenJDK", "`25.0.4.1`", "`25.0.4.1`", "à jour"], false]);
+  const surScalingo20 = verdict({
+    STACK_NAME: "scalingo-20",
+    STACK_IMAGE: "scalingo/scalingo-20:v15",
+    STACK_CURRENT: "scalingo/scalingo-20:v15",
+    JDK: "25.0.4.1",
+    INVENTORY_20: JSON.stringify({ version_aliases: { "25": "25.0.4.1" }, artifacts: [artefact("25.0.4.1", ["heroku-20"])] }),
+    INVENTORY: inventaireJson("25.0.5.1"),
+    ...herokuEnAvance,
+  });
+  check(
+    "scalingo-20 lit son inventaire fige, qui n'est pas un retard de Scalingo",
+    [surScalingo20.row, surScalingo20.heroku],
+    [["Azul Zulu OpenJDK", "`25.0.4.1`", "`25.0.4.1`", "à jour"], false],
+  );
+  const nonDate = verdict({ INVENTORY: inventaireJson("25.0.5.0.3"), UPSTREAM_INVENTORY: inventaireJson("25.0.5.1") });
+  check("un retard etabli dont l'historique ne se lit pas reste une echeance", [nonDate.heroku, nonDate.intervention], [true, true]);
+  const septJours = passage(["--reconcile"], {
+    NOW: NUIT,
+    INVENTORY: inventaireJson("25.0.5.0.3"),
+    UPSTREAM_HISTORY: JSON.stringify([
+      { sha: "c".repeat(40), date: avant(NUIT, 7), inventory: inventaire("25.0.5.1") },
+      { sha: "d".repeat(40), date: avant(NUIT, 40), inventory: inventaire("25.0.5.0.3") },
+    ]),
+  });
+  check("le seuil de retard est atteint a sept jours pile", /il y a 7 jours/.test(septJours.incident), true);
+  const journalSansBuild = passage(["--reconcile"], { LOG_OUTAGE: "1" });
+  check(
+    "un journal illisible sans build connu ne fait pas disparaitre le JDK",
+    [
+      ligne(journalSansBuild.incident, "runtimes")?.includes("| journal du build illisible |") ?? false,
+      /journal du build illisible, la prevision du JDK d'un rebuild n'a pas pu etre faite/.test(journalSansBuild.incident),
+    ],
+    [true, true],
+  );
+  const sansLigne = passage(["--reconcile"], { JDK_LINE: "" });
+  check(
+    "jvm-common sans ligne de JDK au journal se dit, un changement de format ne passe pas en silence",
+    [ligne(sansLigne.incident, "JDK")?.includes("| ligne du JDK absente du journal |") ?? false, /ligne du JDK absente du journal de build/.test(sansLigne.incident)],
+    [true, true],
+  );
+  const inventaireHostile = passage(["--reconcile"], {
+    INVENTORY: JSON.stringify({ version_aliases: { "25": 25.1, "21": "21.0.13.1" }, artifacts: [null, "x", artefact("25.0.5.1")] }),
+  });
+  check(
+    "un inventaire hostile n'emporte pas le rapport",
+    [inventaireHostile.out.status, inventaireHostile.incident.includes("## Runtimes"), / \| sans verdict \|$/.test(ligne(inventaireHostile.incident, "Azul Zulu OpenJDK") ?? "")],
+    [0, true, true],
+  );
+
+  const sansProps = passage(["--reconcile"], { SYSTEM_PROPERTIES: "" });
+  check(
+    "une app sans system.properties n'a pas de prevision, et ce n'est pas une echeance",
+    [/ \| majeure non fixée par system\.properties \| [^|]+ \| sans verdict \|$/.test(ligne(sansProps.incident, "Azul Zulu OpenJDK") ?? ""), /prevision du JDK/.test(sansProps.incident)],
+    [true, false],
+  );
+
+  const BUILD_CONNU = { deployment: "dep-alpha-metabase", stack: "scalingo/scalingo-24:v10", runtimes: JDK_LU };
+  const BUILDPACKS_CONNUS = [{ repo: "Scalingo/buildpack-jvm-common", ref: null }, { repo: "Scalingo/metabase-buildpack", ref: null }];
+  const connu = lockAvec((alpha) => {
+    alpha.buildpacks = BUILDPACKS_CONNUS;
+    alpha.build = BUILD_CONNU;
+  });
+  const journalMuet = passage(["--reconcile"], { LOG_OUTAGE: "1" }, connu);
+  check(
+    "un journal illisible au releve garde ce que le lock en savait",
+    [journalMuet.entry.buildpacks, journalMuet.entry.build],
+    [BUILDPACKS_CONNUS, BUILD_CONNU],
+  );
+  const buildRate = passage(["--reconcile"], { STACK_IMAGE: "scalingo/scalingo-24:v11", JDK: "25.0.5.1" }, connu);
+  check("un build reussi releve remplace l'ancien", buildRate.entry.build?.runtimes?.[0]?.version, "25.0.5.1");
+  const rateAuReleve = (() => {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), sansAttenteAlpha);
+    writeFileSync(join(b.fleet, "lock.json"), connu);
+    run(b, "apply.ts", ["--reconcile", ...FLEET, "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40), status: "build-error" } }),
+      JDK: "25.0.5.1",
+      STACK_IMAGE: "scalingo/scalingo-24:v11",
+    });
+    return loadLock(join(b.fleet, "lock.json")).apps[RT].build;
+  })();
+  check("un build rate n'entre jamais au lock : celui qui tourne reste consigne", rateAuReleve, BUILD_CONNU);
+  const apresEchec = passage(
+    ["--reconcile"],
+    { REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40), status: "build-error" } }) },
+    lockAvec((alpha) => {
+      alpha.build = { ...BUILD_CONNU, deployment: "dep-ancien" };
+    }),
+  );
+  check("un echec posterieur au build en service se dit dans la colonne Dernier build", /\| avant le \d{4}-\d{2}-\d{2} \|/.test(ligne(apresEchec.incident, "Azul Zulu OpenJDK") ?? ""), true);
+  const EN_PAUSE = "osc-fr1/beta-metabase";
+  const pauseMuette = (() => {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), sansAttenteAlpha);
+    writeFileSync(
+      join(b.fleet, "lock.json"),
+      lockAvec((_, apps) => {
+        apps[EN_PAUSE].buildpacks = BUILDPACKS_CONNUS;
+        apps[EN_PAUSE].build = { ...BUILD_CONNU, deployment: "dep-beta-metabase" };
+      }),
+    );
+    run(b, "apply.ts", ["--reconcile", ...FLEET, "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify({ [EN_PAUSE]: { version: "v0.63.18", sha: "a".repeat(40) } }),
+      LOG_OUTAGE: "1",
+    });
+    const e = loadLock(join(b.fleet, "lock.json")).apps[EN_PAUSE];
+    return [e.buildpacks, e.build?.runtimes];
+  })();
+  check("le releve d'une app en pause garde lui aussi ce qu'un journal illisible ne dit plus", pauseMuette, [BUILDPACKS_CONNUS, JDK_LU]);
 } finally {
   for (const root of sandboxes) rmSync(root, { recursive: true, force: true });
 }
+
 
 console.log(
   `\n${passed} verification(s) passee(s), ${failures} echec(s).\n`,

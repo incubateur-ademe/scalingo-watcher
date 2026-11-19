@@ -41,9 +41,34 @@
  * defaut. Une console one-off et deux conteneurs de la version d'avant,
  * l'un supprime, l'autre seulement cree avant le deploiement, l'accompagnent
  * toujours, dans un etat qui ferait echouer le controle s'il les comptait.
+ *
+ * Le dernier deploiement releve date d'une heure, DEPLOYED_AT a defaut.
+ * JDK fait annoncer au journal le buildpack jvm-common et le JDK installe,
+ * JDK_AFTER celui du build que le passage declenche. LOG_OUTAGE=1 rend le
+ * journal illisible. STACK_IMAGE donne l'image de pile du deploiement releve,
+ * STACK_IMAGE_AFTER celle du build declenche, STACK_CURRENT l'image courante de
+ * la pile. SYSTEM_PROPERTIES est le system.properties du depot applicatif, 404
+ * sans lui. INVENTORY est l'inventaire de jvm-common, 404 sans lui.
+ * UPSTREAM_INVENTORY est celui d'Heroku a sa tete, UPSTREAM_HISTORY
+ * (liste de { sha, date, inventory }, du plus recent au plus ancien) son
+ * historique, que l'API des commits rend en 503 sans lui. RAW_OUTAGE=1 fait
+ * echouer tous les fichiers bruts de GitHub.
+ *
+ * NOW fige l'horloge du moteur, pour la plage horaire des rebuilds.
+ * AFTER_STATUS (app -> statut) donne le statut d'un deploiement que le passage
+ * declenche, celui de REAL a defaut. JVM_DOWNLOAD remplace l'URL de jvm-common
+ * dans le journal, JVM_BRANCH y ajoute un `Using branch:`, JDK_LINE remplace la
+ * ligne d'installation du JDK, et la vide la retire. STACK_NAME nomme la pile
+ * de chaque app, scalingo-24 a defaut ; INVENTORY_20 est l'inventaire de
+ * jvm-common pour scalingo-20.
  */
 
 import { appendFileSync } from "node:fs";
+
+if (process.env.NOW) {
+  const fixed = Date.parse(process.env.NOW);
+  Date.now = () => fixed;
+}
 
 const versions = JSON.parse(process.env.VERSIONS!) as Record<string, string>;
 const real = JSON.parse(process.env.REAL ?? "{}") as Record<
@@ -68,10 +93,17 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 const AT = "2026-10-01T00:00:00Z";
+// Le dernier deploiement releve date d'une heure : un build plus vieux que la
+// regle d'age serait refait par toute reconciliation, et chaque test qui
+// releve le parc deploierait. DEPLOYED_AT le vieillit.
+const RECENT = new Date(Date.now() - 3_600_000).toISOString();
+const JVM_URL = "https://github.com/Scalingo/buildpack-jvm-common.git";
 const BEFORE = "2026-09-01T00:00:00Z";
 const LATER = "2026-10-01T00:05:00Z";
 let eventReads = 0;
 let deployTriggered = false;
+const triggered = new Set<string>();
+const afterStatus = JSON.parse(process.env.AFTER_STATUS ?? "{}") as Record<string, string>;
 
 globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   const u = String(url);
@@ -116,7 +148,35 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   }
   if (m === "POST" && /\/v1\/apps\/[^/]+\/addons\/[^/]+\/token$/.test(u)) return json({ addon: { token: "addon" } });
   if (m === "GET" && /^https:\/\/api\.[^/]+\.scalingo\.com\/v1\/features\/stacks$/.test(u)) {
-    return json({ stacks: [{ id: "st-24", name: "scalingo-24", deprecated_at: null }] });
+    const image = process.env.STACK_CURRENT ? { base_image: process.env.STACK_CURRENT } : {};
+    return json({ stacks: [{ id: "st-24", name: process.env.STACK_NAME ?? "scalingo-24", deprecated_at: null, ...image }] });
+  }
+  // Fichiers bruts de GitHub : system.properties du depot applicatif, et
+  // inventaires du buildpack jvm-common et de son amont, a la tete ou a un
+  // commit de l'historique.
+  if (m === "GET" && (r = /^https:\/\/raw\.githubusercontent\.com\/([^/]+\/[^/]+)\/([^/]+)\/(.+)$/.exec(u))) {
+    const [, repo, ref, file] = r;
+    if (process.env.RAW_OUTAGE) return json({ error: "injoignable" }, 503);
+    if (file === "system.properties") {
+      return process.env.SYSTEM_PROPERTIES ? new Response(process.env.SYSTEM_PROPERTIES) : new Response("404: Not Found", { status: 404 });
+    }
+    if (file === "inventory.json" && repo === "Scalingo/buildpack-jvm-common" && process.env.INVENTORY) {
+      return new Response(process.env.INVENTORY);
+    }
+    if (file === "inventory-20.json" && repo === "Scalingo/buildpack-jvm-common" && process.env.INVENTORY_20) {
+      return new Response(process.env.INVENTORY_20);
+    }
+    if (file === "inventory.json" && repo === "heroku/heroku-buildpack-jvm-common") {
+      if (ref === "HEAD" && process.env.UPSTREAM_INVENTORY) return new Response(process.env.UPSTREAM_INVENTORY);
+      const then = (JSON.parse(process.env.UPSTREAM_HISTORY ?? "[]") as Array<{ sha: string; inventory: unknown }>).find((c) => c.sha === ref);
+      if (then) return new Response(JSON.stringify(then.inventory));
+    }
+    return new Response("404: Not Found", { status: 404 });
+  }
+  if (m === "GET" && /^https:\/\/api\.github\.com\/repos\/heroku\/heroku-buildpack-jvm-common\/commits\?path=inventory\.json/.test(u)) {
+    const history = JSON.parse(process.env.UPSTREAM_HISTORY ?? "null") as Array<{ sha: string; date: string }> | null;
+    if (!history) return json({ message: "injoignable" }, 503);
+    return json(history.map((c) => ({ sha: c.sha, commit: { committer: { date: c.date } } })));
   }
   if (m === "GET" && (r = /^https:\/\/api\.([^/]+)\.scalingo\.com\/v1\/apps\/([^/?]+)(\/.*)?$/.exec(u))) {
     const [, region, app, route = ""] = r;
@@ -132,15 +192,38 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
     if (route === "/deployments?per_page=1") {
       return json({
         deployments: [
-          { id: `dep-${app}`, status: state.status ?? "success", created_at: "2026-10-01T00:00:00Z", git_ref: state.sha },
+          {
+            id: `dep-${app}`,
+            status: state.status ?? "success",
+            created_at: process.env.DEPLOYED_AT ?? RECENT,
+            git_ref: state.sha,
+            ...(process.env.STACK_IMAGE ? { stack_base_image: process.env.STACK_IMAGE } : {}),
+          },
         ],
       });
     }
     if (route === `/deployments/dep-${app}`) {
-      return json({ deployment: { id: `dep-${app}`, status: state.status ?? "success", created_at: AT } });
+      return json({
+        deployment: {
+          id: `dep-${app}`,
+          status: (triggered.has(app) ? afterStatus[app] : undefined) ?? state.status ?? "success",
+          created_at: AT,
+          ...(process.env.STACK_IMAGE_AFTER ? { stack_base_image: process.env.STACK_IMAGE_AFTER } : {}),
+        },
+      });
     }
     if (route === `/deployments/dep-${app}/output`) {
-      return new Response(built.map((b) => `-----> Downloading Buildpack: ${b}\n`).join(""), { status: 200 });
+      if (process.env.LOG_OUTAGE) return json({ error: "injoignable" }, 503);
+      const jdk = deployTriggered && process.env.JDK_AFTER ? process.env.JDK_AFTER : process.env.JDK;
+      const jvm = jdk
+        ? [
+            `-----> Downloading Buildpack: ${process.env.JVM_DOWNLOAD ?? JVM_URL}`,
+            ...(process.env.JVM_BRANCH ? [`-----> Using branch: ${process.env.JVM_BRANCH}`] : []),
+            process.env.JDK_LINE ?? `-----> Installing Azul Zulu OpenJDK ${jdk}`,
+          ].filter((l) => l.length > 0)
+        : [];
+      const lines = [...jvm, ...built.map((b) => `-----> Downloading Buildpack: ${b}`)];
+      return new Response(lines.map((l) => `${l}\n`).join(""), { status: 200 });
     }
     if (route === "/ps") {
       if (process.env.PS_DENIED) return json({ error: "scope_denied" }, 403);
@@ -173,6 +256,7 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
     if (!real[`${region}/${app}`]) return json({ error: "appel imprevu" }, 500);
     if (route === "/deployments") {
       deployTriggered = true;
+      triggered.add(app);
       return json({ deployment: { id: `dep-${app}` } });
     }
     if (/^\/variables(\/.+)?$/.test(route)) return json({ variable: { id: "var-1" } });
