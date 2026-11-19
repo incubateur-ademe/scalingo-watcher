@@ -57,6 +57,11 @@ on:
         required: false
       PUSH_TOKEN:
         required: false
+      HEARTBEAT_URL:
+        description: >
+          URL de battement d'un service de veille de silence (pulse updown.io
+          ou equivalent), plusieurs separees par des blancs
+        required: false
 
 jobs:
   reconcile:
@@ -126,6 +131,7 @@ jobs:
 
       # Le moteur n'ecrit pas de rapport en plan, il n'y a donc rien a publier.
       - name: signaler
+        id: signaler
         if: ${{ always() && !inputs.dry_run }}
         uses: ./.scalingo-watcher/actions/signaler
         with:
@@ -138,6 +144,53 @@ jobs:
           report-path: ${{ runner.temp }}/scalingo-watcher/incident.md
           label: ${{ inputs.dashboard-label }}
           title: ${{ inputs.dashboard-title }}
+
+      # Les notifications partent de ce job. Quand il ne demarre plus
+      # (facturation refusee, cron arrete), personne n'est prevenu. Le service
+      # de veille alerte quand ces battements cessent. Un battement suit un
+      # tableau de bord publie, donc un parc regarde. Seule la premiere
+      # tentative d'un passage planifie bat. Un lancement a la main, ou la
+      # relance d'un ancien run planifie, masquerait un cron arrete.
+      - name: battement
+        if: ${{ always() && github.event_name == 'schedule' && github.run_attempt == '1' && steps.signaler.outcome == 'success' && steps.signaler.outputs.state != 'skipped' }}
+        timeout-minutes: 5
+        env:
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+        run: |
+          {
+            echo "### Veille de silence"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "${HEARTBEAT_URL//[[:space:]]/}" ]; then
+            echo "aucune veille de silence configuree : si ce workflow cesse de tourner, personne ne sera prevenu"
+            echo "Aucune veille de silence configuree (secret HEARTBEAT_URL)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Sans set -f, un ? de l'URL serait developpe comme un motif de
+          # fichier. Sans \r dans IFS, celui d'un secret colle avec des fins de
+          # ligne Windows resterait au bout de l'URL, et curl la rejetterait.
+          set -f
+          IFS=$' \t\r\n'
+          for url in $HEARTBEAT_URL; do
+            # Identifiants, chemin et requete peuvent porter le secret du
+            # service. Le runner ne masque que la valeur entiere du secret,
+            # donc seul l'hote est affiche.
+            host=${url#*://}
+            host=${host%%[/?#]*}
+            host=${host##*@}
+            # Sans -L, une redirection de http vers https sort en succes alors
+            # que le service n'a rien recu. --retry-max-time borne l'attente
+            # qu'un Retry-After imposerait, groupe de concurrence tenu.
+            if curl -fsSL -o /dev/null -m 10 --retry 3 --retry-max-time 30 "$url"; then
+              echo "battement recu par $host"
+              echo "Battement recu par $host." >> "$GITHUB_STEP_SUMMARY"
+            else
+              # Le parc a ete regarde, le job reste vert. Un battement qui
+              # manque durablement fait lever l'alerte.
+              echo "::warning::battement refuse ou perdu par $host"
+              echo "Battement refuse ou perdu par $host." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
 
       - name: resume
         if: always()

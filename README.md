@@ -159,7 +159,8 @@ Inputs :
 Secrets, tous facultatifs : `SCALINGO_API_TOKEN` ou `FGP_KEY` pour l'accès,
 `TEAMS_WEBHOOK`, `SLACK_WEBHOOK` et `MATRIX_ACCESS_TOKEN` pour les
 notifications, `PUSH_TOKEN` pour pousser le lock
-et ouvrir les pull requests sur une branche protégée. Les secrets d'accès et
+et ouvrir les pull requests sur une branche protégée, `HEARTBEAT_URL` pour la
+veille de silence (`reconcile` seulement). Les secrets d'accès et
 `PUSH_TOKEN` ont leur place dans l'environment, réservé à `main` par sa
 politique de branches.
 
@@ -199,9 +200,36 @@ jobs:
       SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
       MATRIX_ACCESS_TOKEN: ${{ secrets.MATRIX_ACCESS_TOKEN }}
       PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+      HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
 ```
 
 Les quatre appelants complets sont dans le [template](https://github.com/incubateur-ademe/scalingo-parc-template/tree/main/.github/workflows).
+
+### Veille de silence
+
+Les notifications partent du job de réconciliation. Un job qui ne démarre plus,
+pour un refus de facturation ou un cron arrêté, ne prévient donc personne.
+Après chaque passage planifié dont le tableau de bord a été publié, `reconcile`
+envoie un GET à `HEARTBEAT_URL`. Un lancement à la main ou une relance ne bat
+pas. Un service de veille extérieur à GitHub alerte
+quand ces battements cessent. Aucune donnée du parc ne part avec.
+
+Mise en place de référence, un check par parc :
+
+1. Créer un check pulse [updown.io](https://updown.io/doc/how-pulse-cron-monitoring-works)
+   avec une période de 24 heures. Sur un mois de mesure, les déclenchements du
+   cron se sont espacés de 11 heures au plus.
+2. Ranger son URL dans le secret `HEARTBEAT_URL` et la mapper dans l'appelant
+   `reconcile`, une fois celui-ci épinglé sur une version de l'outil qui déclare
+   ce secret. Sur une version antérieure, GitHub refuse l'appel et chaque
+   passage échoue au démarrage.
+3. Déclarer deux destinataires indépendants chez le service, une adresse
+   partagée et un salon. Un workflow Teams sans co-propriétaire ou un bot Tchap
+   non renouvelé cessent d'envoyer sans prévenir.
+
+Tout service qui alerte sur l'absence d'un GET convient. Plusieurs URL séparées
+par des blancs battent chacune, pour doubler le service. Sans secret, le résumé
+du run le dit.
 
 ## Actions composites
 

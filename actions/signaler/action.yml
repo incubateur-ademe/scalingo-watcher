@@ -47,6 +47,13 @@ inputs:
     required: false
     default: "Parc Scalingo : etat de la convergence"
 
+outputs:
+  state:
+    description: >
+      skipped quand aucun rapport n'a ete produit et que le tableau de bord est
+      reste en l'etat ; sinon opened, unchanged, changed ou resolved.
+    value: ${{ steps.issue.outputs.state }}
+
 runs:
   using: composite
   steps:
