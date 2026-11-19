@@ -178,10 +178,12 @@ jobs:
             host=${url#*://}
             host=${host%%[/?#]*}
             host=${host##*@}
-            # Sans -L, une redirection de http vers https sort en succes alors
-            # que le service n'a rien recu. --retry-max-time borne l'attente
-            # qu'un Retry-After imposerait, groupe de concurrence tenu.
-            if curl -fsSL -o /dev/null -m 10 --retry 3 --retry-max-time 30 "$url"; then
+            # -L suit une redirection de http vers https jusqu'au service.
+            # --retry-max-time borne l'attente qu'un Retry-After imposerait,
+            # groupe de concurrence tenu. Quand ce Retry-After depasse la
+            # borne, curl 8.18 renonce a reessayer et sort en 0. Seul un code
+            # final en 2xx compte donc comme recu.
+            if code=$(curl -fsSL -o /dev/null -w '%{http_code}' -m 10 --retry 3 --retry-max-time 30 "$url") && [[ $code == 2?? ]]; then
               echo "battement recu par $host"
               echo "Battement recu par $host." >> "$GITHUB_STEP_SUMMARY"
             else

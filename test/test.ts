@@ -368,13 +368,13 @@ console.log("\nBattement de la veille de silence");
   const base = `http://127.0.0.1:${port}`;
   const dir = mkdtempSync(join(tmpdir(), "scalingo-watcher-battement-"));
   let runs = 0;
-  const runBeat = (urls: string) =>
+  const runBeat = (urls: string, path = process.env.PATH) =>
     new Promise<{ status: number; out: string; summary: string; hits: string[] }>((done) => {
       const summary = join(dir, `resume-${++runs}.md`);
       writeFileSync(summary, "");
       const before = hits.length;
       // Le delai coupe un curl qui dormirait le temps d'un Retry-After.
-      const options = { timeout: 20_000, env: { ...process.env, HEARTBEAT_URL: urls, GITHUB_STEP_SUMMARY: summary } };
+      const options = { timeout: 20_000, env: { ...process.env, PATH: path, HEARTBEAT_URL: urls, GITHUB_STEP_SUMMARY: summary } };
       execFile("bash", ["-e", "-c", beat?.run ?? "exit 9"], options, (e, stdout, stderr) =>
         done({
           status: e ? (typeof e.code === "number" ? e.code : 1) : 0,
@@ -433,6 +433,17 @@ console.log("\nBattement de la veille de silence");
     "un Retry-After d'une heure ne retient pas le job",
     [busy.status, busy.hits.length > 0, /::warning::battement refuse ou perdu/.test(busy.out)],
     [0, true, true],
+  );
+  // curl 8.18 sort en 0 sur ce 503 quand il renonce a reessayer, le curl du
+  // poste peut sortir en 22. Le faux curl rejoue le premier cas partout.
+  const fake = join(dir, "faux-curl");
+  mkdirSync(fake);
+  writeFileSync(join(fake, "curl"), "#!/bin/sh\nprintf 503\n", { mode: 0o755 });
+  const lying = await runBeat(`${base}/occupe`, `${fake}:${process.env.PATH}`);
+  check(
+    "un code HTTP hors 2xx est un refus, meme quand curl sort en 0",
+    [lying.status, lying.out.includes("::warning::battement refuse ou perdu"), lying.out.includes("battement recu")],
+    [0, true, false],
   );
   server.close();
   rmSync(dir, { recursive: true, force: true });

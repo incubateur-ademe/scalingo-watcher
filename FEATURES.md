@@ -643,9 +643,11 @@ ou la relance d'un run planifié vieux de plusieurs jours, masquerait un cron
 arrêté, par exemple quand le compte de son auteur est suspendu.
 
 Un battement refusé donne un avertissement sans faire échouer le job. Les
-redirections sont suivies, sinon un passage de http à https compterait comme
-un battement reçu. Un `Retry-After` du service ne retient pas le job plus de
-30 secondes par URL. Seul l'hôte de l'URL est affiché, sans identifiants ni
+redirections sont suivies jusqu'au service. Un `Retry-After` du service ne
+retient pas le job plus de 30 secondes par URL. Seul un code HTTP final en 2xx
+compte comme reçu. curl 8.18, celui d'`ubuntu-latest`, sort en succès quand il
+renonce à réessayer devant un `Retry-After` plus long que cette borne. Seul
+l'hôte de l'URL est affiché, sans identifiants ni
 requête. Le reste peut porter le secret du service, et le runner ne masque que
 la valeur entière du secret. La mise en place de référence, un check pulse
 updown.io de 24 heures, est dans le README.
@@ -851,10 +853,12 @@ ligne en service dans le constat.
 serveur local : l'URL atteinte entière, identifiants, chemin et requête jamais
 affichés, plusieurs URL séparées par des blancs ou des fins de ligne Windows, le
 secret absent, un refus qui avertit sans faire échouer le job, une redirection
-suivie, un `Retry-After` d'une heure. Son câblage est vérifié sur le YAML, et sa
-condition comparée à l'identique. La condition et les gardes du script (hôte
-seul, identifiants, refus sans échec, redirection, `Retry-After`, fins de ligne
-Windows) ont chacune été cassées pour vérifier que la suite échoue.
+suivie, un `Retry-After` d'une heure. Un faux curl qui sort en 0 sur un 503,
+comme curl 8.18, vérifie que seul le code HTTP fait foi, quelle que soit la
+version de curl du poste. Son câblage est vérifié sur le YAML, et sa condition
+comparée à l'identique. La condition et les gardes du script (hôte seul,
+identifiants, refus sans échec, redirection, `Retry-After`, code 2xx, fins de
+ligne Windows) ont chacune été cassées pour vérifier que la suite échoue.
 
 **[fait]** Les tests ont été vérifiés en cassant volontairement chacun des
 invariants, pour s'assurer qu'ils échouent quand ils le doivent.
