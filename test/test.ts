@@ -69,7 +69,7 @@ import jvmCommon, {
   type Fetched,
   type Inventory,
 } from "../src/buildpacks/jvm-common.ts";
-import oauth2Proxy from "../src/buildpacks/oauth2-proxy.ts";
+import proxyBuildpack from "../src/buildpacks/oauth2-proxy.ts";
 import { renderManifest } from "../src/init.ts";
 import { compose, matrixPayload, slackPayload, teamsPayload } from "../src/notify.ts";
 import { apiScopes, backupScopes, deniedByProxy } from "../src/fgp-scopes.ts";
@@ -1985,7 +1985,7 @@ check(
 );
 check("un JDK fourni par l'app n'annonce aucune version", jvmCommon.read("-----> Using provided JDK"), null);
 check("la ligne de Metabase n'est pas un JDK", jvmCommon.read("Installing Metabase v0.64.5.6"), null);
-check("oauth2-proxy se lit sur sa propre ligne", oauth2Proxy.read("downloading oauth2-proxy v7.15.5 from GitHub..."), {
+check("oauth2-proxy se lit sur sa propre ligne", proxyBuildpack.read("downloading oauth2-proxy v7.15.5 from GitHub..."), {
   name: "oauth2-proxy",
   version: "v7.15.5",
 });
