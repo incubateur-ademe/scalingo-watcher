@@ -65,6 +65,12 @@ function concurrencyErrors(where: string, action: string, top: Concurrency, own:
         `Declarer sur le job : concurrency: { group: scalingo-watcher-${action}, cancel-in-progress: false }`,
     );
   }
+  if (PROPOSING.has(action) && (atTop === LOCK_GROUP || atJob === LOCK_GROUP)) {
+    errors.push(
+      `${where} : actions/${action} tourne sous le verrou ${LOCK_GROUP} de la convergence, qu'elle retiendrait sans y toucher. ` +
+        `Declarer sur le job : concurrency: { group: scalingo-watcher-${action}, cancel-in-progress: false }`,
+    );
+  }
   if (mayCancel(top) || mayCancel(own)) {
     errors.push(`${where} : cancel-in-progress doit valoir false au niveau du workflow comme du job, un passage annule peut l'etre en pleine sauvegarde, en plein deploiement ou en plein push.`);
   }

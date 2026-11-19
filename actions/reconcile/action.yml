@@ -41,6 +41,12 @@ inputs:
   matrix-access-token:
     description: Jeton du compte bot Matrix. Passer secrets.MATRIX_ACCESS_TOKEN, meme vide.
     required: true
+  heartbeat-url:
+    description: >
+      URL de battement d'un service de veille de silence (pulse updown.io ou
+      equivalent), plusieurs separees par des blancs. Passer
+      secrets.HEARTBEAT_URL, meme vide.
+    required: true
   matrix-homeserver:
     description: Serveur Matrix du compte bot qui notifie (Tchap ou autre)
     required: false
@@ -163,6 +169,7 @@ runs:
 
     # Le moteur n'ecrit pas de rapport en plan, il n'y a donc rien a publier.
     - name: signaler
+      id: signaler
       if: ${{ always() && steps.outil.outcome == 'success' && inputs.dry-run != 'true' }}
       uses: ./.scalingo-watcher/actions/signaler
       with:
@@ -175,6 +182,67 @@ runs:
         report-path: ${{ runner.temp }}/scalingo-watcher/incident.md
         label: ${{ inputs.dashboard-label }}
         title: ${{ inputs.dashboard-title }}
+
+    # Les notifications partent de ce job. Quand il ne demarre plus
+    # (facturation refusee, cron arrete), personne n'est prevenu. Le service
+    # de veille alerte quand ces battements cessent. Un battement suit un
+    # tableau de bord publie, donc un parc regarde. Seule la premiere
+    # tentative d'un passage planifie bat. Un lancement a la main, ou la
+    # relance d'un ancien run planifie, masquerait un cron arrete.
+    # Un pas de composite n'accepte pas timeout-minutes : les bornes de curl
+    # tiennent l'attente, groupe de concurrence tenu.
+    - name: battement
+      if: ${{ always() && github.event_name == 'schedule' && github.run_attempt == '1' && steps.signaler.outcome == 'success' && steps.signaler.outputs.state != 'skipped' }}
+      shell: bash
+      env:
+        HEARTBEAT_URL: ${{ inputs.heartbeat-url }}
+      run: |
+        {
+          echo "### Veille de silence"
+          echo
+        } >> "$GITHUB_STEP_SUMMARY"
+        if [ -z "${HEARTBEAT_URL//[[:space:]]/}" ]; then
+          echo "aucune veille de silence configuree : si ce workflow cesse de tourner, personne ne sera prevenu"
+          echo "Aucune veille de silence configuree (secret HEARTBEAT_URL)." >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+        # Sans set -f, un ? de l'URL serait developpe comme un motif de
+        # fichier. Sans \r dans IFS, celui d'un secret colle avec des fins de
+        # ligne Windows resterait au bout de l'URL, et curl la rejetterait.
+        set -f
+        IFS=$' \t\r\n'
+        valid='^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]+)?$'
+        for url in $HEARTBEAT_URL; do
+          # Identifiants, chemin et requete peuvent porter le secret du
+          # service. Le runner ne masque que la valeur entiere du secret,
+          # donc seul l'hote est affiche.
+          host=${url#*://}
+          host=${host%%[/?#]*}
+          host=${host##*@}
+          # Sur une URL mal formee, l'hote lu ici n'est plus celui que lit
+          # curl, et l'un ou l'autre afficherait un morceau du secret.
+          if [[ ! $host =~ $valid ]]; then
+            echo "::warning::battement non envoye, une URL de HEARTBEAT_URL est mal formee"
+            echo "Battement non envoye, une URL de HEARTBEAT_URL est mal formee." >> "$GITHUB_STEP_SUMMARY"
+            continue
+          fi
+          # Sans -g, curl developpe [] et {} en plusieurs URL, et affiche
+          # l'URL entiere quand le motif est invalide. -L suit une
+          # redirection de http vers https jusqu'au service.
+          # --retry-max-time borne l'attente qu'un Retry-After imposerait,
+          # groupe de concurrence tenu. Quand ce Retry-After depasse la
+          # borne, curl 8.18 renonce a reessayer et sort en 0. Seul un code
+          # final en 2xx compte donc comme recu.
+          if code=$(curl -gfsSL -o /dev/null -w '%{http_code}' -m 10 --retry 3 --retry-max-time 30 "$url") && [[ $code == 2?? ]]; then
+            echo "battement recu par $host"
+            echo "Battement recu par $host." >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Le parc a ete regarde, le job reste vert. Un battement qui
+            # manque durablement fait lever l'alerte.
+            echo "::warning::battement refuse ou perdu par $host"
+            echo "Battement refuse ou perdu par $host." >> "$GITHUB_STEP_SUMMARY"
+          fi
+        done
 
     - name: resume
       if: always()

@@ -149,6 +149,7 @@ Inputs :
 | `fgp-key`, `scalingo-api-token` | `reconcile`, `apply`, `propose-db` | requis |
 | `push-token` | toutes sauf `validate` | requis |
 | `teams-webhook`, `slack-webhook`, `matrix-access-token` | `reconcile`, `apply` | requis |
+| `heartbeat-url` | `reconcile` | requis (voir [Veille de silence](#veille-de-silence)) |
 | `matrix-homeserver`, `matrix-room-id` | `reconcile`, `apply` | `""` (notification Matrix désactivée) |
 | `manifest-path`, `lock-path` | toutes | `manifest.yaml`, `lock.json` |
 | `fgp-path` | toutes sauf `propose-security` | `fgp.json` |
@@ -229,9 +230,35 @@ jobs:
           teams-webhook: ${{ secrets.TEAMS_WEBHOOK }}
           slack-webhook: ${{ secrets.SLACK_WEBHOOK }}
           matrix-access-token: ${{ secrets.MATRIX_ACCESS_TOKEN }}
+          heartbeat-url: ${{ secrets.HEARTBEAT_URL }}
 ```
 
 Les appelants complets sont dans le [template](https://github.com/incubateur-ademe/scalingo-parc-template/tree/main/.github/workflows).
+
+### Veille de silence
+
+Les notifications partent du job de réconciliation. Un job qui ne démarre plus,
+pour un refus de facturation ou un cron arrêté, ne prévient donc personne.
+Après chaque passage planifié dont le tableau de bord a été publié, `reconcile`
+envoie un GET à chaque URL de `heartbeat-url`. Un lancement à la main ou une
+relance ne bat pas. Un service de veille extérieur à GitHub alerte quand ces
+battements cessent. Aucune donnée du parc ne part avec.
+
+Mise en place de référence, un check par parc :
+
+1. Créer un check pulse [updown.io](https://updown.io/doc/how-pulse-cron-monitoring-works)
+   avec une période de 24 heures. Sur un mois de mesure, les déclenchements du
+   cron se sont espacés de 11 heures au plus.
+2. Ranger son URL dans le secret `HEARTBEAT_URL` de l'environment. L'appelant
+   de `reconcile` la passe en input `heartbeat-url`. Aucune version 1.x ne
+   porte le battement.
+3. Déclarer deux destinataires indépendants chez le service, une adresse
+   partagée et un salon. Un workflow Teams sans co-propriétaire ou un bot Tchap
+   non renouvelé cessent d'envoyer sans prévenir.
+
+Tout service qui alerte sur l'absence d'un GET convient. Plusieurs URL séparées
+par des blancs battent chacune, pour doubler le service. Sans URL, le résumé du
+run le dit.
 
 ### Migrer depuis les workflows réutilisables (v1)
 
@@ -252,7 +279,8 @@ Pour chaque appelant :
 2. Chaque secret mappé devient un input sous `with:` : `FGP_KEY` devient
    `fgp-key`, `SCALINGO_API_TOKEN` devient `scalingo-api-token`, `PUSH_TOKEN`
    devient `push-token`, `TEAMS_WEBHOOK` devient `teams-webhook`, `SLACK_WEBHOOK`
-   devient `slack-webhook`, `MATRIX_ACCESS_TOKEN` devient `matrix-access-token`.
+   devient `slack-webhook`, `MATRIX_ACCESS_TOKEN` devient `matrix-access-token`,
+   `HEARTBEAT_URL` devient `heartbeat-url`.
 3. `dry_run` devient `dry-run`, une chaîne. Depuis un input booléen de
    `workflow_dispatch`, `${{ inputs.dry_run == true }}` donne `"true"` ou
    `"false"`.

@@ -320,6 +320,165 @@ console.log("\nNotification des changements d'etat");
   check("le message Slack porte le titre et les URL nues", slackPayload(m).text.split("\n").filter((l) => l.startsWith("*") || l.includes(" : https://")).length, 3);
 }
 
+console.log("\nBattement de la veille de silence");
+
+// Les notifications partent du job de reconciliation. Refuse pour facturation,
+// il ne demarre plus et ne previent personne. Le battement est le seul signal
+// qui sort de GitHub quand le parc a ete regarde, et c'est son absence qui fait
+// alerter le service de veille.
+{
+  type Step = { id?: string; name?: string; if?: string; env?: Record<string, string>; run?: string };
+  const reconcile = parse(readFileSync(join(import.meta.dirname, "..", "actions", "reconcile", "action.yml"), "utf8")) as {
+    inputs: Record<string, { required?: boolean } | null>;
+    runs: { steps: Step[] };
+  };
+  const steps = reconcile.runs.steps;
+  const at = (name: string) => steps.findIndex((s) => s.name === name);
+  const signal = steps[at("signaler")];
+  const beat = steps[at("battement")];
+  // Requis comme les autres secrets, pour que validate refuse un appelant qui
+  // l'oublie. Vide, il ne fait rien battre.
+  check("l'URL de battement est un input requis, comme les autres secrets", reconcile.inputs["heartbeat-url"]?.required, true);
+  check("le battement lit cet input", beat?.env?.HEARTBEAT_URL, "${{ inputs.heartbeat-url }}");
+  check("le battement suit la publication du tableau de bord", [at("signaler") >= 0, at("battement") > at("signaler"), signal?.id], [true, true, "signaler"]);
+  // Sans always(), un passage avec une app en echec ne battrait pas alors que
+  // le parc a ete regarde. Sans les filtres sur l'evenement et la tentative, un
+  // lancement a la main ou la relance d'un vieux run masquerait un cron arrete.
+  // Compare a l'identique : un || glisse entre deux termes les garderait tous.
+  check(
+    "seule la premiere tentative d'un passage planifie dont le tableau de bord est publie bat",
+    beat?.if,
+    "${{ always() && github.event_name == 'schedule' && github.run_attempt == '1' && steps.signaler.outcome == 'success' && steps.signaler.outputs.state != 'skipped' }}",
+  );
+  const outputs = (parse(action) as { outputs?: Record<string, { value?: string }> }).outputs ?? {};
+  check(
+    "l'action expose l'etat que le battement lit, skipped compris",
+    [outputs.state?.value, /echo "state=skipped" >> "\$GITHUB_OUTPUT"/.test(action)],
+    ["${{ steps.issue.outputs.state }}", true],
+  );
+
+  const hits: string[] = [];
+  const server = createServer((req, res) => {
+    const url = req.url ?? "";
+    hits.push(url);
+    if (url.startsWith("/refuse")) res.writeHead(404);
+    else if (url.startsWith("/redirige")) res.writeHead(301, { Location: "/apres-redirection" });
+    else if (url.startsWith("/occupe")) res.writeHead(503, { "Retry-After": "3600" });
+    res.end("OK");
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const { port } = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${port}`;
+  const dir = mkdtempSync(join(tmpdir(), "scalingo-watcher-battement-"));
+  let runs = 0;
+  const runBeat = (urls: string, extra: Record<string, string> = {}) =>
+    new Promise<{ status: number; out: string; summary: string; hits: string[] }>((done) => {
+      const summary = join(dir, `resume-${++runs}.md`);
+      writeFileSync(summary, "");
+      const before = hits.length;
+      // Le delai coupe un curl qui dormirait le temps d'un Retry-After.
+      const options = { timeout: 20_000, env: { ...process.env, ...extra, HEARTBEAT_URL: urls, GITHUB_STEP_SUMMARY: summary } };
+      execFile("bash", ["-e", "-c", beat?.run ?? "exit 9"], options, (e, stdout, stderr) =>
+        done({
+          status: e ? (typeof e.code === "number" ? e.code : 1) : 0,
+          out: `${stdout}${stderr}`,
+          summary: readFileSync(summary, "utf8"),
+          hits: hits.slice(before),
+        }),
+      );
+    });
+
+  const leaks = (r: { out: string; summary: string }) => /cle-secrete|moi:/.test(`${r.out}${r.summary}`);
+  const one = await runBeat(`${base}/ping/cle-secrete?status=ok`);
+  check(
+    "le battement atteint l'URL entiere, sans afficher que son hote",
+    [one.status, one.hits, one.out.includes(`battement recu par 127.0.0.1:${port}`), one.summary.includes(`Battement recu par 127.0.0.1:${port}.`), leaks(one)],
+    [0, ["/ping/cle-secrete?status=ok"], true, true, false],
+  );
+  const hidden = await runBeat(`http://moi:cle-secrete@127.0.0.1:${port}/ping ${base}?cle-secrete ${base}#cle-secrete`);
+  check(
+    "identifiants, requete et fragment sans chemin restent caches",
+    [hidden.status, hidden.hits.length, hidden.out.split(`battement recu par 127.0.0.1:${port}\n`).length - 1, leaks(hidden)],
+    [0, 3, 3, false],
+  );
+  const two = await runBeat(`  ${base}/premier \n\t${base}/second\r\n${base}/troisieme\r\n`);
+  check(
+    "plusieurs URL separees par des blancs battent chacune, fins de ligne Windows comprises",
+    [two.status, two.hits, /::warning::/.test(two.out)],
+    [0, ["/premier", "/second", "/troisieme"], false],
+  );
+  const none = await runBeat(" \r\n ");
+  check(
+    "sans URL, rien ne part et le run le dit",
+    [none.status, none.hits, /aucune veille de silence configuree/.test(none.out), /Aucune veille de silence configuree/.test(none.summary)],
+    [0, [], true, true],
+  );
+  const refused = await runBeat(`${base}/refuse/cle-secrete ${base}/accepte`);
+  check(
+    "un battement refuse avertit sans faire echouer le job ni arreter les suivants",
+    [
+      refused.status,
+      refused.hits,
+      refused.out.includes(`::warning::battement refuse ou perdu par 127.0.0.1:${port}`),
+      refused.summary.includes(`Battement refuse ou perdu par 127.0.0.1:${port}.`),
+      leaks(refused),
+    ],
+    [0, ["/refuse/cle-secrete", "/accepte"], true, true, false],
+  );
+  const redirected = await runBeat(`${base}/redirige/cle-secrete`);
+  check(
+    "une redirection est suivie jusqu'au service",
+    [redirected.status, redirected.hits, redirected.out.includes(`battement recu par 127.0.0.1:${port}`), leaks(redirected)],
+    [0, ["/redirige/cle-secrete", "/apres-redirection"], true, false],
+  );
+  const busy = await runBeat(`${base}/occupe`);
+  check(
+    "un Retry-After d'une heure ne retient pas le job",
+    [busy.status, busy.hits.length > 0, /::warning::battement refuse ou perdu/.test(busy.out)],
+    [0, true, true],
+  );
+  // curl 8.18 sort en 0 sur ce 503 quand il renonce a reessayer, le curl du
+  // poste peut sortir en 22. Le faux curl rejoue le premier cas partout, sur
+  // plusieurs codes, pour qu'une garde reduite au seul 503 ne passe pas.
+  const fake = join(dir, "faux-curl");
+  mkdirSync(fake);
+  writeFileSync(join(fake, "curl"), '#!/bin/sh\nprintf %s "$FAUX_CODE"\n', { mode: 0o755 });
+  const codes = ["204", "503", "429", "301", "000"];
+  const lying: unknown[] = [];
+  for (const code of codes) {
+    const r = await runBeat(`${base}/occupe`, { PATH: `${fake}:${process.env.PATH}`, FAUX_CODE: code });
+    lying.push([code, r.status, r.out.includes("::warning::battement refuse ou perdu"), r.out.includes("battement recu")]);
+  }
+  check(
+    "seul un code HTTP final en 2xx est recu, meme quand curl sort en 0",
+    lying,
+    codes.map((code) => [code, 0, code !== "204", code === "204"]),
+  );
+  // Sans -g, curl developpe [] et {} et affiche l'URL entiere sur un motif
+  // invalide.
+  const globbed = await runBeat(`${base}/ping/cle-secrete[1 ${base}/ping/{cle,secrete}`);
+  check(
+    "crochets et accolades partent tels quels, sans afficher l'URL",
+    [globbed.status, globbed.hits, globbed.out.split(`battement recu par 127.0.0.1:${port}\n`).length - 1, leaks(globbed)],
+    [0, ["/ping/cle-secrete[1", "/ping/{cle,secrete}"], 2, false],
+  );
+  const malformed = await runBeat(`http:///cle-secrete http://moi:cle#secrete@127.0.0.1:${port}/ping ${base}/accepte`);
+  check(
+    "une URL mal formee n'est pas envoyee, et rien de son secret n'est affiche",
+    [
+      malformed.status,
+      malformed.hits,
+      malformed.out.split("::warning::battement non envoye, une URL de HEARTBEAT_URL est mal formee\n").length - 1,
+      malformed.summary.split("Battement non envoye, une URL de HEARTBEAT_URL est mal formee.\n").length - 1,
+      malformed.out.includes(`battement recu par 127.0.0.1:${port}`),
+      leaks(malformed),
+    ],
+    [0, ["/accepte"], 2, 2, true, false],
+  );
+  server.close();
+  rmSync(dir, { recursive: true, force: true });
+}
+
 console.log("\nConsignation du lock");
 
 // git diff ignore un fichier non suivi : un lock cree par le passage etait
@@ -850,6 +1009,7 @@ console.log("\nControle des appels de l'outil par un parc");
   const proposal = PIN.replace("reconcile", "propose-db");
   check("une proposition sans groupe est refusee", errorsOf({ uses: proposal }, "sans groupe de concurrence"), true);
   check("une proposition sous son propre groupe passe", run({ uses: proposal, concurrency: { group: "scalingo-watcher-propose-db" } }).errors, []);
+  check("une proposition sous le verrou de la convergence est refusee", errorsOf({ uses: proposal, concurrency: lock }, "sous le verrou"), true);
   check(
     "une proposition avec le meme groupe aux deux niveaux est refusee",
     errorsOf({ uses: proposal, top: "scalingo-watcher-propose-db", concurrency: "scalingo-watcher-propose-db" }, "interblocage"),

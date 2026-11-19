@@ -25,3 +25,4 @@ jobs:
           teams-webhook: ${{ secrets.TEAMS_WEBHOOK }}
           slack-webhook: ${{ secrets.SLACK_WEBHOOK }}
           matrix-access-token: ${{ secrets.MATRIX_ACCESS_TOKEN }}
+          heartbeat-url: ${{ secrets.HEARTBEAT_URL }}
