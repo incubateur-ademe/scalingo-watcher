@@ -32,6 +32,14 @@ on:
         description: Redeployer meme si l'app est deja conforme (exige une app ciblee)
         type: boolean
         default: false
+      async:
+        description: Un passage puis rendre la main, l'etat en vol dans le lock (relance par le relais ou le cron)
+        type: boolean
+        default: false
+      resume:
+        description: Faire avancer le deploiement en cours sans en ouvrir un, le passage que le relais declenche
+        type: boolean
+        default: false
       dashboard-label:
         type: string
         default: etat-parc
@@ -79,13 +87,22 @@ jobs:
     concurrency:
       group: scalingo-apply
       cancel-in-progress: false
+      # Par defaut, GitHub ne garde qu'un passage en attente et annule le
+      # precedent : un ping de reprise annulerait un passage ordinaire, seul a
+      # pouvoir ouvrir un deploiement. Tous attendent donc leur tour.
+      queue: max
     env:
       MANIFEST_PATH: ${{ inputs.manifest-path }}
       LOCK_PATH: ${{ inputs.lock-path }}
       FGP_PATH: ${{ inputs.fgp-path }}
     steps:
+      # La tete de la branche, et non le commit de l'evenement : un passage mis en
+      # file derriere un autre garde le sha de sa creation, et relirait un lock
+      # d'avant ce que le precedent a lance. En asynchrone, il relancerait ce
+      # qui est deja en vol.
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.ref }}
           token: ${{ secrets.PUSH_TOKEN || github.token }}
 
       - name: recuperer l'outil
@@ -106,6 +123,8 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           APP: ${{ inputs.app }}
           FORCE: ${{ inputs.force }}
+          ASYNC: ${{ inputs.async }}
+          RESUME: ${{ inputs.resume }}
         run: |
           out="$RUNNER_TEMP/scalingo-watcher"
           mkdir -p "$out"
@@ -115,6 +134,8 @@ jobs:
           if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
           if [ -n "$APP" ]; then args+=(--app "$APP"); fi
           if [ "$FORCE" = "true" ]; then args+=(--force); fi
+          if [ "$ASYNC" = "true" ]; then args+=(--async); fi
+          if [ "$RESUME" = "true" ]; then args+=(--resume); fi
           set -o pipefail
           node .scalingo-watcher/src/apply.ts "${args[@]}" | tee "$out/apply.log"
 

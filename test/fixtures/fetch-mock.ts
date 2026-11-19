@@ -29,11 +29,22 @@
  * journal du build annonce ; a defaut il n'en annonce qu'un, celui du lock du
  * gabarit, et la chaine vide simule un journal qui n'en nomme aucun.
  *
- * Un deploiement est accepte et conclu du premier coup, au statut de REAL.
+ * Un deploiement est accepte et conclu du premier coup, au statut de REAL, et
+ * fini a DONE, bien avant le passage : sa fenetre de garde est donc ecoulee.
  * CRASH=1 fait apparaitre un redemarrage en erreur dans les evenements de l'app
- * a partir du deuxieme releve suivant le deploiement, soit pendant la fenetre
- * de garde et non avant, ce qui est le scenario que la fenetre existe pour
- * attraper. CRASH_AFTER le fait apparaitre a partir d'un autre releve.
+ * a la fin du deploiement, soit dans la fenetre de garde, ce qui est le
+ * scenario que la fenetre existe pour attraper. CRASH_LATE=1 le date d'un jour
+ * plus tard, hors de la fenetre et du delai de demarrage.
+ * DEPLOY_STATUS remplace ce statut a la relecture du deploiement lance, pour
+ * un build qui n'est pas encore conclu.
+ * Une sauvegarde demandee prend l'identifiant bkp-neuve, que la liste des
+ * sauvegardes rend toujours, au statut BACKUP_STATUS, `done` a defaut : un
+ * statut en vol fait se rattacher au lieu de demander.
+ * FINISHED_AGO donne en minutes la fin du deploiement relu, comptee depuis
+ * maintenant, au lieu de DONE. EVENTS_FAIL=1 fait rendre 502 aux evenements,
+ * comme une lecture passagere ratee.
+ * DEPLOY_POST_FAIL=1 fait rendre 504 a la demande de deploiement, comme une
+ * reponse perdue dont on ne sait pas si la plateforme l'a prise en compte.
  * STOPPED=1 eteint l'app une fois son deploiement declenche.
  * PS_DENIED=1 fait refuser la lecture des conteneurs, comme un fgp.json qui
  * precede cette route.
@@ -70,7 +81,8 @@ const json = (body: unknown, status = 200) =>
 const AT = "2026-10-01T00:00:00Z";
 const BEFORE = "2026-09-01T00:00:00Z";
 const LATER = "2026-10-01T00:05:00Z";
-let eventReads = 0;
+const DONE = "2026-10-01T00:01:00Z";
+const NEXT_DAY = "2026-10-02T00:01:00Z";
 let deployTriggered = false;
 
 globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
@@ -137,7 +149,9 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
       });
     }
     if (route === `/deployments/dep-${app}`) {
-      return json({ deployment: { id: `dep-${app}`, status: state.status ?? "success", created_at: AT } });
+      const status = process.env.DEPLOY_STATUS ?? state.status ?? "success";
+      const finished = process.env.FINISHED_AGO ? new Date(Date.now() - Number(process.env.FINISHED_AGO) * 60_000).toISOString() : DONE;
+      return json({ deployment: { id: `dep-${app}`, status, created_at: AT, finished_at: finished } });
     }
     if (route === `/deployments/dep-${app}/output`) {
       return new Response(built.map((b) => `-----> Downloading Buildpack: ${b}\n`).join(""), { status: 200 });
@@ -153,12 +167,13 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
         ],
       });
     }
-    if (route === "/events?from=1") {
-      if (deployTriggered) eventReads++;
-      const fallen = (process.env.CRASH || process.env.CRASH_AFTER) && eventReads > Number(process.env.CRASH_AFTER ?? 1);
+    if (route.startsWith("/events?")) {
+      if (process.env.EVENTS_FAIL) return json({ error: "bad gateway" }, 502);
+      const crashAt = process.env.CRASH_LATE ? NEXT_DAY : DONE;
+      const fallen = deployTriggered && (process.env.CRASH || process.env.CRASH_LATE);
       return json({
         events: [
-          ...(fallen ? [{ id: "ev-crash", type: "restart", created_at: AT, type_data: { reason: "unexpected_failure" } }] : []),
+          ...(fallen ? [{ id: "ev-crash", type: "restart", created_at: crashAt, type_data: { reason: "unexpected_failure" } }] : []),
           // Deja la avant la fenetre : un releve qui le compterait refuserait
           // tous les deploiements.
           { id: "ev-deploiement", type: "deployment", created_at: AT },
@@ -172,10 +187,15 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
     const [, region, app, route] = r;
     if (!real[`${region}/${app}`]) return json({ error: "appel imprevu" }, 500);
     if (route === "/deployments") {
+      if (process.env.DEPLOY_POST_FAIL) return json({ error: "gateway timeout" }, 504);
       deployTriggered = true;
       return json({ deployment: { id: `dep-${app}` } });
     }
     if (/^\/variables(\/.+)?$/.test(route)) return json({ variable: { id: "var-1" } });
+  }
+  if (/\/api\/databases\/[^/]+\/backups$/.test(u)) {
+    if (m === "POST") return json({ database_backup: { id: "bkp-neuve", status: "scheduled", created_at: AT } });
+    return json({ database_backups: [{ id: "bkp-neuve", status: process.env.BACKUP_STATUS ?? "done", created_at: AT }] });
   }
   if (m === "GET" && (r = /\/api\/databases\/([^/~]+)~([^/]+)$/.exec(u))) {
     const v = versions[`${r[1]}/${r[2]}`];
