@@ -13,7 +13,7 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      # Historique complet : le controle du starter relit les workflows a la
+      # Historique complet : le controle du starter relit les actions a la
       # version que chaque appelant epingle.
       - uses: actions/checkout@v7
         with:
@@ -60,3 +60,38 @@ jobs:
           node src/apply.ts --dry-run \
             --manifest "$dir/manifest.yaml" --lock "$dir/lock.json" --fgp "$dir/fgp.json" --out-dir "$out" \
             2>&1 | tee "$out/plan.log"
+
+  # Les actions publiques executees comme un parc les appelle, en plan sur le
+  # parc de test. Une cle refusee dans un action.yml ne se voit qu'a
+  # l'execution, et chez un parc elle fait echouer la mise en place du job avant
+  # le moindre pas.
+  actions:
+    runs-on: ubuntu-latest
+    steps:
+      # L'outil hors de .scalingo-watcher : chaque action doit alors l'y copier,
+      # comme quand elle est telechargee hors du workspace chez un parc.
+      - uses: actions/checkout@v7
+        with:
+          path: .outil
+          persist-credentials: false
+
+      - name: parc de test
+        run: |
+          cp .outil/test/fixtures/manifest.yaml .outil/test/fixtures/lock.json .outil/test/fixtures/fgp.json .
+          mkdir -p .github/workflows
+          cp .outil/test/fixtures/workflows/*.yml .github/workflows/
+
+      - uses: ./.outil/actions/validate
+        with:
+          checkout: "false"
+          comment: "false"
+
+      - uses: ./.outil/actions/apply
+        with:
+          checkout: "false"
+          dry-run: "true"
+
+      - uses: ./.outil/actions/reconcile
+        with:
+          checkout: "false"
+          dry-run: "true"

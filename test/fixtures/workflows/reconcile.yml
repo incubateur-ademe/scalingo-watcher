@@ -1,0 +1,27 @@
+# Appelant du parc fictif. Le job `actions` de la CI le place dans
+# .github/workflows pour que validate controle un vrai appel de l'outil.
+name: reconcilier le parc
+
+on: workflow_dispatch
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: scalingo-apply
+      cancel-in-progress: false
+    steps:
+      - uses: incubateur-ademe/scalingo-watcher/actions/reconcile@v2
+        with:
+          dry-run: "false"
+          fgp-key: ${{ secrets.FGP_KEY }}
+          scalingo-api-token: ${{ secrets.SCALINGO_API_TOKEN }}
+          push-token: ${{ secrets.PUSH_TOKEN }}
+          teams-webhook: ${{ secrets.TEAMS_WEBHOOK }}
+          slack-webhook: ${{ secrets.SLACK_WEBHOOK }}
+          matrix-access-token: ${{ secrets.MATRIX_ACCESS_TOKEN }}

@@ -27,13 +27,13 @@ La liste complète des comportements est dans [FEATURES.md](FEATURES.md).
 
 | Dépôt | Contenu |
 |---|---|
-| `incubateur-ademe/scalingo-watcher` (ce dépôt) | Moteur, workflows réutilisables, actions composites, presets Renovate, schéma du manifeste |
+| `incubateur-ademe/scalingo-watcher` (ce dépôt) | Moteur, actions composites, presets Renovate, schéma du manifeste |
 | [`incubateur-ademe/scalingo-parc-template`](https://github.com/incubateur-ademe/scalingo-parc-template) | Squelette d'un dépôt consommateur, tenu à jour par Renovate comme un parc |
 | Dépôt consommateur | `manifest.yaml`, `lock.json`, `fgp.json`, `renovate.json` et les workflows appelants |
 
 Un dépôt consommateur ne contient que les données de son parc. Ses workflows
-appellent ceux de l'outil à une version épinglée par sha, et Renovate fait
-avancer cette version.
+appellent les actions de l'outil à une version épinglée par sha, et Renovate
+fait avancer cette version.
 
 ## Démarrer un parc
 
@@ -125,53 +125,72 @@ ce dernier rend son verdict avec les avis de l'amont et le manifeste.
 
 `GITHUB_TOKEN`, facultatif, évite la limitation de débit de l'API GitHub.
 
-## Workflows réutilisables
+## Actions
 
-Déclarés en `on: workflow_call` dans `.github/workflows/`. Le déclencheur, le
-cron et les permissions sont déclarés par le workflow appelant. Le job appelé
-récupère le dépôt appelant, puis l'outil à `job.workflow_sha` dans
-`.scalingo-watcher/`, et installe Node et pnpm aux versions de l'outil par
-l'action `setup`.
+Cinq actions composites, appelées dans un pas d'un job du parc. Une composite ne
+peut déclarer ni runner, ni environment, ni permissions, ni groupe de
+concurrence : le job du parc les porte. Chaque action récupère elle-même le
+dépôt du parc, copie l'outil en `.scalingo-watcher/` dans le workspace et
+installe Node et pnpm aux versions de l'outil.
 
-| Workflow | Rôle | Permissions de l'appelant |
+| Action | Rôle | Le job déclare |
 |---|---|---|
-| `reconcile.yml` | Relève, converge, consigne le lock, tient le tableau de bord | `contents: write`, `issues: write` |
-| `apply.yml` | Application à la demande, en plan seul par défaut | `contents: write`, `issues: write` |
-| `validate.yml` | Valide le manifeste, publie le plan en commentaire de pull request | `contents: read`, `pull-requests: write` |
-| `propose-db.yml` | Ouvre la pull request de montée de version des bases | `contents: write`, `pull-requests: write` |
-| `propose-security.yml` | Ouvre la pull request de montée des versions couvertes par un avis amont | `contents: write`, `pull-requests: write` |
+| `actions/reconcile` | Relève, converge, consigne le lock, tient le tableau de bord | l'environment, `contents: write`, `issues: write`, le groupe `scalingo-apply` |
+| `actions/apply` | Application à la demande, en plan seul par défaut | l'environment, `contents: write`, `issues: write`, le groupe `scalingo-apply` |
+| `actions/validate` | Valide le manifeste, contrôle les appels de l'outil, publie le plan en commentaire de pull request | `contents: read`, `pull-requests: write` |
+| `actions/propose-db` | Ouvre la pull request de montée de version des bases | l'environment, `contents: write`, `pull-requests: write`, un groupe propre |
+| `actions/propose-security` | Ouvre la pull request de montée des versions couvertes par un avis amont | `contents: write`, `pull-requests: write`, un groupe propre |
 
 Inputs :
 
-| Input | Workflows | Défaut |
+| Input | Actions | Défaut |
 |---|---|---|
-| `environment` | `reconcile`, `apply`, `propose-db` | requis |
-| `manifest-path`, `lock-path` | tous | `manifest.yaml`, `lock.json` |
-| `fgp-path` | tous sauf `propose-security` | `fgp.json` |
-| `dry_run` | `reconcile`, `apply` | `false` pour `reconcile`, `true` pour `apply` |
-| `app`, `force` | `apply` | `""`, `false` |
-| `dashboard-label`, `dashboard-title` | `reconcile`, `apply` | `etat-parc`, `Parc Scalingo : etat de la convergence` |
+| `dry-run` | `reconcile`, `apply` | requis pour `reconcile`, `"true"` pour `apply` |
+| `fgp-key`, `scalingo-api-token` | `reconcile`, `apply`, `propose-db` | requis |
+| `push-token` | toutes sauf `validate` | requis |
+| `teams-webhook`, `slack-webhook`, `matrix-access-token` | `reconcile`, `apply` | requis |
 | `matrix-homeserver`, `matrix-room-id` | `reconcile`, `apply` | `""` (notification Matrix désactivée) |
+| `manifest-path`, `lock-path` | toutes | `manifest.yaml`, `lock.json` |
+| `fgp-path` | toutes sauf `propose-security` | `fgp.json` |
+| `app`, `force` | `apply` | `""`, `"false"` |
+| `dashboard-label`, `dashboard-title` | `reconcile`, `apply` | `etat-parc`, `Parc Scalingo : etat de la convergence` |
 | `lock-commit-message` | `reconcile`, `apply` | `chore(lock): etat du parc apres reconciliation` (ou `apres deploiement`) |
 | `branch`, `commit-message` | `propose-db` | `montee-base`, `chore(base): proposer la montee de version des bases` |
 | `branch`, `commit-message` | `propose-security` | `montee-securite`, `fix(securite): monter les versions couvertes par un avis amont` |
+| `comment` | `validate` | `"true"` ; `"false"` publie le plan dans le seul résumé du job |
+| `checkout` | toutes | `"true"` ; `"false"` quand le job a déjà récupéré le dépôt avec un jeton qui peut pousser, `push-token` ne servant plus alors qu'aux pull requests des propositions |
 
-Secrets, tous facultatifs : `SCALINGO_API_TOKEN` ou `FGP_KEY` pour l'accès,
-`TEAMS_WEBHOOK`, `SLACK_WEBHOOK` et `MATRIX_ACCESS_TOKEN` pour les
-notifications, `PUSH_TOKEN` pour pousser le lock
-et ouvrir les pull requests sur une branche protégée. Les secrets d'accès et
-`PUSH_TOKEN` ont leur place dans l'environment, réservé à `main` par sa
-politique de branches.
+Un input est une chaîne : `"true"` et `"false"` s'écrivent entre guillemets ou
+sortent d'une expression. GitHub ne vérifie pas les inputs d'une action. Un
+input inconnu ne donne qu'un avertissement, un input requis absent arrive vide.
+Un input requis s'écrit donc toujours, même quand le secret qu'il porte est
+vide. `dry-run` n'a pas de défaut pour `reconcile` : une clé mal orthographiée
+arrête le passage au lieu de déployer.
 
-L'appelant mappe chaque secret, même rangé dans l'environment : le job appelé ne
-lit la valeur de l'environment que pour un secret qu'on lui passe, et un secret
-non mappé arrive vide. `secrets: inherit` aurait le même effet, mais ne
-fonctionne qu'au sein d'une même organisation.
+Le job lit les secrets de l'environment qu'il déclare et les passe en inputs.
+Les secrets d'accès et `PUSH_TOKEN` ont leur place dans l'environment, réservé à
+`main` par sa politique de branches. `push-token` vide, l'action prend le
+`GITHUB_TOKEN` du job.
 
-`reconcile` et `apply` partagent le groupe de concurrence
-`scalingo-apply` et n'annulent jamais un passage en cours. Chaque proposition a
-son propre groupe. `propose-security` ne déclare aucun `environment` : il n'a
-besoin d'aucun accès à Scalingo, et ne peut donc pas lire la clé du proxy.
+**Le verrou de la convergence est déclaré par le parc.** Les jobs qui appellent
+`reconcile` et `apply` déclarent le groupe `scalingo-apply` avec
+`cancel-in-progress: false`, au niveau du job. C'est la seule garde contre deux
+convergences en parallèle, et le nom doit rester exactement celui-ci. Le même
+groupe déclaré aussi au niveau du workflow fait annuler le run par GitHub pour
+interblocage. Un `cancel-in-progress` autre que `false`, à l'un ou l'autre
+niveau et quel que soit le groupe, peut annuler un passage en cours. Chaque
+proposition a son propre groupe : deux propositions en parallèle se
+disputeraient la même branche. `validate` refuse en pull request un workflow du
+parc qui manque à ces règles ou aux inputs requis.
+
+**Runner.** L'action tourne sur le runner du job, quelle que soit l'organisation
+de l'outil : un parc peut utiliser ses runners auto-hébergés. Il faut `bash`,
+`git`, `tar` et `gh`. Les runners hébergés par GitHub ont tout. L'image
+`ghcr.io/actions/actions-runner` n'a pas `gh`, et les actions qui s'en servent
+échouent alors avec un message explicite. Après l'action, ne pas supprimer
+`.scalingo-watcher/` dans le même job, par un checkout qui nettoie le workspace
+par exemple : le runner y relit les sous-actions en fin de job pour leurs pas
+de clôture.
 
 Appelant minimal :
 
@@ -184,26 +203,65 @@ on:
     branches: [main]
     paths: [manifest.yaml]
   workflow_dispatch:
+    inputs:
+      dry_run:
+        type: boolean
+        default: false
 permissions:
   contents: write
   issues: write
 jobs:
   reconcile:
-    uses: incubateur-ademe/scalingo-watcher/.github/workflows/reconcile.yml@<sha> # v1.0.0
-    with:
-      environment: production
-    secrets:
-      FGP_KEY: ${{ secrets.FGP_KEY }}
-      SCALINGO_API_TOKEN: ${{ secrets.SCALINGO_API_TOKEN }}
-      TEAMS_WEBHOOK: ${{ secrets.TEAMS_WEBHOOK }}
-      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-      MATRIX_ACCESS_TOKEN: ${{ secrets.MATRIX_ACCESS_TOKEN }}
-      PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: scalingo-apply
+      cancel-in-progress: false
+    steps:
+      - uses: incubateur-ademe/scalingo-watcher/actions/reconcile@<sha> # v2.0.0
+        with:
+          # Le cron et le push n'ont pas d'inputs : la comparaison ramene leur
+          # valeur absente a "false".
+          dry-run: ${{ inputs.dry_run == true }}
+          fgp-key: ${{ secrets.FGP_KEY }}
+          scalingo-api-token: ${{ secrets.SCALINGO_API_TOKEN }}
+          push-token: ${{ secrets.PUSH_TOKEN }}
+          teams-webhook: ${{ secrets.TEAMS_WEBHOOK }}
+          slack-webhook: ${{ secrets.SLACK_WEBHOOK }}
+          matrix-access-token: ${{ secrets.MATRIX_ACCESS_TOKEN }}
 ```
 
-Les quatre appelants complets sont dans le [template](https://github.com/incubateur-ademe/scalingo-parc-template/tree/main/.github/workflows).
+Les appelants complets sont dans le [template](https://github.com/incubateur-ademe/scalingo-parc-template/tree/main/.github/workflows).
 
-## Actions composites
+### Migrer depuis les workflows réutilisables (v1)
+
+La v2 retire les workflows réutilisables. Renovate propose la montée dans une
+pull request majeure qui ne change que le sha : elle ne transforme pas un appel
+de workflow en appel d'action, et casserait les appelants une fois fusionnée
+telle quelle. La migration se fait à la main, tous les appelants du parc dans la
+même pull request et au même sha.
+
+Pour chaque appelant :
+
+1. Le job perd `uses:`, `with:` et `secrets:`. Il gagne `runs-on`,
+   `environment` (l'ancien input du même nom), un groupe de concurrence et un pas
+   `uses: incubateur-ademe/scalingo-watcher/actions/<nom>@<sha> # v2.x.y`. Le
+   groupe vaut `scalingo-apply` pour `reconcile` et `apply`,
+   `scalingo-watcher-propose-db` et `scalingo-watcher-propose-security` pour les
+   propositions : ce sont ceux que posait l'outil.
+2. Chaque secret mappé devient un input sous `with:` : `FGP_KEY` devient
+   `fgp-key`, `SCALINGO_API_TOKEN` devient `scalingo-api-token`, `PUSH_TOKEN`
+   devient `push-token`, `TEAMS_WEBHOOK` devient `teams-webhook`, `SLACK_WEBHOOK`
+   devient `slack-webhook`, `MATRIX_ACCESS_TOKEN` devient `matrix-access-token`.
+3. `dry_run` devient `dry-run`, une chaîne. Depuis un input booléen de
+   `workflow_dispatch`, `${{ inputs.dry_run == true }}` donne `"true"` ou
+   `"false"`.
+4. Les autres inputs gardent leur nom.
+
+La pull request de migration fait tourner la `validate` de la v2, qui contrôle
+les autres appelants.
+
+### Sous-actions internes
 
 - [`actions/setup`](actions/setup/action.yml) : installe pnpm et Node aux
   versions de l'outil (`package.json` et `.nvmrc`), puis ses dépendances.
@@ -224,7 +282,7 @@ Les quatre appelants complets sont dans le [template](https://github.com/incubat
 | [`renovate/base`](renovate/base.json) | Lecture du manifeste par deux customManagers (commit du dépôt applicatif, version de l'outil et `defaults.policy`), aucune montée pour une application en pause, délai de cinq jours, dépôts applicatifs toujours en PR, alertes de vulnérabilité, messages de commit |
 | [`renovate/metabase`](renovate/metabase.json) | Module Renovate de Metabase : versioning (lignes OSS et Enterprise séparées), ligne suivie, et politique commune étendue pour `metabase/metabase` |
 | [`renovate/politique`](renovate/politique.json) | Politique de fusion selon `defaults.policy`, commune à tous les outils : sans politique, correctifs fusionnés seuls et montées fonctionnelles en PR, jamais une rupture. Étendue par chaque preset d'outil, jamais par le parc |
-| [`renovate/watcher`](renovate/watcher.json) | Mises à jour de l'outil : workflows épinglés par sha, presets, versions citées par la documentation et le `$schema` du manifeste, une PR groupée, proposée dès la release, jamais fusionnée seule |
+| [`renovate/watcher`](renovate/watcher.json) | Mises à jour de l'outil : actions épinglées par sha, presets, versions citées par la documentation et le `$schema` du manifeste, une PR groupée, proposée dès la release, jamais fusionnée seule |
 
 Le consommateur les étend, épinglés par tag, et active les managers qui les
 lisent :
@@ -349,7 +407,8 @@ entre en maintenance le 20 octobre 2026.
 Les tests tournent hors ligne sur le parc fictif de `test/fixtures/`. La CI
 ([`ci.yml`](.github/workflows/ci.yml)) lance le typecheck, les tests, la
 validation des presets de `renovate/` par `renovate-config-validator` et un plan
-sur ce parc, sans aucun secret.
+sur ce parc, sans aucun secret. Un second job y exécute `validate`, `apply` et
+`reconcile` en plan, comme un parc les appelle.
 
 Les releases suivent les commits conventionnels (`feat:`, `fix:`, etc.).
 [`release.yml`](.github/workflows/release.yml) tient à jour une pull request
@@ -361,10 +420,10 @@ la CI.
 Le template est un dépôt à part, seule source de son contenu. Renovate le
 tient à jour comme un parc : une pull request par release, dès sa publication,
 dont la validation tourne avec la nouvelle version. La CI de
-l'outil récupère le template et vérifie que chacun de ses appelants mappe les
-secrets du workflow à la version qu'il épingle. Les secrets qu'une version en
-cours ajoute sont signalés en avertissement, à mapper dans le template une fois
-la release publiée.
+l'outil récupère le template et vérifie que chacun de ses appels est conforme à
+la version qu'il épingle : inputs connus, inputs requis passés, groupe
+`scalingo-apply` déclaré. Ce qu'une version en cours change est signalé en
+avertissement, à reporter dans le template une fois la release publiée.
 
 ## Licence
 

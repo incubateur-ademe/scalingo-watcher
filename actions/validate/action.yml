@@ -1,0 +1,128 @@
+# Tourne sur les pull requests : le job appelant ne declare aucun environment et
+# ne passe aucun secret Scalingo. Il declare les permissions contents: read et
+# pull-requests: write.
+name: valider le manifeste
+description: >
+  Valide le manifeste, controle que les workflows du parc appellent les actions
+  de l'outil comme elles l'exigent, et publie le plan de la fusion en
+  commentaire de la pull request.
+
+inputs:
+  manifest-path:
+    description: Chemin du manifeste, relatif a la racine du depot
+    required: false
+    default: manifest.yaml
+  lock-path:
+    description: Chemin du lock, relatif a la racine du depot
+    required: false
+    default: lock.json
+  fgp-path:
+    description: Chemin des blobs du proxy, relatif a la racine du depot
+    required: false
+    default: fgp.json
+  comment:
+    description: '"false" pour publier le plan dans le seul resume du job, sans commentaire de pull request'
+    required: false
+    default: "true"
+  checkout:
+    description: '"false" quand le job a deja recupere le depot du parc'
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - if: ${{ inputs.checkout == 'true' }}
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: recuperer l'outil
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/../copy-tool.sh"
+
+    - id: setup
+      uses: ./.scalingo-watcher/actions/setup
+
+    - name: valider
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+        LOCK_PATH: ${{ inputs.lock-path }}
+        FGP_PATH: ${{ inputs.fgp-path }}
+      run: |
+        out="$RUNNER_TEMP/scalingo-watcher"
+        mkdir -p "$out"
+        node .scalingo-watcher/src/apply.ts --validate \
+          --manifest "$MANIFEST_PATH" --lock "$LOCK_PATH" --fgp "$FGP_PATH" --out-dir "$out"
+
+    # Le plan tourne sans jeton Scalingo, volontairement : une pull request ne
+    # doit pas avoir acces a un secret qui deploie. Il compare le lock au
+    # manifeste et controle que chaque commit epingle appartient bien a la
+    # branche declaree, ce qui suffit a montrer ce que la fusion entrainera.
+    - name: plan
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+        LOCK_PATH: ${{ inputs.lock-path }}
+        FGP_PATH: ${{ inputs.fgp-path }}
+      run: |
+        out="$RUNNER_TEMP/scalingo-watcher"
+        mkdir -p "$out"
+        set -o pipefail
+        node .scalingo-watcher/src/apply.ts --dry-run \
+          --manifest "$MANIFEST_PATH" --lock "$LOCK_PATH" --fgp "$FGP_PATH" --out-dir "$out" \
+          2>&1 | tee "$out/plan.log"
+
+    # Le verrou de la convergence et les secrets sont declares par le parc, plus
+    # par l'outil : un oubli ne se verrait qu'au premier passage, ou jamais pour
+    # un verrou absent. Controle aussi quand le manifeste est invalide, l'un ne
+    # dit rien de l'autre.
+    - name: controler les appels de l'outil
+      if: ${{ always() && steps.setup.outcome == 'success' }}
+      shell: bash
+      run: node .scalingo-watcher/src/callers.ts
+
+    - name: publier le plan
+      if: ${{ always() && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        FROM_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        COMMENT: ${{ inputs.comment }}
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+        LOCK_PATH: ${{ inputs.lock-path }}
+      run: |
+        out="$RUNNER_TEMP/scalingo-watcher"
+        mkdir -p "$out"
+        {
+          echo "## Ce que cette fusion entrainera"
+          echo
+          echo "Etat du parc selon \`$LOCK_PATH\`, compare a \`$MANIFEST_PATH\` tel qu'il sera apres fusion."
+          echo
+          echo '```'
+          cat "$out/plan.log" 2>/dev/null || echo "le plan n'a pas produit de sortie"
+          echo '```'
+        } > "$out/comment.md"
+
+        cat "$out/comment.md" >> "$GITHUB_STEP_SUMMARY"
+        if [ "$COMMENT" != "true" ]; then
+          echo "comment vaut '$COMMENT' : plan publie dans le resume du job"
+          exit 0
+        fi
+        # Le jeton d'une pull request venue d'un fork est en lecture seule :
+        # le commentaire serait refuse et le check passerait au rouge sans
+        # rien dire du manifeste. Le plan reste dans le resume du job.
+        if [ "$FROM_FORK" = "true" ]; then
+          echo "pull request venue d'un fork : plan publie dans le resume du job"
+          exit 0
+        fi
+        if ! command -v gh >/dev/null; then
+          echo "::error::gh introuvable sur ce runner, il publie le plan. Les runners heberges par GitHub l'embarquent, l'image ghcr.io/actions/actions-runner non. Sinon, passer comment: \"false\"."
+          exit 1
+        fi
+        gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+          --body-file "$out/comment.md" --edit-last --create-if-none

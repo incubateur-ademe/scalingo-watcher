@@ -320,10 +320,10 @@ Renovate : `monter Metabase en v0.63.16`, ou `monter le dépôt applicatif
 alpha-metabase, branche main, en 4b7c2f1`.
 
 **[fait]** Les mises à jour de l'outil sont suivies par le preset `watcher` : sha
-des workflows appelants (gestionnaire `github-actions`) et tag des presets
+des actions appelées (gestionnaire `github-actions`) et tag des presets
 (gestionnaire `renovate-config`), avancés ensemble dans une pull request
 `scalingo-watcher`, dès la release, jamais fusionnée seule. Les
-workflows appelants sont épinglés par sha avec la version en commentaire.
+actions sont épinglées par sha avec la version en commentaire.
 
 **[fait]** Le consommateur n'active que `custom.regex`, `github-actions` et
 `renovate-config`. Le fuseau reste dans sa configuration : les presets ne
@@ -742,15 +742,15 @@ réconciliation planifiée échouait sans qu'on sache pourquoi.
 ne sont jamais consignés.
 
 **[fait]** Les secrets, `PUSH_TOKEN` compris, vivent dans un environment GitHub
-et non dans le dépôt. Seuls les jobs qui déclarent l'environment passé en input
+et non dans le dépôt. Seuls les jobs du parc qui déclarent cet environment
 peuvent les lire, et sa politique de branches le réserve à `main` (checklist du
 template). La validation, qui tourne sur les pull requests, n'a accès ni à la
 clé du proxy ni au webhook, pas plus qu'une branche qui ajouterait un job
 déclarant l'environment. Sans politique de branches, toute branche du dépôt
 pouvait les lire.
 
-**[fait]** L'outil est récupéré au sha exact du workflow réutilisable appelé, sans
-conserver d'identifiants dans le clone. Côté consommateur, l'épinglage par sha et
+**[fait]** L'outil est celui du sha exact de l'action appelée, téléchargé par le
+runner avec elle, sans identifiants. Côté consommateur, l'épinglage par sha et
 l'absence de fusion automatique des mises à jour de l'outil limitent l'effet
 d'un tag malveillant, qui s'exécuterait avec les secrets d'accès à Scalingo.
 La pull request est proposée sans délai de décantation : c'est sa relecture
@@ -955,9 +955,8 @@ parc stable dont le lock ne bouge plus et sans pull request Renovate perd sa
 réconciliation planifiée sans prévenir. Un lancement manuel ou toute activité
 sur le dépôt la rétablit.
 
-**Workflows réutilisables indisponibles sur GitHub Enterprise Server.** Le job
-appelé récupère l'outil par `job.workflow_repository` et `job.workflow_sha`, que
-GHES n'expose pas.
+**Actions de l'outil sur GitHub Enterprise Server.** Un GHES n'atteint une
+action de github.com que si GitHub Connect y autorise les actions publiques.
 
 ---
 
@@ -1000,7 +999,7 @@ Renovate ne couvrent qu'une dizaine de datasources de paquets. Le preset `base`
 annonçait donc depuis le départ une veille que la plateforme ne peut pas produire
 sur cet axe : son `osvVulnerabilityAlerts` a été retiré et la description de son
 `vulnerabilityAlerts` corrigée, ce bloc ne valant que pour ce que la plateforme
-sait voir, les workflows appelants et les presets.
+sait voir, les actions appelées et les presets.
 
 **[fait]** Ni le CVE ni le score CVSS ne servent de clé. Sur les 45 avis du dépôt
 Metabase au 2026-10-30, 17 n'ont aucun CVE et 29 aucun score. Le plus récent,
@@ -1080,7 +1079,7 @@ c'est la seule chose que cette commande édite. Le constat du tableau de bord,
 lui, juge bien ce qui tourne.
 
 **[fait]** `--propose-security` n'a besoin d'aucun accès à Scalingo, les avis de
-l'amont et le manifeste suffisant à rendre le verdict. Son workflow ne déclare
+l'amont et le manifeste suffisant à rendre le verdict. Son job ne déclare
 donc pas d'`environment` et ne peut pas lire la clé du proxy. Les applications en
 pause sont écartées, comme pour les bases, rien n'y étant jamais déployé. Les
 deux propositions refusent de tourner dans le même passage : elles écrivent
@@ -1283,7 +1282,7 @@ avant le chargement du lock : ni déploiement, ni sauvegarde, ni réconciliation
 Il déroulait auparavant toute la vague avant de proposer. Des déploiements réels
 partaient alors dans le groupe de concurrence `propose-db`, à côté de la
 réconciliation, et le lock qu'ils mettaient à jour n'était jamais commité, le
-workflow n'ajoutant que le manifeste. Le workflow vérifie aussi que le lock n'a
+workflow n'ajoutant que le manifeste. L'action vérifie aussi que le lock n'a
 pas bougé avant de pousser.
 
 **[fait]** Renovate ne peut pas tenir ce rôle. Une version de base Scalingo n'est
@@ -1300,7 +1299,7 @@ précisément l'alerte permanente qu'on apprend à ignorer.
 
 **[fait]** Le titre et le corps de la pull request sont réécrits à chaque
 passage. `--propose-db` les écrit dans `pr-title.txt` et `pr-body.md`, sous
-`--out-dir`, seulement quand il modifie le manifeste, et le workflow ouvre ou
+`--out-dir`, seulement quand il modifie le manifeste, et l'action ouvre ou
 met à jour la pull request avec. La branche étant réutilisée d'un passage à
 l'autre pour ne pas accumuler une pull request par passage, une pull request
 déjà relue peut se retrouver à porter autre chose : son libellé doit donc nommer
@@ -1373,7 +1372,7 @@ favori. La chaîne tourne seule la nuit : un échec ou une
 quarantaine n'était connu de personne avant que quelqu'un pense à ouvrir les
 exécutions.
 
-**[fait]** Le label et le titre de cette issue sont des inputs des workflows,
+**[fait]** Le label et le titre de cette issue sont des inputs des actions,
 `etat-parc` et `Parc Scalingo : etat de la convergence` par défaut.
 
 **[fait]** Le corps de l'issue décrit l'état courant plutôt que l'historique.
@@ -1407,24 +1406,76 @@ Terraform de Scalingo a une ressource dédiée, plutôt que de réécrire l'aler
 
 ## 9. Distribution
 
-**[fait]** Workflows réutilisables (`on: workflow_call`) pour la réconciliation,
-l'application, la validation et les deux propositions, montées de base et
-montées de sécurité. Le dépôt consommateur ne déclare que les déclencheurs, le
-cron, les permissions et le mappage des secrets. Les chemins des fichiers du
-parc, le label et le titre du tableau de bord, les messages de commit et les
-branches de proposition sont des inputs.
+**[fait]** Actions composites publiques dans `actions/` : `reconcile`, `apply`,
+`validate`, `propose-db` et `propose-security`, appelées dans un pas d'un job du
+parc. Le dépôt consommateur déclare les déclencheurs, le cron et le job (runner,
+environment, permissions, groupe de concurrence), et passe ses secrets en
+inputs. Les chemins des fichiers du parc, le label et le titre du tableau de
+bord, les messages de commit et les branches de proposition sont des inputs.
 
-**[à faire]** Appelant de `propose-security.yml` dans le dépôt starter. Le
-workflow voyage avec l'outil dès maintenant, mais le starter ne pourra l'épingler
-qu'une fois cette version publiée, comme pour tout ce que l'outil ajoute.
+**[fait]** Les workflows réutilisables (`on: workflow_call`) des versions 1.x
+sont retirés en v2. Un workflow réutilisable d'une autre organisation n'accède
+pas aux runners auto-hébergés de l'appelant, même avec un `runs-on` passé en
+input. Une action composite tourne dans le job de l'appelant, donc sur son
+runner. Le parc betagouv, dans une autre organisation que l'outil, en avait
+besoin.
 
-**[fait]** Le job appelé récupère le dépôt consommateur, puis l'outil au sha du
-workflow appelé, et installe Node et pnpm aux versions déclarées par l'outil
-(action `setup`). Le dépôt consommateur n'a ni `package.json` ni `.nvmrc`.
+**[fait]** Chaque action récupère le dépôt du parc avec `push-token`, sauf avec
+`checkout: "false"`. Elle copie ensuite l'outil en `.scalingo-watcher/` dans le
+workspace (`actions/copy-tool.sh`), puis installe Node et pnpm aux versions de
+l'outil (sous-action `setup`). Le runner télécharge l'outil entier au sha de
+l'action, mais hors du workspace. Or une composite ne résout `uses: ./` que
+contre le workspace, et setup-node refuse un `cache-dependency-path` hors du
+workspace. Le dépôt consommateur n'a ni `package.json` ni `.nvmrc`.
 
-**[fait]** Actions composites dans `actions/` : `setup`, `signaler` (tableau de
-bord et notification), `commit-lock` (push du lock rejoué, et arbitré par sa date
-quand deux passages l'ont écrit).
+**[fait]** Sous-actions internes dans `actions/` : `setup`, `signaler` (tableau
+de bord et notification), `commit-lock` (push du lock rejoué, et arbitré par sa
+date quand deux passages l'ont écrit).
+
+**[fait]** Les inputs d'une action sont des chaînes. Les conditions comparent
+donc à `'true'`. `!inputs.dry-run` vaudrait toujours faux, `'false'` étant une
+chaîne non vide, et le lock ne serait jamais consigné. Un test refuse cette
+forme.
+
+**[fait]** GitHub ne vérifie pas les inputs d'une action. Un input inconnu ne
+donne qu'un avertissement, un input `required` absent arrive vide. `required`
+marque donc ce que l'appelant doit écrire, secrets compris, même vides.
+`dry-run` de `reconcile` n'a pas de défaut et n'accepte que `true` ou `false` :
+une clé mal orthographiée arrête le passage au lieu de déployer.
+
+**[fait]** Le verrou de la convergence est déclaré par le parc : groupe
+`scalingo-apply`, `cancel-in-progress: false`, sur les jobs qui appellent
+`reconcile` et `apply`. L'action `validate` relit les workflows du parc en pull
+request (`src/callers.ts`). Elle refuse un appel de `reconcile` ou `apply` hors
+de ce groupe, une proposition sans groupe propre, un même groupe déclaré à la
+fois au niveau du workflow et du job (GitHub annule alors le run pour
+interblocage), un `cancel-in-progress` autre que `false` à l'un des deux
+niveaux, un input inconnu, un input requis absent, des appels épinglés à des
+versions différentes, et un appel restant d'un workflow réutilisable. Ne
+reconnaître aucun appel donne un avertissement : `validate` étant elle-même un
+appel, le contrôle n'a alors pas lu les workflows du parc.
+
+**[fait]** Contrôles avant tout passage : `gh` présent quand l'action en a
+besoin (tableau de bord, pull requests), accès à Scalingo présent hors plan,
+avertissement en plan sans accès. Le runner doit fournir `bash`, `git`, `tar` et
+`gh`. L'image `ghcr.io/actions/actions-runner` n'a pas `gh`.
+
+**[fait]** Les actions tierces qu'appellent les actions de l'outil sont
+épinglées par sha. Un parc dont la politique Actions exige l'épinglage par sha
+peut ainsi les appeler.
+
+**[fait]** Le job du parc lit directement les secrets de l'environment qu'il
+déclare. La contrainte des workflows réutilisables, où un secret non mappé
+arrivait vide même rangé dans l'environment, a disparu avec eux.
+
+**[fait]** La CI de l'outil exécute `validate`, `apply` et `reconcile` en plan
+sur le parc de test, depuis un autre dossier que `.scalingo-watcher` pour
+exercer la copie. Un test vérifie les `action.yml` : clés admises dans un pas de
+composite, épinglage par sha, copie de l'outil avant tout `uses: ./`.
+
+**[à faire]** Un passage réel depuis le runner auto-hébergé d'un parc d'une
+autre organisation. Le comportement est établi par le code du runner et la
+documentation de GitHub, pas observé.
 
 **[fait]** Chemins des fichiers du parc en options (`--manifest`, `--lock`,
 `--fgp`), relatifs au répertoire courant. Le schéma est lu à côté du moteur, quel
@@ -1436,7 +1487,7 @@ que soit le répertoire courant.
 passage et affiché à sa création, plus rien dans le dépôt : un fichier produit à
 côté du lock finit tôt ou tard commité avec lui.
 
-**[fait]** Deux modes d'accès à Scalingo, en local comme dans les workflows :
+**[fait]** Deux modes d'accès à Scalingo, en local comme dans les actions :
 `SCALINGO_API_TOKEN` en direct, ou `FGP_KEY` et `fgp.json`. L'adresse du proxy
 est lue dans `fgp.json`. `fgp-blobs` vise le proxy choisi par `--url` et affiche
 la commande `gh secret set` pour le dépôt courant.
@@ -1447,8 +1498,18 @@ la commande `gh secret set` pour le dépôt courant.
 **[fait]** Dépôt starter `incubateur-ademe/scalingo-parc-template` : manifeste
 d'exemple fictif, `renovate.json`, workflows appelants, et checklist
 d'installation. Seule source de son contenu, tenu à jour par Renovate comme un
-parc. La CI de l'outil vérifie que ses appelants mappent les secrets du workflow
-qu'ils épinglent.
+parc. La CI de l'outil vérifie que chacun de ses appels est conforme à la
+version de l'outil qu'il épingle : secrets mappés pour un workflow de la v1,
+inputs et verrou pour une action. Ce que la version en cours change est annoncé
+en avertissement.
+
+**[à faire]** Passer le starter aux actions, appelant de `propose-security`
+compris, une fois la v2 publiée. Il ne peut épingler qu'une version publiée.
+
+**[à faire]** Migrer à la main les parcs ADEME et betagouv vers la v2. Renovate
+ne transforme pas un appel de workflow en appel d'action : sa pull request de
+montée majeure ne change que le sha, et casserait les appelants une fois
+fusionnée.
 
 **[fait]** Releases par release-please sur les commits conventionnels : pull
 request de release tenue à jour, tag `vX.Y.Z` et release GitHub à la fusion,
@@ -1462,13 +1523,6 @@ documentation en français.
 
 **[fait]** Publication : dépôt public de l'outil, ruleset qui rend les tags
 `vX.Y.Z` immuables, releases depuis `v1.0.0`, dépôt starter.
-
-**[fait]** Un job appelé qui déclare `environment:` lit la valeur d'un secret de
-cet environment à condition que l'appelant mappe ce secret ; non mappé, il
-arrive vide. Vérifié en production sur le premier parc.
-
-**[à faire]** Confirmer ce comportement pour un consommateur hors de
-l'organisation de l'outil.
 
 **[à faire]** Outils autres que Metabase de bout en bout. Le moteur les prend en
 charge, mais seul Metabase a un preset d'outil, et les modules se limitent aux

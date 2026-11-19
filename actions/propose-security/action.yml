@@ -1,0 +1,144 @@
+# Renovate ne peut pas suivre les failles de l'outil : installe par un buildpack
+# depuis une variable d'environnement, il n'est une dependance d'aucun ecosysteme
+# de paquets. Une alerte Dependabot exige un avis revu, rattache a l'un des
+# ecosystemes supportes, et une dependance visible dans le graphe de dependances,
+# or manifest.yaml n'est pas un manifeste reconnu ; osvVulnerabilityAlerts ne
+# couvre qu'une dizaine de datasources de paquets. Le watcher releve donc
+# lui-meme les avis du depot amont et ouvre la pull request qui porte la montee,
+# comme il le fait pour les versions de bases.
+#
+# Aucun acces a Scalingo : le verdict se rend avec les avis de l'amont et le
+# manifeste. Le job appelant n'a donc pas a declarer l'environment qui porte la
+# cle du proxy. Pas le verrou de la convergence non plus, il ne touche ni le
+# parc ni le lock : son propre groupe, deux propositions en parallele se
+# disputant la meme branche, poussee en force.
+name: proposer les montees de securite
+description: >
+  Releve les avis de securite du depot amont de chaque outil et ouvre ou met a
+  jour la pull request qui monte les versions couvertes. Le job appelant declare
+  les permissions contents: write et pull-requests: write, et un groupe de
+  concurrence propre a cette proposition.
+
+inputs:
+  push-token:
+    description: >
+      Jeton qui pousse la branche et ouvre la pull request. Passer
+      secrets.PUSH_TOKEN, meme vide : vide, c'est le GITHUB_TOKEN du job, dont
+      les pull requests ne declenchent pas la validation.
+    required: true
+  manifest-path:
+    description: Chemin du manifeste, relatif a la racine du depot
+    required: false
+    default: manifest.yaml
+  lock-path:
+    description: Chemin du lock, relatif a la racine du depot
+    required: false
+    default: lock.json
+  branch:
+    description: Branche reutilisee d'un passage a l'autre pour porter la proposition
+    required: false
+    default: montee-securite
+  commit-message:
+    description: Message du commit de la proposition
+    required: false
+    default: "fix(securite): monter les versions couvertes par un avis amont"
+  checkout:
+    description: >
+      "false" quand le job a deja recupere le depot du parc avec un jeton qui
+      peut pousser. Par defaut, l'action le recupere elle-meme avec push-token.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: controler les entrees
+      shell: bash
+      run: |
+        if ! command -v gh >/dev/null; then
+          echo "::error::gh introuvable sur ce runner, il ouvre la pull request. Les runners heberges par GitHub l'embarquent, l'image ghcr.io/actions/actions-runner non."
+          exit 1
+        fi
+
+    # Une pull request ouverte avec le GITHUB_TOKEN ne declenche pas la
+    # validation : PUSH_TOKEN, quand il existe, pousse la branche et ouvre la
+    # pull request.
+    - if: ${{ inputs.checkout == 'true' }}
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        token: ${{ inputs.push-token || github.token }}
+
+    - name: recuperer l'outil
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/../copy-tool.sh"
+
+    - uses: ./.scalingo-watcher/actions/setup
+
+    - name: relever les avis de l'amont
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+        LOCK_PATH: ${{ inputs.lock-path }}
+      run: |
+        out="$RUNNER_TEMP/scalingo-watcher"
+        mkdir -p "$out"
+        set -o pipefail
+        node .scalingo-watcher/src/apply.ts --propose-security \
+          --manifest "$MANIFEST_PATH" --lock "$LOCK_PATH" --out-dir "$out" \
+          | tee "$out/propose.log"
+
+    # Cette proposition ne tient pas le verrou de la convergence et ne commite
+    # que le manifeste. Un lock modifie trahirait une convergence menee ici.
+    - name: verifier que le parc n'a pas ete touche
+      shell: bash
+      env:
+        LOCK_PATH: ${{ inputs.lock-path }}
+      run: git diff --exit-code -- "$LOCK_PATH"
+
+    - name: ouvrir la pull request
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.push-token || github.token }}
+        BRANCH: ${{ inputs.branch }}
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/scalingo-watcher"
+        if git diff --quiet -- "$MANIFEST_PATH"; then
+          echo "aucune montee de securite a proposer"
+          exit 0
+        fi
+
+        for f in pr-title.txt pr-body.md; do
+          if [ ! -s "$out/$f" ]; then
+            echo "::error::le manifeste a change mais le moteur n'a pas produit $out/$f"
+            exit 1
+          fi
+        done
+
+        # La pull request vise la branche executee : main pour le cron.
+        base="$GITHUB_REF_NAME"
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git checkout -B "$BRANCH"
+        git add -- "$MANIFEST_PATH"
+        git commit -m "$COMMIT_MESSAGE"
+        git push -f origin "$BRANCH"
+
+        # Le titre et le corps sont reecrits a chaque passage : la branche
+        # etant reutilisee, une pull request deja relue peut porter autre
+        # chose, et son libelle doit dire ce qu'elle contient maintenant.
+        title=$(cat "$out/pr-title.txt")
+        pr_number=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+        # Sans `--label` : un label absent du depot consommateur ferait
+        # echouer la creation, et c'est a lui de nommer les siens.
+        if [ -z "$pr_number" ]; then
+          gh pr create --head "$BRANCH" --base "$base" \
+            --title "$title" --body-file "$out/pr-body.md"
+        else
+          gh pr edit "$pr_number" \
+            --title "$title" --body-file "$out/pr-body.md"
+          echo "pull request #$pr_number mise a jour"
+        fi
