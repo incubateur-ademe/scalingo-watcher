@@ -368,13 +368,13 @@ console.log("\nBattement de la veille de silence");
   const base = `http://127.0.0.1:${port}`;
   const dir = mkdtempSync(join(tmpdir(), "scalingo-watcher-battement-"));
   let runs = 0;
-  const runBeat = (urls: string, path = process.env.PATH) =>
+  const runBeat = (urls: string, extra: Record<string, string> = {}) =>
     new Promise<{ status: number; out: string; summary: string; hits: string[] }>((done) => {
       const summary = join(dir, `resume-${++runs}.md`);
       writeFileSync(summary, "");
       const before = hits.length;
       // Le delai coupe un curl qui dormirait le temps d'un Retry-After.
-      const options = { timeout: 20_000, env: { ...process.env, PATH: path, HEARTBEAT_URL: urls, GITHUB_STEP_SUMMARY: summary } };
+      const options = { timeout: 20_000, env: { ...process.env, ...extra, HEARTBEAT_URL: urls, GITHUB_STEP_SUMMARY: summary } };
       execFile("bash", ["-e", "-c", beat?.run ?? "exit 9"], options, (e, stdout, stderr) =>
         done({
           status: e ? (typeof e.code === "number" ? e.code : 1) : 0,
@@ -435,15 +435,42 @@ console.log("\nBattement de la veille de silence");
     [0, true, true],
   );
   // curl 8.18 sort en 0 sur ce 503 quand il renonce a reessayer, le curl du
-  // poste peut sortir en 22. Le faux curl rejoue le premier cas partout.
+  // poste peut sortir en 22. Le faux curl rejoue le premier cas partout, sur
+  // plusieurs codes, pour qu'une garde reduite au seul 503 ne passe pas.
   const fake = join(dir, "faux-curl");
   mkdirSync(fake);
-  writeFileSync(join(fake, "curl"), "#!/bin/sh\nprintf 503\n", { mode: 0o755 });
-  const lying = await runBeat(`${base}/occupe`, `${fake}:${process.env.PATH}`);
+  writeFileSync(join(fake, "curl"), '#!/bin/sh\nprintf %s "$FAUX_CODE"\n', { mode: 0o755 });
+  const codes = ["204", "503", "429", "301", "000"];
+  const lying: unknown[] = [];
+  for (const code of codes) {
+    const r = await runBeat(`${base}/occupe`, { PATH: `${fake}:${process.env.PATH}`, FAUX_CODE: code });
+    lying.push([code, r.status, r.out.includes("::warning::battement refuse ou perdu"), r.out.includes("battement recu")]);
+  }
   check(
-    "un code HTTP hors 2xx est un refus, meme quand curl sort en 0",
-    [lying.status, lying.out.includes("::warning::battement refuse ou perdu"), lying.out.includes("battement recu")],
-    [0, true, false],
+    "seul un code HTTP final en 2xx est recu, meme quand curl sort en 0",
+    lying,
+    codes.map((code) => [code, 0, code !== "204", code === "204"]),
+  );
+  // Sans -g, curl developpe [] et {} et affiche l'URL entiere sur un motif
+  // invalide.
+  const globbed = await runBeat(`${base}/ping/cle-secrete[1 ${base}/ping/{cle,secrete}`);
+  check(
+    "crochets et accolades partent tels quels, sans afficher l'URL",
+    [globbed.status, globbed.hits, globbed.out.split(`battement recu par 127.0.0.1:${port}\n`).length - 1, leaks(globbed)],
+    [0, ["/ping/cle-secrete[1", "/ping/{cle,secrete}"], 2, false],
+  );
+  const malformed = await runBeat(`http:///cle-secrete http://moi:cle#secrete@127.0.0.1:${port}/ping ${base}/accepte`);
+  check(
+    "une URL mal formee n'est pas envoyee, et rien de son secret n'est affiche",
+    [
+      malformed.status,
+      malformed.hits,
+      malformed.out.split("::warning::battement non envoye, une URL de HEARTBEAT_URL est mal formee\n").length - 1,
+      malformed.summary.split("Battement non envoye, une URL de HEARTBEAT_URL est mal formee.\n").length - 1,
+      malformed.out.includes(`battement recu par 127.0.0.1:${port}`),
+      leaks(malformed),
+    ],
+    [0, ["/accepte"], 2, 2, true, false],
   );
   server.close();
   rmSync(dir, { recursive: true, force: true });

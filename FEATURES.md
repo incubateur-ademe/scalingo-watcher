@@ -646,11 +646,15 @@ Un battement refusé donne un avertissement sans faire échouer le job. Les
 redirections sont suivies jusqu'au service. Un `Retry-After` du service ne
 retient pas le job plus de 30 secondes par URL. Seul un code HTTP final en 2xx
 compte comme reçu. curl 8.18, celui d'`ubuntu-latest`, sort en succès quand il
-renonce à réessayer devant un `Retry-After` plus long que cette borne. Seul
-l'hôte de l'URL est affiché, sans identifiants ni
-requête. Le reste peut porter le secret du service, et le runner ne masque que
-la valeur entière du secret. La mise en place de référence, un check pulse
-updown.io de 24 heures, est dans le README.
+renonce à réessayer devant un `Retry-After` plus long que cette borne.
+
+Seul l'hôte de l'URL est affiché, sans identifiants ni requête. Le reste peut
+porter le secret du service, et le runner ne masque que la valeur entière du
+secret. curl part avec `-g`. Sans lui, il développe `[]` et `{}` en plusieurs
+URL et affiche l'URL entière sur un motif invalide. Une URL dont l'hôte n'a pas
+une forme valide n'est pas envoyée et donne un avertissement, car l'hôte lu par
+l'étape et celui lu par curl n'y sont plus les mêmes. La mise en place de
+référence, un check pulse updown.io de 24 heures, est dans le README.
 
 Le battement remplace une sentinelle qui lirait l'état des parcs depuis GitHub.
 Logée dans un autre parc, elle demandait un jeton approuvé par chaque
@@ -853,12 +857,14 @@ ligne en service dans le constat.
 serveur local : l'URL atteinte entière, identifiants, chemin et requête jamais
 affichés, plusieurs URL séparées par des blancs ou des fins de ligne Windows, le
 secret absent, un refus qui avertit sans faire échouer le job, une redirection
-suivie, un `Retry-After` d'une heure. Un faux curl qui sort en 0 sur un 503,
-comme curl 8.18, vérifie que seul le code HTTP fait foi, quelle que soit la
-version de curl du poste. Son câblage est vérifié sur le YAML, et sa condition
-comparée à l'identique. La condition et les gardes du script (hôte seul,
-identifiants, refus sans échec, redirection, `Retry-After`, code 2xx, fins de
-ligne Windows) ont chacune été cassées pour vérifier que la suite échoue.
+suivie, un `Retry-After` d'une heure, des crochets et des accolades envoyés
+tels quels, des URL mal formées non envoyées. Un faux curl qui sort en 0, comme
+curl 8.18, rejoue un 204, un 503, un 429, un 301 et un 000 : seul le 204 est
+reçu, quelle que soit la version de curl du poste. Son câblage est vérifié sur
+le YAML, et sa condition comparée à l'identique. La condition et les gardes du
+script (hôte seul, identifiants, refus sans échec, redirection, `Retry-After`,
+code 2xx, `-g`, forme de l'hôte, fins de ligne Windows) ont chacune été cassées
+pour vérifier que la suite échoue.
 
 **[fait]** Les tests ont été vérifiés en cassant volontairement chacun des
 invariants, pour s'assurer qu'ils échouent quand ils le doivent.

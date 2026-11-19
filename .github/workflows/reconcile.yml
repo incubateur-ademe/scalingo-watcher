@@ -171,6 +171,7 @@ jobs:
           # ligne Windows resterait au bout de l'URL, et curl la rejetterait.
           set -f
           IFS=$' \t\r\n'
+          valid='^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]+)?$'
           for url in $HEARTBEAT_URL; do
             # Identifiants, chemin et requete peuvent porter le secret du
             # service. Le runner ne masque que la valeur entiere du secret,
@@ -178,12 +179,21 @@ jobs:
             host=${url#*://}
             host=${host%%[/?#]*}
             host=${host##*@}
-            # -L suit une redirection de http vers https jusqu'au service.
+            # Sur une URL mal formee, l'hote lu ici n'est plus celui que lit
+            # curl, et l'un ou l'autre afficherait un morceau du secret.
+            if [[ ! $host =~ $valid ]]; then
+              echo "::warning::battement non envoye, une URL de HEARTBEAT_URL est mal formee"
+              echo "Battement non envoye, une URL de HEARTBEAT_URL est mal formee." >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            # Sans -g, curl developpe [] et {} en plusieurs URL, et affiche
+            # l'URL entiere quand le motif est invalide. -L suit une
+            # redirection de http vers https jusqu'au service.
             # --retry-max-time borne l'attente qu'un Retry-After imposerait,
             # groupe de concurrence tenu. Quand ce Retry-After depasse la
             # borne, curl 8.18 renonce a reessayer et sort en 0. Seul un code
             # final en 2xx compte donc comme recu.
-            if code=$(curl -fsSL -o /dev/null -w '%{http_code}' -m 10 --retry 3 --retry-max-time 30 "$url") && [[ $code == 2?? ]]; then
+            if code=$(curl -gfsSL -o /dev/null -w '%{http_code}' -m 10 --retry 3 --retry-max-time 30 "$url") && [[ $code == 2?? ]]; then
               echo "battement recu par $host"
               echo "Battement recu par $host." >> "$GITHUB_STEP_SUMMARY"
             else
