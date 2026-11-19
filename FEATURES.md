@@ -631,7 +631,8 @@ réconciliation tout de suite, au lieu d'attendre le prochain créneau. Le filtr
 sur le manifeste évite la boucle : le commit de lock que la réconciliation
 produit ne la redéclenche pas.
 
-**[fait]** Battement vers une veille de silence (secret `HEARTBEAT_URL`). Les
+**[fait]** Battement vers une veille de silence (secret `HEARTBEAT_URL`), à
+partir de la 2.0.0. Aucune version 1.x ne le porte. Les
 notifications partent du job de réconciliation. Un job refusé pour facturation
 ne démarre plus et ne prévient personne. Après chaque passage planifié dont le
 tableau de bord a été publié, `reconcile` envoie un GET à chaque URL du secret.
@@ -1007,10 +1008,9 @@ bout de sa période.
 **Le battement dit qu'un parc a été regardé, pas qu'il va bien.** L'état reste
 au tableau de bord et dans ses notifications. Sans service de veille configuré,
 rien ne surveille le silence. Un service de veille en panne, ou un canal
-d'alerte mort, n'alerte pas non plus. Un parc ne bat qu'une fois monté à une
-version de l'outil qui porte le battement, avec `HEARTBEAT_URL` mappé dans son
-appelant. Mappé dans un appelant épinglé sur une version antérieure, le secret
-fait refuser l'appel par GitHub, et chaque passage échoue au démarrage.
+d'alerte mort, n'alerte pas non plus. Un parc ne bat qu'une fois migré en
+2.0.0, avec `HEARTBEAT_URL` passé à `reconcile`. Mappé dans un appelant 1.x, le
+secret fait refuser l'appel par GitHub, et chaque passage échoue au démarrage.
 
 **Workflows réutilisables indisponibles sur GitHub Enterprise Server.** Le job
 appelé récupère l'outil par `job.workflow_repository` et `job.workflow_sha`, que
@@ -1476,8 +1476,8 @@ workflow voyage avec l'outil dès maintenant, mais le starter ne pourra l'éping
 qu'une fois cette version publiée, comme pour tout ce que l'outil ajoute.
 
 **[à faire]** `HEARTBEAT_URL` mappé dans l'appelant `reconcile.yml` du starter,
-et la veille de silence dans sa checklist d'installation. Même contrainte : le
-starter ne pourra le mapper qu'une fois cette version publiée.
+et la veille de silence dans sa checklist d'installation. Le starter ne pourra
+le faire qu'avec sa migration en 2.0.0.
 
 **[fait]** Le job appelé récupère le dépôt consommateur, puis l'outil au sha du
 workflow appelé, et installe Node et pnpm aux versions déclarées par l'outil

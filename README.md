@@ -160,7 +160,7 @@ Secrets, tous facultatifs : `SCALINGO_API_TOKEN` ou `FGP_KEY` pour l'accès,
 `TEAMS_WEBHOOK`, `SLACK_WEBHOOK` et `MATRIX_ACCESS_TOKEN` pour les
 notifications, `PUSH_TOKEN` pour pousser le lock
 et ouvrir les pull requests sur une branche protégée, `HEARTBEAT_URL` pour la
-veille de silence (`reconcile` seulement). Les secrets d'accès et
+veille de silence (`reconcile` seulement, à partir de la 2.0.0). Les secrets d'accès et
 `PUSH_TOKEN` ont leur place dans l'environment, réservé à `main` par sa
 politique de branches.
 
@@ -200,7 +200,6 @@ jobs:
       SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
       MATRIX_ACCESS_TOKEN: ${{ secrets.MATRIX_ACCESS_TOKEN }}
       PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
-      HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
 ```
 
 Les quatre appelants complets sont dans le [template](https://github.com/incubateur-ademe/scalingo-parc-template/tree/main/.github/workflows).
@@ -219,10 +218,10 @@ Mise en place de référence, un check par parc :
 1. Créer un check pulse [updown.io](https://updown.io/doc/how-pulse-cron-monitoring-works)
    avec une période de 24 heures. Sur un mois de mesure, les déclenchements du
    cron se sont espacés de 11 heures au plus.
-2. Ranger son URL dans le secret `HEARTBEAT_URL` et la mapper dans l'appelant
-   `reconcile`, une fois celui-ci épinglé sur une version de l'outil qui déclare
-   ce secret. Sur une version antérieure, GitHub refuse l'appel et chaque
-   passage échoue au démarrage.
+2. Ranger son URL dans le secret `HEARTBEAT_URL` et la passer à `reconcile`,
+   une fois le parc migré en 2.0.0. Aucune version 1.x ne porte le battement.
+   Mappé dans un appelant 1.x, le secret fait refuser l'appel par GitHub, et
+   chaque passage échoue au démarrage.
 3. Déclarer deux destinataires indépendants chez le service, une adresse
    partagée et un salon. Un workflow Teams sans co-propriétaire ou un bot Tchap
    non renouvelé cessent d'envoyer sans prévenir.
