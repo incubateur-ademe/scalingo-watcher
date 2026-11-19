@@ -650,9 +650,9 @@ déjà sur l'application. Un passage parti d'un lock périmé ne sait pas qu'il 
 déjà lancé ce déploiement, Scalingo si : l'application est alors laissée en
 l'état au lieu d'empiler un second build derrière le premier.
 
-**[fait]** Les workflows `apply` et `reconcile` récupèrent la tête de la branche
-et non le commit de l'événement. Un passage mis en file derrière un autre garde
-le sha de sa création, et relirait un lock d'avant ce que le précédent a lancé.
+**[fait]** Le dépôt du parc est récupéré à la tête de sa branche et non au commit
+de l'événement. Un passage mis en file derrière un autre garde le sha de sa
+création, et relirait un lock d'avant ce que le précédent a lancé.
 
 **[fait]** Le relevé de `--reconcile` passe son tour sur une application en vol :
 il écraserait ce qu'il faut relire pour conclure l'opération.
@@ -847,8 +847,9 @@ aucun ne part avant l'instant demandé par l'évènement qu'il sert.
 **[fait]** Par défaut, le groupe de concurrence `scalingo-apply` ne garde qu'un
 passage en attente : un nouveau run annule celui qui attendait. Un dispatch de
 reprise annulerait ainsi un passage ordinaire en attente, seul à pouvoir ouvrir
-un déploiement. Les workflows `apply` et `reconcile` posent donc `queue: max` :
-jusqu'à cent passages attendent leur tour, aucun n'est remplacé. En défense, le
+un déploiement. Le verrou `scalingo-apply` pose donc `queue: max`, au niveau du
+job qui le déclare, donc chez l'appelant du parc : jusqu'à cent passages
+attendent leur tour, aucun n'est remplacé. En défense, le
 relais liste aussi les runs en attente du dépôt avant chaque dispatch et
 s'abstient si l'un d'eux vient d'un workflow du groupe (`RELAY_GROUP_WORKFLOWS`,
 par défaut `RELAY_WORKFLOW` et `apply.yml`). Ce run fera avancer tout ce qui est
@@ -922,11 +923,39 @@ webhook de ce nom mettent l'application en échec, avec leurs ids et
 création ou modification, la commande relit le notifier rendu par Scalingo et
 compte tout écart restant comme un échec.
 
-**[fait]** Mise en route sur un parc, dans cet ordre : déployer le relais et
-poser ses variables, poser les notifiers avec l'URL du relais, puis passer
-`async: true` à l'appelant de `reconcile` et déclarer sur son
-`workflow_dispatch` un input booléen `resume` transmis tel quel. Sans relais, ne
-pas activer `async`.
+**[fait]** Mise en route sur un parc, à partir de la v2, dans cet ordre :
+déployer le relais et poser ses variables, poser les notifiers avec l'URL du
+relais, puis adapter l'appelant de `actions/reconcile` repris du starter. Son
+`workflow_dispatch` déclare un input booléen `resume`, que le relais pose à
+`true`. Son job ajoute `queue: max` au verrou `scalingo-apply`, et passe à
+l'action `async: "true"` et `resume` tel qu'il arrive. Sans relais, ne pas
+activer `async` : le cron seul ferait durer un déploiement des jours.
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      resume:
+        description: Reprise d'un deploiement en cours, posee par le relais
+        type: boolean
+        default: false
+  # cron et push sur le manifeste comme dans le starter
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: scalingo-apply
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: incubateur-ademe/scalingo-watcher/actions/reconcile@v2
+        with:
+          dry-run: "false"
+          async: "true"
+          resume: ${{ inputs.resume == true }}
+          # secrets passes comme dans le starter
+```
 
 ## 6. Sécurité
 
