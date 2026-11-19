@@ -6,9 +6,9 @@
  * journal de build, et un test sur cette ligne.
  */
 import jvmCommon from "./jvm-common.ts";
-import oauth2Proxy from "./oauth2-proxy.ts";
+import proxyBuildpack from "./oauth2-proxy.ts";
 import type { BuildpackModule } from "./types.ts";
 
 export type { BuildpackModule, Installed } from "./types.ts";
 
-export const BUILDPACKS: readonly BuildpackModule[] = [jvmCommon, oauth2Proxy];
+export const BUILDPACKS: readonly BuildpackModule[] = [jvmCommon, proxyBuildpack];
