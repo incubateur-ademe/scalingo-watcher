@@ -99,7 +99,10 @@ poussent sur deux branches distinctes : un passage ne peut pas porter les deux.
 Par commande :
 
 - `apply.ts` : `--dry-run`, `--app <fragment>`, `--force` (redéploie une app
-  conforme, exige `--app`), `--reconcile`, `--prune`, `--validate`, `--adopt`
+  conforme, exige `--app`), `--rebuild` (relève puis refait à l'identique le
+  build en service d'une app conforme, sans sauvegarde ni écriture de variable,
+  exige `--app`, refusé avec `--force`), `--reconcile`, `--prune`,
+  `--validate`, `--adopt`
   (amorce le lock depuis l'état réel, sans déployer), `--propose-db`,
   `--propose-security`, `--async` (un passage puis rend la main, l'état en vol
   dans le lock), `--resume` (fait avancer le déploiement en cours sans en ouvrir).

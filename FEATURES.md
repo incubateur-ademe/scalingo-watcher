@@ -38,6 +38,15 @@ désactive avec `--no-build-log` pour aller plus vite.
 **[fait]** Retombe sur `BUILDPACK_URL` quand aucun log n'est exploitable, en
 signalant que la source est moins fiable.
 
+**[fait]** Relève dans le même journal ce que les buildpacks ont installé : le JDK
+de `Scalingo/buildpack-jvm-common` et le binaire d'`oauth2-proxy-buildpack`, avec
+l'image de pile du build, lue sur le déploiement. Seulement quand ce dernier
+déploiement a réussi : un build raté annonce déjà ce qu'il aurait installé, alors
+que Scalingo garde les conteneurs précédents. L'audit ne prévoit pas ce qu'un
+rebuild installerait. La majeure du JDK est fixée par le `system.properties` du
+dépôt applicatif, que l'audit ne connaît pas, puisqu'il balaye aussi les
+applications hors du manifeste. Ce verdict vit dans la convergence, section 8.
+
 **[fait]** Compare les versions à l'intérieur de leur ligne uniquement. Metabase
 publie `0.x` pour l'OSS et `1.x` pour l'Enterprise, ce sont deux lignes
 distinctes qu'il n'y a aucun sens à comparer. Le nombre de composants qui forment
@@ -179,6 +188,38 @@ et l'éventuelle quarantaine.
 
 **[fait]** Écrit par application et non d'un bloc, donc un échec partiel laisse
 les autres applications correctement consignées.
+
+**[fait]** Consigne aussi ce que le dernier build réussi a installé, sous
+`build` : l'identifiant de ce déploiement, la version de l'outil avec laquelle il
+a été fait, l'image de pile lue sur lui, et les runtimes lus dans son journal,
+`null` quand le journal n'a pas pu être lu. La version est exacte quand le moteur
+a conclu le build. Le relevé la lit sur la variable seulement pour un build
+apparu depuis le lock et resté le dernier déploiement. Il la laisse à `null`
+derrière un échec, où la variable porte déjà la cible de l'échec, et pour un
+build que le lock connaissait sans sa version : un moteur plus ancien recopiait
+la variable sans condition, et une montée dont le déploiement n'était jamais
+parti y passait pour faite. Un build raté n'y entre jamais. Scalingo garde alors les conteneurs précédents, mais
+le journal annonce déjà le nouveau JDK et le déploiement porte déjà la nouvelle
+pile : les consigner ferait passer pour à jour une application qui tourne
+l'ancien build.
+
+**[fait]** Un journal illisible ne vide plus rien. Il garde les runtimes déjà
+lus pour le même déploiement, et le relevé de buildpacks que le lock portait,
+comme le chemin de déploiement le faisait déjà pour les buildpacks. Le relevé de
+`--reconcile` et celui d'une application en pause écrasaient la liste par un
+relevé vide à chaque erreur passagère, et le passage suivant la réécrivait :
+chaque aller-retour faisait un commit de lock sans rien de neuf.
+
+**[fait]** `build` ne fait pas monter la version du format. La version ne monte
+que pour un champ dont la perte casserait le passage suivant. `build` n'en est
+pas : il est optionnel, un lock antérieur reste lisible, et un moteur plus ancien
+le perd à la réécriture. Le relevé suivant le reconstitue sur le dernier
+déploiement réussi, même derrière un échec. La quarantaine d'un rebuild porte
+`rebuild: true`, qu'un moteur plus ancien conserve en recopiant la quarantaine
+telle quelle. L'opération en vol d'un rebuild porte aussi `rebuild: true`, dans
+le lock en version 2 du déploiement asynchrone. Les deux sont sortis dans la
+même version de l'outil : aucun moteur publié ne lit une version 2 sans
+connaître cette marque.
 
 **[fait]** N'est réécrit que si l'état a réellement changé. Son horodatage date
 le dernier changement, pas la dernière vérification : sinon la réconciliation
@@ -461,10 +502,14 @@ démarrer. C'est arrivé le 2026-10-30, et seule une fusion dans la fenêtre l'a
 deux gestes : aligner le manifeste sur ce qui tourne, ou restaurer la base puis
 forcer la descente par `--force --app`.
 
-**[fait]** Ce contrôle ne s'applique qu'à une version qu'un déploiement réussi
-accompagne dans le lock. Après un échec, la variable porte déjà la cible ratée
-sans que le binaire ait changé : refuser le retour en arrière serait refuser la
-seule réaction sensée.
+**[fait]** Ce contrôle juge la version en service : celle du build en service
+quand le lock la connaît, sinon celle que porte la variable, à condition qu'un
+déploiement réussi l'accompagne. Après un échec, la variable porte déjà la cible
+ratée sans que le binaire ait changé : refuser le retour en arrière serait
+refuser la seule réaction sensée. Le build en service, lui, n'a pas bougé. Un
+rebuild raté ne désarme donc pas le contrôle : une cible antérieure au binaire
+qui tourne reste refusée, au lieu de partir en première prise en charge avec
+une sauvegarde qui remplacerait le point de restauration.
 
 **[fait]** La comparaison est purement numérique, sans égard pour les lignes de
 publication. Une descente de majeure est donc refusée comme une autre, et chez
@@ -824,6 +869,120 @@ une pull request ne doit pas avoir accès à un secret qui déploie.
 **[fait]** Code de sortie non nul en cas d'échec, exploitable en intégration
 continue.
 
+**[fait]** La réconciliation refait à l'identique le build d'une application
+conforme dont le dernier build réussi a plus de sept jours. Ce qu'un build
+installe sans que le manifeste le dise n'avance qu'à un nouveau build : le JDK,
+dont le buildpack résout la majeure au dernier correctif à chaque build, l'image
+de la pile, et un binaire dont le buildpack fixe la version, comme
+oauth2-proxy. Un redémarrage relance la même image, ce que le bulletin Scalingo
+SSB-2026-006 dit en toutes lettres. Le 2026-11-18, toute application bâtie avant
+8 h 40 UTC tournait un JDK `25.0.5.0.3`, déclaré vulnérable par Oracle la
+veille, quand un rebuild installait `25.0.5.1`.
+
+**[fait]** La règle ne borne que la queue. Les correctifs de l'outil, fusionnés
+seuls, rebuildent d'ordinaire le parc tous les un à trois jours : huit en
+quatorze jours sur un parc réel en novembre 2026. Une ligne qui ne reçoit plus
+de correctif, elle, ne serait plus jamais rebuildée : la ligne 0.63 est restée
+dix-neuf jours sans tag en août 2026, et une ligne en fin de vie n'en reçoit plus
+du tout.
+
+**[fait]** La règle ne dépend d'aucune source externe, seulement de la date du
+dernier build. Elle couvre donc ce que la veille sait prévoir comme ce qu'elle
+ne sait pas, et une source en panne ne l'arrête pas.
+
+**[fait]** Seulement la nuit, entre 0 h et 5 h UTC, sur la plage où la fusion
+automatique des correctifs place déjà les déploiements. Sans plage, le rebuild
+partirait au premier passage suivant les sept jours. Les passages réels
+s'espacent de trois à six heures et demie, et son heure glisserait donc d'une
+semaine à l'autre vers la journée. Le moteur ne connaît pas le fuseau du parc :
+la plage est fixe, en UTC. Un build qui a l'âge hors de la plage attend, et le
+passage le dit. La plage se juge au lancement : un rebuild lancé à 4 h 55 se
+conclut après 5 h, au passage qui le relit.
+
+**[fait]** Seulement sous `--reconcile`, au passage ordinaire comme à la reprise
+que relance le relais. Avant de lancer, le moteur confirme sur Scalingo que le
+build en service, le dernier déploiement réussi, est celui que le lock décrit,
+au même commit et à la même version, et que la variable de version n'a pas bougé
+depuis. Le lock seul ne le prouve pas : il peut dater d'avant un déploiement fait
+hors du watcher. Un build en service que le lock ne connaît pas encore attend le
+relevé suivant. Un build dont la version n'est pas attestée n'est pas refait par
+âge, et une échéance le dit : c'est le cas de toute application après la montée
+vers cette version de l'outil, jusqu'à son prochain déploiement par l'outil, ou
+un `--force --app`, qui sauvegarde. Un build dont le `git_ref` n'est pas un sha n'est jamais refait,
+et l'application reste conforme. Une application en pause est relevée mais
+jamais rebuildée.
+
+**[fait]** Un rebuild passe par la machine à états du déploiement, comme une
+montée : opération en vol marquée `rebuild` dans le lock, fenêtre de garde lue
+après coup, quarantaine. N'importe quel passage le conclut, la reprise du relais
+comprise. Il ne part jamais à côté d'une montée qui attend son éclaireur.
+
+**[fait]** Un rebuild ne tient pas lieu d'éclaireur. Refaire un build à
+l'identique ne dit rien d'une version nouvelle : compté comme éclaireur, il
+laisserait partir de front derrière lui des montées qu'aucune application n'a
+validées. L'application suivante prend le rôle, et le plan ne fait pas d'un
+rebuild l'éclaireur de la vague qu'il annonce.
+
+**[fait]** Après un premier rebuild réussi dans un déploiement, les rebuilds
+suivants partent jusqu'à trois de front entre eux. La chaîne de build est alors
+saine, et la première nuit où tout le parc a l'âge, un par un, un job enchaîné
+tiendrait le verrou des heures. Une montée attend toujours son éclaireur, seule.
+
+**[fait]** Sans sauvegarde, et sans toucher à celle que le lock consigne. Même
+version de l'outil, même commit : rien ne migre, et une sauvegarde ne
+protégerait de rien. Pire, elle remplacerait dans le lock le point de
+restauration d'avant la dernière montée, celui dont on a besoin quand une
+migration a mal tourné. La variable de version n'est jamais écrite : si elle ne
+vaut plus la version du build en service, le rebuild ne part pas.
+
+**[fait]** Sans délai de décantation, et c'est une exception assumée. Chaque
+déploiement de l'outil prend déjà l'alias de JDK courant sans aucune
+décantation, et le JDK passe d'abord par le robot d'Heroku puis par la fusion
+manuelle de Scalingo. La fenêtre de garde s'applique comme à tout déploiement.
+
+**[fait]** Un rebuild raté met l'application en quarantaine, marquée `rebuild`,
+et suspend les rebuilds par âge sur tout le parc tant qu'elle y reste. La cause
+probable est commune, un JDK ou une tête de buildpack défectueux, et aucun des
+deux n'est dans le manifeste. Sans cette suspension, une quarantaine n'arrêtant
+pas la vague, chaque application vieillie aurait cassé sur la même cause sans
+que rien ne permette de freiner. La suspension se lit dans le lock : elle joue
+dès le lancement suivant, dans le même passage comme dans une reprise. Les
+rebuilds déjà partis, trois au plus, vont à leur terme.
+
+**[fait]** Un rebuild dont le verdict se perd, borne d'attente dépassée ou
+lecture refusée par le proxy, met aussi l'application en quarantaine `rebuild`,
+au motif `rebuild sans verdict`. Sans elle, un build raté que personne n'a vu
+ferait prendre l'application pour jamais déployée au passage suivant, donc
+sauvegardée, et le point de restauration d'avant la dernière montée serait
+remplacé. Quand Scalingo conclut le même déploiement en succès, le relevé relit
+sa fenêtre de garde après coup et ne lève la quarantaine que si elle n'a rien
+vu. Un statut `success` ne dit pas que l'outil tient. La quarantaine est
+confirmée sinon.
+
+**[fait]** La suspension ne tombe qu'au premier déploiement réussi de
+l'application : par `--rebuild --app` une fois la cause levée, ou par une montée
+de version. Un nouvel échec sur cette application, montée ou `--force`, garde la
+marque : il ne dit pas que la cause est levée. Une entrée orpheline du lock ou
+une application en pause ne suspend rien, aucun déploiement ne venant jamais
+lever sa quarantaine. `--rebuild --app` ne lève pas la quarantaine d'une montée
+ratée, dont la cible n'est pas le build en service : ce serait monter sans
+sauvegarde. Elle se lève par `--force --app`. Le tableau de bord conseille
+`--rebuild --app` pour une quarantaine qui suspend les rebuilds. `--force`
+sauvegarderait et remplacerait le point de restauration.
+
+**[fait]** `--rebuild --app` refait le build d'une application conforme sans
+attendre, sans sauvegarde, par exemple quand le tableau de bord la dit `rebuild
+utile`. Il relève d'abord l'application, comme `--reconcile` : sans ce relevé,
+un lock en retard sur le réel ferait redescendre la version de l'outil, sans
+sauvegarde, sur une base déjà migrée. Il exige `--app`, comme `--force`. Il
+passe outre l'âge, la plage horaire et la suspension, puisque c'est une décision
+humaine, mais pas la confirmation du build en service. Il est refusé avec
+`--force`, qui sauvegarde et redéploie. Sous `--async`, la reprise du relais le
+mène à son terme. Il lève une quarantaine de rebuild par la même branche sans sauvegarde,
+là où `--force` sauvegarderait et remplacerait le point de restauration. Sur une
+application en écart, c'est un déploiement ordinaire. Une application en pause
+n'est jamais rebuildée.
+
 ---
 
 ### Relais et notifiers
@@ -1130,6 +1289,37 @@ d'observation, pas de contrôle. Pour les figer, il faut un dépôt applicatif d
 le `.buildpacks` porte des références : c'est un choix de dépôt, pas une option
 du watcher.
 
+**La plage des rebuilds par âge est fixe, de 0 h à 5 h UTC.** Elle tombe la nuit
+en Europe et ne se règle pas par parc. Un parc d'un autre fuseau verrait ses
+rebuilds en journée.
+
+**Un buildpack chargé par une URL sans `.git` cache sa référence.**
+multi-buildpack télécharge alors l'archive de la référence sans l'écrire au
+journal, et rien ne dit si le buildpack était épinglé. Le JDK qu'il installe est
+relevé, sans prévision.
+
+**Le JDK n'est prévu que pour `Scalingo/buildpack-jvm-common` chargé
+directement.** Les buildpacks gradle, maven et scala installent le même JDK
+avec la même ligne de journal, mais par une archive de jvm-common qu'ils
+téléchargent eux-mêmes, et qui peut avoir son propre retard : leur JDK est relevé
+et dit « buildpack non suivi ». Une application sans `system.properties` n'a pas
+de prévision non plus : elle reçoit le défaut du buildpack, que seul son code
+dit et qui change d'une version à l'autre.
+
+**Un retard de patch n'est pas une faille prouvée.** Une version plus récente
+chez Azul peut n'être qu'une reconstruction. Le signal est retenu parce que la
+correspondance précise entre une version et des CVE n'existe nulle part à temps
+(section 8), et qu'un faux signal ne coûte qu'un rebuild. À l'inverse, les CVE
+du magasin de confiance Java ne se corrigent pas par le JDK : le buildpack
+remplace le `cacerts` du JDK par celui de la pile, et c'est l'image de pile qui
+les porte. Les deux CVE eMudhra d'octobre 2026 l'ont été par `scalingo-22` v20.
+
+**Les failles que l'amont de l'outil corrige sans avis restent invisibles.**
+Metabase publie un avis pour une dépendance quand il la juge exploitable, et
+corrige les autres sans rien publier : jackson-databind pour une CVE critique
+jugée non exposée, Jetty. Aucune source ne relie ces CVE à une version de
+Metabase, et le watcher ne lit pas le contenu du jar.
+
 **Le retour arrière ne défait pas une migration de base.** Une montée de version
 de Metabase migre le schéma de la base applicative. Redéployer l'ancienne version
 donne un binaire ancien face à un schéma récent. Le retour arrière réel passe par
@@ -1198,11 +1388,15 @@ donc à lever une quarantaine, même si l'outil est à terre derrière son port 
 répond.
 
 **Personne n'expose la version du binaire en service.** La variable dit la
-version du prochain build. Une variable changée à la main sans déploiement fait
-donc refuser une cible que l'application servait déjà. Le refus est assumé : les
-deux cas se résolvent du même geste, regarder pourquoi le réel et le manifeste ne
-disent pas la même chose, et le refus ne déploie rien tandis que l'erreur inverse
-met l'application à terre.
+version du prochain build. Le relevé ne la reprend que si un déploiement a suivi
+celui que le lock connaît : une montée dont la variable est posée et dont le
+déploiement n'est jamais parti passait sinon pour faite. Une variable changée sans
+build compte comme dérive, avec une échéance qui avertit qu'un build fait hors de
+l'outil construirait cette version sans sauvegarde. Un déploiement fait hors du
+watcher, lui, est cru sur la variable lue au relevé. Si cette variable a encore
+bougé entre ce build et le relevé, sans nouveau build, un rebuild par âge
+construirait la nouvelle version sans sauvegarde. Il faut pour cela un déploiement hors du
+watcher puis une édition de variable sans build, sur une application gérée.
 
 **Après un échec de montée, le retour arrière demande `--force`.** Si l'échec a
 été suivi d'un redéploiement réussi de la même cible, hors du watcher, le lock la
@@ -1555,6 +1749,89 @@ deux mécanismes sont distincts et un parc homogène ne les sépare pas : le tes
 compteur d'appels passait sans le cache, la mémoire du verdict par couple y
 suffisant. Il porte désormais deux versions du même outil.
 
+**[fait]** Veille du contenu des buildpacks. Le tableau de bord confronte ce que
+le dernier build réussi a installé à ce qu'un rebuild installerait aujourd'hui :
+le JDK de `Scalingo/buildpack-jvm-common` et l'image de pile. La frontière tient
+en trois conditions : figé au build, lisible précisément après coup, corrigé par
+un rebuild. Le contenu de la pile reste l'affaire de Scalingo, sans signal par
+paquet, mais l'adopter est l'affaire du parc, puisque seul un rebuild la fait
+entrer. Le code des buildpacks n'a pas de flux de failles. Les bibliothèques
+embarquées dans l'outil relèvent des avis de son amont.
+
+**[fait]** Le signal est le retard de patch, et non la correspondance précise
+entre une version et des CVE. Sur un JDK `25.0.4.1` en service le 2026-11-18,
+un mois après la mise à jour d'Oracle qui le rendait vulnérable, les sources
+répondaient ainsi :
+
+- le NVD ne disait rien : ses CVE d'octobre étaient toutes en attente
+  d'analyse, il énumère des versions Oracle exactes sans plage, et son CPE pour
+  Zulu est abandonné depuis 2023 ;
+- OSV ne disait rien sur octobre, et rendait des faux positifs de juillet faute
+  de lire une version à quatre composants ;
+- endoflife.date disait « à jour » : sa ligne Zulu est saisie à la main et
+  restait bloquée à `25.0.4.1` ;
+- le catalogue KEV ne compte que des entrées Java de 2010 à 2016 ;
+- les avis d'OpenJDK et le CSAF d'Oracle disaient juste dès le jour même, mais
+  en HTML pour les premiers, et en cinq mégaoctets de versions Oracle pour le
+  second.
+
+Seul l'inventaire du buildpack disait à la fois que la version était dépassée
+et ce qu'un rebuild installerait.
+
+**[fait]** La prévision reproduit la requête du buildpack, `inventory::query`.
+Elle lit le sélecteur `java.runtime.version` du `system.properties` au commit
+déployé, à la façon de `java_properties::get`. Elle le résout par l'alias de
+l'inventaire, à la référence que suit le buildpack. Puis elle vérifie qu'un
+artefact existe pour la pile de l'application. Cette pile se traduit en pile
+Heroku, et `scalingo-20` lit un inventaire à part, figé par Scalingo. Un alias
+sans artefact pour la pile n'est pas un build périmé : le build échouerait au
+lieu d'installer quoi que ce soit, et la prévision le dit.
+
+**[fait]** Une échéance quand Scalingo n'a pas repris, depuis plus de sept
+jours, une version qu'Heroku publie pour un alias suivi. Le dépôt de Scalingo est
+un fork d'Heroku, dont un robot met l'inventaire à jour un à trois jours après
+chaque correctif ; Scalingo fusionne ensuite à la main. Le retard ordinaire va de
+quelques heures à deux semaines, et le seuil de sept jours en lève une partie,
+au prix d'une échéance de plus. Il n'est pas borné. Entre février et août 2025,
+Scalingo n'a rien fusionné, et la ligne 17 a sauté toute la mise à jour
+d'avril : cent huit jours d'exposition qu'aucun rebuild ne pouvait corriger et
+que rien ne signalait. La date de départ est celle du premier commit d'Heroku qui
+porte la version, retrouvée en remontant l'historique de son inventaire ; cet
+historique n'est lu qu'en cas de retard. Un alias épinglé par une référence de
+buildpack n'est pas confronté : l'épinglage est un choix.
+
+**[fait]** L'inventaire de `scalingo-20`, figé par choix de Scalingo, n'est pas
+confronté à celui d'Heroku : son écart n'est pas un retard que le support
+reprendrait, et la seule sortie est de changer de pile. Un buildpack épinglé
+non plus, l'épinglage étant un choix.
+
+**[fait]** Une source muette laisse une échéance, et non un parc sain : un
+inventaire, un `system.properties`, l'inventaire d'Heroku ou son historique
+illisibles. C'est la doctrine de la fin de vie et des stacks. Un retard établi
+dont la date manque reste une échéance. Un journal de build illisible, ou une
+ligne de JDK introuvable alors que jvm-common a tourné, aussi : sans ligne au
+tableau ni échéance, le JDK disparaîtrait sans bruit, et un changement de format
+du buildpack, déjà arrivé le 2025-02-26, passerait inaperçu. Une exception levée
+par la prévision, sur un inventaire hostile par exemple, devient elle aussi une
+échéance au lieu d'emporter le rapport du passage. Un `system.properties`
+absent, lui, est un fait : la prévision se tait sans échéance. La règle d'âge ne
+dépend d'aucune de ces sources et continue de tourner.
+
+**[fait]** Le binaire oauth2-proxy est relevé et affiché, sans prévision ni
+verdict. Sa version est le défaut que son buildpack écrit en dur avec la somme
+de contrôle qui va avec. La corriger passe par une pull request sur ce
+buildpack, où Renovate monte les deux d'un même commit, et non par le watcher ;
+la règle d'âge reprend ensuite ce défaut. Juger ses avis par le relevé de la
+section précédente aurait de surcroît rendu un faux positif permanent : un avis
+écrit `> v7.5.0` avec un correctif `> v7.15.4` couvre, lu tel quel, jusqu'à la
+dernière release.
+
+**[fait]** Coût par passage : aucun appel à Scalingo de plus, le journal étant
+déjà lu pour les buildpacks, et la liste des stacks pour leur dépréciation. Il
+faut en plus un fichier brut de GitHub par inventaire et par commit déployé
+distinct, et l'inventaire d'Heroku. Tout est mémorisé par adresse, échec
+compris.
+
 **[fait]** Surveillance des stacks. Chaque application est confrontée à la liste
 des stacks de sa région, qui portent une date de dépréciation. Un stack en fin de
 vie ne casse rien le jour même : il cesse d'abord de recevoir des correctifs,
@@ -1850,6 +2127,19 @@ qu'à la fermeture du déploiement, avec tout le reste.
 | --- | --- |
 | `suit sa branche` | le buildpack est déclaré sans référence fixe, chaque build reprend la tête de sa branche par défaut, et la colonne de mise à jour compare cette tête à la date du dernier déploiement |
 | `épinglé` | une référence fixe est déclarée, et le build garde la même tant qu'on ne la change pas |
+
+### États du tableau des runtimes
+
+| État | Ce qu'il dit |
+| --- | --- |
+| `à jour` | un rebuild installerait la même version, ou une plus ancienne |
+| `rebuild utile` | un rebuild installerait plus récent : la réconciliation le fera la nuit qui suit les sept jours du build, hors pause et hors suspension, et `--rebuild --app` le fait sans attendre sur une application qui n'est pas en pause |
+| `sans verdict` | la colonne de prévision dit pourquoi : journal illisible, ligne du JDK absente, journal antérieur à la version complète, majeure non fixée par `system.properties`, buildpack non suivi ou chargé sans `.git`, source illisible |
+| `relevé` | la version est lue au journal, sans prévision : c'est le cas d'oauth2-proxy, dont la version suit le défaut de son buildpack |
+
+La ligne `pile` compare l'image du dernier build réussi à l'image courante de la
+pile de l'application. La colonne `Dernier build` dit « avant le » quand le
+dernier déploiement est un échec postérieur au build en service.
 
 ### Méthode des relevés d'avis
 

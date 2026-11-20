@@ -8,6 +8,8 @@
  *                                   monte les versions que les avis de l'amont couvrent
  *   node src/apply.ts               applique
  *   node src/apply.ts --app alpha   restreint aux apps dont le nom contient alpha
+ *   node src/apply.ts --rebuild --app alpha
+ *                                   refait le build d'une app conforme, a l'identique
  *
  * Requiert SCALINGO_API_TOKEN.
  *
@@ -36,6 +38,16 @@ import { isMap, isScalar, isSeq, parse, parseDocument, type Document, type ToStr
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { accessModes, flagValue, outFile, readFgpFile, resolvePaths, shown, toolRef, type Fgp, type Paths } from "./options.ts";
 import { deniedByProxy, REGENERATE_HINT } from "./fgp-scopes.ts";
+import { parseBuildpackRef, readBuildpackLines, readRuntimes, type Runtime } from "./build-log.ts";
+import {
+  cmpJdk,
+  forecastJdk,
+  inventoryTarget,
+  JVM_COMMON,
+  upstreamLag,
+  type Fetched,
+  type JdkForecast,
+} from "./buildpacks/jvm-common.ts";
 import {
   advisoriesFor,
   cmpVersion,
@@ -89,8 +101,31 @@ type LockEntry = {
   tool: { env: string; version: string | null };
   buildpacks: Array<{ repo: string; ref: string | null }>;
   deployment: { id: string; status: string; at: string } | null;
+  /**
+   * Ce que le dernier build reussi a installe : la pile, lue sur le deploiement,
+   * et les runtimes, lus dans son journal, null quand le journal n'a pas pu
+   * etre lu. Absent tant qu'aucun build reussi n'a ete releve.
+   *
+   * Un build rate n'y entre jamais : Scalingo garde alors les conteneurs
+   * precedents, alors que son journal annonce deja le nouveau JDK et que son
+   * deploiement porte deja la nouvelle pile. Les consigner ferait passer pour a
+   * jour une app qui tourne l'ancien build.
+   *
+   * `version` est la version de l'outil avec laquelle ce build a ete fait. Un
+   * rebuild sans sauvegarde n'est legitime que si elle vaut la cible : sinon il
+   * construirait une version que l'app n'a jamais servie. Exacte quand le moteur
+   * a conclu le build, lue sur la variable quand le releve l'a decouvert, null
+   * quand rien ne la dit.
+   */
+  build?: { deployment: string; version: string | null; stack: string | null; runtimes: Runtime[] | null };
   backup: { id: string; at: string } | null;
-  quarantine: { target: Target; reason: string; at: string; deploymentId: string | null } | null;
+  /**
+   * `rebuild` marque une quarantaine qui suspend les rebuilds par age de tout le
+   * parc : celle d'un build refait a l'identique qui a echoue, ou dont le verdict
+   * s'est perdu. La marque survit a une montee ratee de la meme app : seul un
+   * deploiement reussi prouve que la chaine de build fonctionne de nouveau.
+   */
+  quarantine: { target: Target; reason: string; at: string; deploymentId: string | null; rebuild?: true } | null;
   inflight?: Inflight | null;
 };
 
@@ -102,6 +137,8 @@ type LockEntry = {
  * rattache l'operation au deploiement qui l'a lancee : un eclaireur n'a de
  * verdict que pour le sien. `async` fige le mode du passage qui l'a lancee : sa
  * borne d'attente est la sienne, quel que soit le passage qui la relit.
+ * `rebuild` dit que l'operation refait le build en service : le passage qui la
+ * conclut, peut-etre un autre processus, doit le savoir pour la juger.
  */
 type Inflight = {
   target: Target;
@@ -111,6 +148,7 @@ type Inflight = {
   async: boolean;
   backups: Array<{ addon: string; id: string }>;
   deployment: { id: string; at: string } | null;
+  rebuild?: true;
 };
 
 /**
@@ -125,17 +163,24 @@ type Inflight = {
  * passage ulterieur ne doit pas relancer. `notes` garde ce qui n'a pas abouti :
  * une reprise ne reecrit pas le tableau de bord, et l'interruption qu'elle
  * constate doit encore y figurer a la fermeture.
+ *
+ * `rebuild` porte l'option `--rebuild` comme `force` porte `--force`.
+ * `rebuildPassed` dit qu'un rebuild a reussi dans ce deploiement : la chaine de
+ * build est saine, les rebuilds suivants peuvent partir de front. Il ne vaut
+ * pas eclaireur pour une montee, dont la cible n'a pas ete essayee.
  */
 type Rollout = {
   id: string;
   fingerprint: string;
   filter: string | null;
   force: boolean;
+  rebuild?: true;
   scout: string | null;
   scoutPassed: boolean;
   interruptedScouts: number;
   stopped: string | null;
   settled: string[];
+  rebuildPassed?: true;
   notes?: Array<{ key: string; detail: string }>;
 };
 
@@ -282,6 +327,7 @@ const OPT = {
   reconcile: argv.includes("--reconcile"),
   prune: argv.includes("--prune"),
   force: argv.includes("--force"),
+  rebuild: argv.includes("--rebuild"),
   proposeDb: argv.includes("--propose-db"),
   proposeSecurity: argv.includes("--propose-security"),
   validateOnly: argv.includes("--validate"),
@@ -687,7 +733,13 @@ async function beginBackup(
 
 const TERMINAL = /^(success|build-error|crashed-error|timeout-error|hook-error|aborted)$/;
 
-type DeploymentState = { id: string; status: string; created_at: string; finished_at?: string | null };
+type DeploymentState = {
+  id: string;
+  status: string;
+  created_at: string;
+  finished_at?: string | null;
+  stack_base_image?: string;
+};
 
 /** Lance le deploiement de la cible et rend son identifiant, sans l'attendre. */
 async function startDeploy(entry: AppEntry, target: Target): Promise<{ id: string; at: string }> {
@@ -868,19 +920,13 @@ async function settleVerdict(
   return { failure: `conteneurs non demarres au bout de ${STARTUP_TIMEOUT_MS / 60_000} min (${detail})` };
 }
 
-/**
- * Depot et ref d'une entree de buildpack. La meme forme d'URL s'ecrit dans le
- * `.buildpacks` du depot applicatif et se relit dans le journal de build : un
- * seul parseur garde les deux releves comparables entre eux.
- */
-export const parseBuildpackRef = (url: string): { repo: string; ref: string | null } => {
-  const [bare, ref] = url.split("#");
-  const m = /github\.com[/:]([^/]+\/[^/#]+?)(?:\.git)?$/.exec(bare);
-  return { repo: m ? m[1] : bare, ref: ref || null };
-};
+export { parseBuildpackRef };
 
-/** Les buildpacks reellement utilises ne sont lisibles que dans les logs du build. */
-async function readBuildpacks(entry: AppEntry, deploymentId: string) {
+/**
+ * Journal d'un build, ou null quand il n'a pas pu etre lu. Les buildpacks
+ * reellement utilises et ce qu'ils ont installe ne se lisent que la.
+ */
+async function readBuildOutput(entry: AppEntry, deploymentId: string): Promise<string | null> {
   // Cette route rend du texte brut, pas du JSON : elle ne passe pas par req().
   const auth = fgp
     ? fgpHeaders(fgp.api[entry.region])
@@ -889,19 +935,42 @@ async function readBuildpacks(entry: AppEntry, deploymentId: string) {
     `${apiHost(entry.region)}/v1/apps/${entry.app}/deployments/${deploymentId}/output`,
     { headers: auth },
   );
-  if (!res.ok) return [];
-  const text = (await res.text()).slice(0, 512 * 1024);
-  const out: Array<{ repo: string; ref: string | null }> = [];
-  for (const line of text.split("\n")) {
-    const dl = /Downloading Buildpack:\s*(\S+)/.exec(line);
-    if (dl) {
-      out.push(parseBuildpackRef(dl[1]));
-      continue;
-    }
-    const br = /Using branch:\s*(\S+)/.exec(line);
-    if (br && out.length > 0) out[out.length - 1].ref = br[1];
+  if (!res.ok) return null;
+  return (await res.text()).slice(0, 512 * 1024);
+}
+
+/**
+ * Ce que le releve d'un build reussi consigne : la pile lue sur le
+ * deploiement, les runtimes lus dans son journal.
+ */
+const buildOf = (
+  deploymentId: string,
+  version: string | null,
+  stack: string | null | undefined,
+  output: string | null,
+): NonNullable<LockEntry["build"]> => ({
+  deployment: deploymentId,
+  version,
+  stack: stack ?? null,
+  runtimes: output === null ? null : readRuntimes(output),
+});
+
+/**
+ * Le build a consigner apres un releve. Un releve qui n'a pas trouve de build
+ * reussi garde celui que le lock connaissait, qui est encore ce qui tourne. Un
+ * journal illisible garde les runtimes deja lus pour ce meme deploiement : sans
+ * quoi une erreur passagere les effacerait, puis le passage suivant les
+ * reecrirait, et chaque aller-retour ferait un commit de lock.
+ */
+export function keptBuild(
+  seen: LockEntry["build"] | undefined,
+  known: LockEntry["build"] | undefined,
+): LockEntry["build"] | undefined {
+  if (!seen) return known;
+  if (seen.runtimes === null && known?.deployment === seen.deployment && known.runtimes !== null) {
+    return { ...seen, runtimes: known.runtimes };
   }
-  return out;
+  return seen;
 }
 
 /**
@@ -922,15 +991,99 @@ export function buildpacksLost(
   return lost.length > 0 ? `buildpack retire par le build : ${lost.join(", ")}` : null;
 }
 
-type Deployment = { id: string; status: string; created_at: string; git_ref: string | null };
+type Deployment = {
+  id: string;
+  status: string;
+  created_at: string;
+  git_ref: string | null;
+  /** Image de pile du build, `scalingo/scalingo-22:v21`. */
+  stack_base_image?: string;
+};
+
+// Apps dont la variable de version a bouge sans build depuis le lock : le releve
+// garde la version servie, et le compte en derive.
+const unbuiltVariables = new Set<string>();
+
+/** Deploiements les plus recents d'une app, du plus recent au plus ancien, quel qu'en soit le statut. */
+async function recentDeployments(entry: AppRef, count: number): Promise<Deployment[]> {
+  const { deployments } = await reqApi<{ deployments: Deployment[] }>(
+    `${apiHost(entry.region)}/v1/apps/${entry.app}/deployments?per_page=${count}`,
+    entry.region,
+  );
+  return deployments;
+}
+
+/**
+ * Deploiements relus pour trouver le build en service, le plus recent reussi.
+ * Au-dela, une app dont autant de builds ont echoue de suite n'a pas de build
+ * en service connu, et rien n'est refait sans le connaitre.
+ */
+const DEPLOYMENTS_READ = 20;
 
 /** Deploiement le plus recent d'une app, quel qu'en soit le statut, ou null. */
 export async function lastDeployment(entry: AppRef): Promise<Deployment | null> {
-  const { deployments } = await reqApi<{ deployments: Deployment[] }>(
-    `${apiHost(entry.region)}/v1/apps/${entry.app}/deployments?per_page=1`,
+  return (await recentDeployments(entry, 1))[0] ?? null;
+}
+
+/** Build en service : le deploiement reussi le plus recent de la liste, ou null. */
+export const inService = (deployments: Deployment[]): Deployment | null =>
+  deployments.find((d) => d.status === "success") ?? null;
+
+async function readVariable(entry: AppRef, name: string): Promise<string | null> {
+  const { variables } = await reqApi<{ variables: Array<{ name: string; value: string }> }>(
+    `${apiHost(entry.region)}/v1/apps/${entry.app}/variables`,
     entry.region,
   );
-  return deployments[0] ?? null;
+  return variables.find((v) => v.name === name)?.value ?? null;
+}
+
+/**
+ * Pourquoi ne pas refaire le build d'une app, ou null quand le build en service
+ * est exactement la cible : meme deploiement que le lock, meme commit, meme
+ * version, et une variable qui n'a pas bouge depuis.
+ *
+ * Le lock seul ne le prouve pas. Le releve y ecrit la variable lue, qu'un build
+ * l'ait servie ou non : une montee dont la variable est posee et dont le
+ * deploiement n'est jamais parti y passe pour faite, et un rebuild la
+ * construirait sans sauvegarde. Chaque refus dit quoi en faire : attendre le
+ * releve, rien, ou lever la quarantaine d'une montee par --force.
+ */
+export function rebuildRefusal(
+  current: LockEntry,
+  deployments: Deployment[],
+  variable: string | null,
+  target: Target,
+  env: string,
+  lift: boolean,
+): { outcome: "skipped-state" | "up-to-date" | "quarantined-skip"; detail: string } | null {
+  const served = inService(deployments);
+  if (!served) {
+    return { outcome: "skipped-state", detail: `aucun build reussi parmi les ${deployments.length} derniers deploiements` };
+  }
+  if (served.id !== current.build?.deployment) {
+    return { outcome: "skipped-state", detail: `build en service ${served.id} pas encore releve, rebuild apres le releve` };
+  }
+  const sha = deployedSha(served);
+  if (!sha) {
+    return {
+      outcome: "up-to-date",
+      detail: `deja conforme, build en service sans commit lisible (git_ref "${served.git_ref || "absent"}"), rebuild impossible`,
+    };
+  }
+  const version = current.build.version;
+  if (sha !== target.sha || version !== target.version) {
+    const what = `build en service ${version ?? "de version inconnue"} @ ${sha.slice(0, 7)}, cible ${target.version} @ ${target.sha.slice(0, 7)}`;
+    return lift
+      ? { outcome: "quarantined-skip", detail: `${what} : quarantaine d'une montee ratee, a lever par --force --app` }
+      : { outcome: "skipped-state", detail: `${what} : ce serait une montee sans sauvegarde` };
+  }
+  if (variable !== target.version) {
+    return {
+      outcome: "skipped-state",
+      detail: `${env} porte ${variable ?? "rien"}, pas la version du build en service : un rebuild la construirait sans sauvegarde`,
+    };
+  }
+  return null;
 }
 
 /** Commit deploye, quand le git_ref en est un sha complet. */
@@ -946,15 +1099,11 @@ async function adoptApp(
   entry: AppEntry,
   emit: (line: string) => void = log,
   fallbackSha: string = entry.source.sha,
+  known?: LockEntry,
 ): Promise<LockEntry> {
-  const base = `${apiHost(entry.region)}/v1/apps/${entry.app}`;
-  const { variables } = await reqApi<{ variables: Array<{ name: string; value: string }> }>(
-    `${base}/variables`,
-    entry.region,
-  );
-  const declared = variables.find((v) => v.name === entry.tool.env)?.value ?? null;
-
-  const last = await lastDeployment(entry);
+  const declared = await readVariable(entry, entry.tool.env);
+  const recent = await recentDeployments(entry, DEPLOYMENTS_READ);
+  const last = recent[0] ?? null;
   const deployed = deployedSha(last);
   const sha = deployed ?? fallbackSha;
   if (!deployed) {
@@ -963,13 +1112,74 @@ async function adoptApp(
     );
   }
 
+  // La variable dit la version du prochain build, pas celle du binaire en
+  // service. Sans deploiement depuis celui que le lock connait, aucun build ne
+  // l'a servie : une montee dont la variable est posee et dont le deploiement
+  // n'est jamais parti passait sinon pour faite, et l'app restait sur l'ancienne
+  // version sans que rien ne le dise.
+  const unbuilt = Boolean(known?.deployment && last?.id === known.deployment.id && known.tool.version !== declared);
+  const version = unbuilt ? known!.tool.version : declared;
+  if (unbuilt) {
+    const kept = known!.tool.version ?? "non epinglee";
+    emit(`    ${entry.tool.env} porte ${declared ?? "rien"}, qu'aucun build n'a servi depuis ${last!.id} : ${kept} gardee`);
+    unbuiltVariables.add(keyOf(entry));
+    warn(
+      keyOf(entry),
+      `${entry.tool.env} porte ${declared ?? "rien"} sans build depuis ${last!.id}, ${kept} en service : ` +
+        `un build fait hors de l'outil construirait ${declared ?? "sans version"} sans sauvegarde. ` +
+        `Remettre ${entry.tool.env} a ${kept}, ou laisser l'outil deployer la cible.`,
+    );
+  }
+
+  const output = last ? await readBuildOutput(entry, last.id) : null;
+  const served = inService(recent);
+  const servedOutput = !served ? null : served.id === last?.id ? output : await readBuildOutput(entry, served.id);
+  // La version d'un build n'est sure que si le moteur l'a consignee, ou si ce
+  // build est apparu depuis le lock et reste le dernier deploiement : la
+  // variable lue alors est celle qu'il a servie. Derriere un echec, elle porte
+  // la cible de l'echec. Et un build que le lock connaissait deja sans sa
+  // version a pu etre releve par un moteur qui recopiait la variable sans
+  // condition : une montee dont le deploiement n'etait jamais parti y passait
+  // pour faite, et un rebuild la construirait sans sauvegarde.
+  const servedVersion = !served
+    ? null
+    : known?.build?.deployment === served.id
+      ? (known.build.version ?? null)
+      : served.id === last?.id && known?.deployment?.id !== served.id
+        ? version
+        : null;
   return {
     source: { repo: entry.source.repo, sha },
-    tool: { env: entry.tool.env, version: declared },
-    buildpacks: last ? await readBuildpacks(entry, last.id) : [],
+    tool: { env: entry.tool.env, version },
+    buildpacks: output === null ? [] : readBuildpackLines(output),
     deployment: last ? { id: last.id, status: last.status, at: last.created_at } : null,
+    ...(served ? { build: buildOf(served.id, servedVersion, served.stack_base_image, servedOutput) } : {}),
     backup: null,
     quarantine: null,
+  };
+}
+
+/**
+ * Entree de lock issue d'un releve, completee de ce que le releve ne voit pas
+ * ou n'a pas pu voir : la sauvegarde, qui ne se lit pas sur l'app, et ce que le
+ * lock savait du journal quand celui-ci est illisible.
+ *
+ * Un releve de buildpacks vide vaut journal illisible, comme apres un
+ * deploiement : l'ecrire tel quel effacait ce que le lock savait, et le
+ * passage suivant le reecrivait.
+ */
+function afterSurvey(real: LockEntry, known: LockEntry | undefined, quarantine: LockEntry["quarantine"]): LockEntry {
+  const build = keptBuild(real.build, known?.build);
+  // Construite cle par cle : le lock se compare en texte d'un passage a
+  // l'autre, et un ordre de cles qui bouge ferait un commit sans changement.
+  return {
+    source: real.source,
+    tool: real.tool,
+    buildpacks: real.buildpacks.length > 0 ? real.buildpacks : (known?.buildpacks ?? []),
+    deployment: real.deployment,
+    ...(build ? { build } : {}),
+    backup: known?.backup ?? null,
+    quarantine,
   };
 }
 
@@ -1160,6 +1370,34 @@ export const targetReached = (
   real.tool.version === target.version &&
   real.deployment?.status === "success";
 
+/** Motif de la quarantaine d'un rebuild parti dont le verdict s'est perdu. */
+export const LOST_VERDICT = "rebuild sans verdict";
+
+/**
+ * Quarantaine d'un verdict perdu, une fois le deploiement conclu en succes par
+ * Scalingo : levee si la fenetre de garde, relue apres coup, n'a rien vu,
+ * confirmee sinon. Un statut `success` ne dit pas que l'outil tient : sans cette
+ * relecture, un JDK qui fait boucler l'app au demarrage levait la suspension.
+ */
+async function lostVerdictSettled(
+  entry: AppEntry,
+  manifest: Manifest,
+  quarantine: NonNullable<LockEntry["quarantine"]>,
+): Promise<LockEntry["quarantine"]> {
+  try {
+    const dep = await readDeployment(entry, quarantine.deploymentId!);
+    const window = settleOf(entry, manifest.defaults).window;
+    const verdict = await settleVerdict(entry, window, { created_at: dep.created_at, finished_at: dep.finished_at ?? dep.created_at });
+    if ("waiting" in verdict) return quarantine;
+    if (verdict.failure) return { ...quarantine, reason: `${verdict.failure}, constate au releve` };
+    log(`  ${keyOf(entry)} : ${quarantine.deploymentId} conclu en succes, fenetre de garde relue sans incident, quarantaine levee`);
+    return null;
+  } catch (e) {
+    log(`  ${keyOf(entry)} : verdict de ${quarantine.deploymentId} toujours illisible (${(e as Error).message.slice(0, 160)}), quarantaine maintenue`);
+    return quarantine;
+  }
+}
+
 /**
  * Quarantaine qui survit a un releve. Elle tombe quand la cible est atteinte,
  * sauf par le deploiement meme qu'elle a juge : Scalingo le dit `success`
@@ -1172,6 +1410,12 @@ export function keptQuarantine(
   quarantine: LockEntry["quarantine"],
 ): LockEntry["quarantine"] {
   if (!quarantine) return null;
+  // Le verdict perdu d'un rebuild se lit au releve, sur le deploiement meme.
+  if (quarantine.reason === LOST_VERDICT && real.deployment?.id === quarantine.deploymentId) {
+    if (real.deployment.status === "success") return null;
+    if (TERMINAL.test(real.deployment.status)) return { ...quarantine, reason: `${real.deployment.status}, constate au releve` };
+    return quarantine;
+  }
   return targetReached(real, target) && real.deployment?.id !== quarantine.deploymentId ? null : quarantine;
 }
 
@@ -1238,6 +1482,10 @@ type Outcome =
   | "up-to-date"
   | "quarantined-skip"
   | "deployed"
+  // Un build refait a l'identique ne dit rien d'une cible nouvelle : il ne
+  // tient pas lieu d'eclaireur, sinon les montees partiraient de front derriere
+  // lui sans qu'aucune app ait valide leur version.
+  | "rebuilt"
   | "failed"
   | "error"
   | "planned"
@@ -1291,17 +1539,28 @@ async function readAppStatus(
  * C'est exactement le genre d'echeance qu'on ne voit pas venir sans la
  * surveiller, d'ou sa place ici plutot que dans une note quelque part.
  */
-const stackCache = new Map<string, Map<string, { name: string; deprecatedAt: string | null }>>();
+type Stack = {
+  name: string;
+  deprecatedAt: string | null;
+  /** Image courante de la pile, `scalingo/scalingo-22:v21`, qu'un build prendrait. */
+  baseImage: string | null;
+};
 
-async function readStacks(region: string): Promise<Map<string, { name: string; deprecatedAt: string | null }>> {
+const stackCache = new Map<string, Map<string, Stack>>();
+
+// Pile de chaque app, relevee avec son etat : un rebuild la reprend, et c'est
+// elle qui dit quel inventaire et quelle image il prendrait.
+const appStacks = new Map<string, string>();
+
+async function readStacks(region: string): Promise<Map<string, Stack>> {
   const cached = stackCache.get(region);
   if (cached) return cached;
-  const out = new Map<string, { name: string; deprecatedAt: string | null }>();
+  const out = new Map<string, Stack>();
   try {
     const { stacks } = await reqApi<{
-      stacks: Array<{ id: string; name: string; deprecated_at: string | null }>;
+      stacks: Array<{ id: string; name: string; deprecated_at: string | null; base_image?: string }>;
     }>(`${apiHost(region)}/v1/features/stacks`, region);
-    for (const s of stacks) out.set(s.id, { name: s.name, deprecatedAt: s.deprecated_at });
+    for (const s of stacks) out.set(s.id, { name: s.name, deprecatedAt: s.deprecated_at, baseImage: s.base_image ?? null });
   } catch (e) {
     // Une echeance qu'on n'a pas pu lire ne doit pas empecher de deployer, mais
     // elle ne doit pas non plus passer pour une absence d'echeance : sans ce
@@ -1333,11 +1592,14 @@ async function observePaused(
     return "paused";
   }
   const state = await readAppStatus(entry);
-  if (!("unreadable" in state) && state.stack) await warnDeprecatedStack(entry, state.stack);
+  if (!("unreadable" in state) && state.stack) {
+    appStacks.set(key, state.stack);
+    await warnDeprecatedStack(entry, state.stack);
+  }
 
   let real: LockEntry;
   try {
-    real = await adoptApp(entry, emit, current?.source.sha || entry.source.sha);
+    real = await adoptApp(entry, emit, current?.source.sha || entry.source.sha, current);
   } catch (e) {
     emit(`  ${key} : en pause, releve impossible, lock laisse en l'etat`);
     emit(`    ${(e as Error).message.slice(0, 240)}`);
@@ -1363,7 +1625,7 @@ async function observePaused(
   // Sans cette ligne, une quarantaine maintenue sur une app dont le pin
   // correspond ne s'expliquait nulle part.
   if (samePin && quarantine) emit(`    quarantaine maintenue, aucun deploiement reussi sur cette cible`);
-  lock.apps[key] = { ...real, backup: current?.backup ?? null, quarantine };
+  lock.apps[key] = afterSurvey(real, current, quarantine);
   return "paused";
 }
 
@@ -1377,6 +1639,93 @@ async function warnDeprecatedStack(entry: AppEntry, stackId: string): Promise<vo
       ? `tourne sur le stack ${stack.name}, deprecie dans ${days} jour(s), le ${stack.deprecatedAt.slice(0, 10)}`
       : `tourne sur le stack ${stack.name}, deprecie depuis le ${stack.deprecatedAt.slice(0, 10)}`,
   );
+}
+
+/**
+ * Age au-dela duquel la reconciliation refait a l'identique le build d'une app
+ * conforme.
+ *
+ * Ce que le build installe sans que le manifeste le dise, le JDK, l'image de la
+ * pile, un binaire dont le buildpack fixe la version, n'avance qu'a un nouveau
+ * build : un redemarrage relance la meme image. Les correctifs de l'outil
+ * rebuildent d'ordinaire le parc tous les un a trois jours, et cette regle ne
+ * fait que borner la queue, une ligne qui ne recoit plus de correctif.
+ *
+ * Aucune source externe : la regle ne depend que de la date du dernier build,
+ * et couvre ce qu'on saurait prevoir comme ce qu'on ne saurait pas.
+ */
+export const REBUILD_AFTER_DAYS = 7;
+
+/**
+ * Heures UTC ou la reconciliation refait un build par age, de 0 h inclus a 5 h
+ * exclus : la nuit en France, sur la plage ou la fusion automatique des
+ * correctifs place deja les deploiements. Sans plage, le rebuild partirait au
+ * premier passage apres sept jours, et les passages reels s'espacant de trois a
+ * six heures et demie, son heure glisserait d'une semaine a l'autre vers la
+ * journee. Le moteur ne connait pas le fuseau du parc : la plage est fixe.
+ */
+export const REBUILD_HOURS_UTC = { from: 0, to: 5 } as const;
+
+export const inRebuildWindow = (now: number): boolean => {
+  const hour = new Date(now).getUTCHours();
+  return hour >= REBUILD_HOURS_UTC.from && hour < REBUILD_HOURS_UTC.to;
+};
+
+/** Age en jours entiers d'un build qui a depasse le seuil, ou null. */
+export function staleBuildDays(at: string | null | undefined, now: number): number | null {
+  if (!at) return null;
+  const t = Date.parse(at);
+  if (Number.isNaN(t)) return null;
+  const days = Math.floor((now - t) / 86_400_000);
+  return days >= REBUILD_AFTER_DAYS ? days : null;
+}
+
+/**
+ * App dont la quarantaine suspend les rebuilds par age, ou null.
+ *
+ * Tant qu'un rebuild a echoue quelque part, aucun build n'est refait par age :
+ * une quarantaine n'arrete pas la vague, et chaque app vieillie casserait sinon
+ * sur la meme cause, un JDK ou une tete de buildpack defectueux, que rien ne
+ * declare au manifeste. Lue dans le lock et non gardee en memoire : l'echec
+ * constate par une reprise doit arreter le passage ordinaire suivant, dans un
+ * autre processus. Une app en pause ou sortie du manifeste ne suspend rien.
+ */
+export function rebuildSuspendedBy(lock: Lock, apps: readonly AppEntry[]): string | null {
+  for (const entry of apps) {
+    if (entry.paused) continue;
+    const key = keyOf(entry);
+    if (lock.apps[key]?.quarantine?.rebuild) return key;
+  }
+  return null;
+}
+
+/**
+ * Pourquoi refaire a l'identique le build d'une app conforme (`due`), pourquoi
+ * pas encore alors qu'il a l'age (`later`), ou null.
+ *
+ * --rebuild passe outre l'age, la plage et la suspension. Un plan `due` ne
+ * suffit pas a lancer : le lancement confirme encore sur Scalingo que le build
+ * en service est celui que le lock decrit.
+ */
+export function rebuildPlan(
+  current: LockEntry,
+  suspendedBy: string | null,
+  now: number,
+  mode: { rebuild: boolean; reconcile: boolean },
+): { due: string } | { later: string } | null {
+  if (mode.rebuild) return { due: "demande par --rebuild" };
+  if (!mode.reconcile) return null;
+  const at = current.deployment?.at;
+  const days = staleBuildDays(at, now);
+  if (days === null) return null;
+  const age = `build du ${at!.slice(0, 10)}, vieux de ${days} jours`;
+  if (!current.build) return { later: `${age}, build en service pas encore releve` };
+  if (current.build.version === null) return { later: `${age}, version du build en service non attestee` };
+  if (suspendedBy) return { later: `${age}, rebuilds par age suspendus` };
+  if (!inRebuildWindow(now)) {
+    return { later: `${age}, refait entre ${REBUILD_HOURS_UTC.from} h et ${REBUILD_HOURS_UTC.to} h UTC` };
+  }
+  return { due: age };
 }
 
 async function launchApp(
@@ -1415,7 +1764,10 @@ async function launchApp(
       note(key, `etat illisible : ${state.unreadable.slice(0, 240)}`);
       return "rejected";
     }
-    if (state.stack) await warnDeprecatedStack(entry, state.stack);
+    if (state.stack) {
+      appStacks.set(key, state.stack);
+      await warnDeprecatedStack(entry, state.stack);
+    }
 
     if (NOT_DEPLOYABLE.has(state.status)) {
       emit(`  ${key} : etat "${state.status}", non deployable, laissee en l'etat`);
@@ -1426,21 +1778,38 @@ async function launchApp(
   // Une entree sans deploiement reussi ne vaut pas conformite : elle peut avoir
   // ete creee par un echec, auquel cas elle ne decrit aucun etat reellement atteint.
   const everDeployed = current?.deployment?.status === "success";
-  if (
-    !OPT.force &&
-    current &&
-    everDeployed &&
-    current.source.sha === target.sha &&
-    current.tool.version === target.version &&
-    !current.quarantine
-  ) {
-    emit(`  ${key} : deja conforme`);
-    return "up-to-date";
+  const onTarget = Boolean(current && current.source.sha === target.sha && current.tool.version === target.version);
+  let rebuild: string | null = null;
+
+  // Un rebuild rate se leve par --rebuild, par la meme branche sans
+  // sauvegarde : --force, la sortie ordinaire d'une quarantaine, sauvegarderait
+  // et remplacerait le point de restauration d'avant la derniere montee. La
+  // confirmation du lancement refuse la levee quand la quarantaine porte sur une
+  // montee ratee, dont la cible n'est pas le build en service.
+  const lift = OPT.rebuild && Boolean(current?.quarantine?.rebuild && sameTarget(current.quarantine.target, target));
+  if (lift) rebuild = "demande par --rebuild, sortie de quarantaine";
+  else if (!OPT.force && current && everDeployed && onTarget && !current.quarantine) {
+    const plan = rebuildPlan(current, rebuildSuspendedBy(lock, manifest.apps), Date.now(), {
+      rebuild: OPT.rebuild,
+      reconcile: OPT.reconcile,
+    });
+    if (!plan || "later" in plan) {
+      emit(`  ${key} : deja conforme${plan ? `, ${plan.later}` : ""}`);
+      if (plan && current.build?.version === null) {
+        warn(
+          key,
+          `build de plus de ${REBUILD_AFTER_DAYS} jours dont la version n'est pas attestee : aucun rebuild par age. ` +
+            `Le prochain deploiement par l'outil l'atteste, ou --force --app, avec sauvegarde.`,
+        );
+      }
+      return "up-to-date";
+    }
+    rebuild = plan.due;
   }
 
   // La quarantaine memorise la cible qui a echoue. Elle se libere d'elle-meme
   // des que le manifest pointe ailleurs, sans intervention.
-  if (!OPT.force && current?.quarantine && sameTarget(current.quarantine.target, target)) {
+  if (!OPT.force && !lift && current?.quarantine && sameTarget(current.quarantine.target, target)) {
     emit(`  ${key} : en quarantaine sur cette cible depuis ${current.quarantine.at.slice(0, 10)} (${current.quarantine.reason}), ignoree`);
     return "quarantined-skip";
   }
@@ -1454,7 +1823,9 @@ async function launchApp(
   }
 
   const changes: string[] = [];
-  if (OPT.force && everDeployed && current!.source.sha === target.sha && current!.tool.version === target.version) {
+  if (rebuild) {
+    changes.push(`rebuild a l'identique, ${rebuild}, ${target.version} @ ${target.sha.slice(0, 7)}`);
+  } else if (OPT.force && everDeployed && current!.source.sha === target.sha && current!.tool.version === target.version) {
     changes.push(`redeploiement force a l'identique, ${target.version} @ ${target.sha.slice(0, 7)}`);
   } else if (!everDeployed) {
     changes.push(`premiere prise en charge, cible ${target.version} @ ${target.sha.slice(0, 7)}`);
@@ -1550,14 +1921,20 @@ async function launchApp(
   // dit reellement en service : apres un echec, la variable porte la nouvelle
   // valeur sans que le binaire ait change, et refuser le retour en arriere
   // serait precisement refuser la seule reaction sensee.
-  if (!OPT.force && everDeployed && targetGoesBack(current!.tool.version, target.version)) {
-    // "la variable porte" et non "l'app tourne" : c'est tout ce qu'on sait. La
-    // variable dit la version du prochain build, et personne n'expose celle du
-    // binaire en service. Une variable changee a la main sans deploiement fait
-    // donc refuser une cible que l'app servait deja, et c'est assume : les deux
-    // cas se resolvent du meme geste, regarder pourquoi le reel et le manifeste
-    // ne disent pas la meme chose.
-    const was = `${entry.tool.env} porte ${current!.tool.version}`;
+  // La version servie est celle du build en service quand le lock la connait :
+  // apres un echec, montee ou rebuild, la variable porte la cible ratee et le
+  // dernier deploiement n'est plus un succes, mais l'ancien binaire tourne
+  // toujours sur sa base.
+  const running = current?.build?.version ?? (everDeployed ? current!.tool.version : null);
+  const runningSaid =
+    current?.build?.version && current.build.version !== current.tool.version
+      ? `le build en service est en ${running}`
+      : `${entry.tool.env} porte ${running}`;
+  if (!OPT.force && running !== null && targetGoesBack(running, target.version)) {
+    // Sans build consigne, "la variable porte" et non "l'app tourne" : c'est
+    // tout ce qu'on sait. La variable dit la version du prochain build, et
+    // personne n'expose celle du binaire en service.
+    const was = runningSaid;
     emit(`    DESCENTE DE VERSION : ${was}, le manifeste demande ${target.version}`);
     emit(`    aligne le manifeste sur ce qui tourne, ou restaure la base avant de forcer la descente`);
     note(
@@ -1571,8 +1948,8 @@ async function launchApp(
   // Le controle precedent se tait face a une version qui ne se compare pas.
   // Le 2026-11-04, une variable a `latest` a laisse passer v0.64.4.3 sur une base
   // que `latest`, alors v0.65.2, avait deja migree, et l'app n'a plus demarre.
-  if (!OPT.force && everDeployed && runningVersionUnknown(current!.tool.version, target.version)) {
-    const was = `${entry.tool.env} porte ${current!.tool.version}`;
+  if (!OPT.force && running !== null && runningVersionUnknown(running, target.version)) {
+    const was = runningSaid;
     emit(`    VERSION EN SERVICE INCONNUE : ${was}, qui ne designe aucune version, le manifeste demande ${target.version}`);
     emit(`    releve la version qui tourne dans le journal de demarrage de l'outil avant de forcer`);
     note(
@@ -1597,7 +1974,8 @@ async function launchApp(
     // Un passage parti d'un lock perime ne sait pas qu'il a deja lance ce
     // deploiement. Scalingo, lui, le sait : un second lance par-dessus partirait
     // en file derriere le premier, sauvegarde comprise.
-    const last = await lastDeployment(entry);
+    const recent = await recentDeployments(entry, rebuild ? DEPLOYMENTS_READ : 1);
+    const last = recent[0] ?? null;
     if (last && !TERMINAL.test(last.status)) {
       emit(`    deploiement ${last.id} deja en cours sur Scalingo (${last.status}), rien n'est lance`);
       return "skipped-state";
@@ -1605,6 +1983,27 @@ async function launchApp(
 
     const rollout = lock.rollout?.id ?? "";
     const since = new Date().toISOString();
+
+    // Un rebuild a l'identique ne migre rien : meme version de l'outil, meme
+    // commit. Sauvegarder ne protegerait de rien, et remplacerait dans le lock
+    // le point de restauration d'avant la derniere montee, celui dont on a
+    // besoin quand une migration a mal tourne. Encore faut-il que ce soit bien
+    // le build en service qu'on refait, ce que le lock seul ne prouve pas.
+    if (rebuild) {
+      const refused = rebuildRefusal(current!, recent, await readVariable(entry, entry.tool.env), target, entry.tool.env, lift);
+      if (refused) {
+        emit(`    ${refused.detail}, rien n'est lance`);
+        if (refused.outcome === "quarantined-skip") note(key, refused.detail);
+        return refused.outcome;
+      }
+      emit(`    rebuild a l'identique, sans sauvegarde, la derniere reste le point de restauration`);
+      lock.apps[key] = {
+        ...current!,
+        inflight: { target, step: "deploy", since, rollout, async: OPT.async, backups: [], deployment: null, rebuild: true },
+      };
+      await deployNow(entry, lock, emit);
+      return "started";
+    }
     if (backupMode === "required") {
       emit(`    sauvegarde de la base...`);
       const backups = await startBackups(entry, emit);
@@ -1640,8 +2039,10 @@ const blankEntry = (entry: AppEntry): LockEntry => ({
 async function deployNow(entry: AppEntry, lock: Lock, emit: (line: string) => void): Promise<void> {
   const key = keyOf(entry);
   const flight = lock.apps[key].inflight!;
-  const varState = await setVariable(entry, entry.tool.env, flight.target.version);
-  if (varState !== "unchanged") emit(`    ${entry.tool.env} ${varState === "created" ? "creee" : "mise a jour"}`);
+  if (!flight.rebuild) {
+    const varState = await setVariable(entry, entry.tool.env, flight.target.version);
+    if (varState !== "unchanged") emit(`    ${entry.tool.env} ${varState === "created" ? "creee" : "mise a jour"}`);
+  }
   emit(`    deploiement...`);
   const deployment = await startDeploy(entry, flight.target);
   flight.step = "deploy";
@@ -1658,8 +2059,8 @@ function dropFlight(lock: Lock, key: string): void {
 }
 
 /** Ce qu'une app en vol attend, pour le journal et le tableau de bord. */
-export function flightLabel(flight: Pick<Inflight, "step" | "since" | "target">, now = Date.now()): string {
-  const what = flight.step === "backup" ? "sauvegarde" : "deploiement";
+export function flightLabel(flight: Pick<Inflight, "step" | "since" | "target" | "rebuild">, now = Date.now()): string {
+  const what = flight.step === "backup" ? "sauvegarde" : flight.rebuild ? "rebuild a l'identique" : "deploiement";
   return `${what} en cours depuis ${elapsedSince(flight.since, now)}, cible ${flight.target.version} @ ${flight.target.sha.slice(0, 7)}`;
 }
 
@@ -1755,18 +2156,35 @@ async function advanceApp(
     // d'ailleurs, d'un BUILDPACK_URL change sur Scalingo a une ligne que le
     // parseur n'a pas su lire. L'instance a deja tourne un moment sans ce que
     // le buildpack apportait : c'est le prix d'un controle qui mesure.
-    const buildpacks = failure ? [] : await readBuildpacks(entry, dep.id);
+    const output = failure ? null : await readBuildOutput(entry, dep.id);
+    const buildpacks = output === null ? [] : readBuildpackLines(output);
     failure ??= buildpacksLost(current.buildpacks, buildpacks);
+    // Un echec qui suit un rebuild rate garde la suspension : seul un
+    // deploiement reussi de l'app dit que la cause commune est levee.
+    const suspends = Boolean(flight.rebuild || current.quarantine?.rebuild);
 
     if (failure) {
       dropFlight(lock, key);
       lock.apps[key] = {
         ...(lock.apps[key] ?? blankEntry(entry)),
         backup: current.backup,
-        quarantine: { target: flight.target, reason: failure, at: new Date().toISOString(), deploymentId: dep.id },
+        quarantine: {
+          target: flight.target,
+          reason: failure,
+          at: new Date().toISOString(),
+          deploymentId: dep.id,
+          ...(suspends ? { rebuild: true as const } : {}),
+        },
       };
       emit(`    ECHEC (${failure}), mise en quarantaine`);
-      note(key, `deploiement en echec (${failure}), mise en quarantaine.`);
+      note(
+        key,
+        suspends
+          ? `${flight.rebuild ? "rebuild a l'identique" : "deploiement"} en echec (${failure}), mise en quarantaine. Les rebuilds par age ` +
+              `sont suspendus sur tout le parc tant qu'un deploiement de cette app n'a pas reussi : --rebuild --app ` +
+              `une fois la cause levee, ou une montee de version.`
+          : `deploiement en echec (${failure}), mise en quarantaine.`,
+      );
       return "failed";
     }
 
@@ -1789,11 +2207,12 @@ async function advanceApp(
       tool: { env: entry.tool.env, version: flight.target.version },
       buildpacks: known,
       deployment: { id: dep.id, status: dep.status, at: dep.created_at },
+      build: buildOf(dep.id, flight.target.version, dep.stack_base_image, output),
       backup: current.backup,
       quarantine: null,
     };
     emit(`    succes`);
-    return "deployed";
+    return flight.rebuild ? "rebuilt" : "deployed";
   } catch (e) {
     const err = e as Error & { giveUp?: boolean; outOfScope?: boolean };
     const patient = settleDeadline !== null ? Date.now() <= settleDeadline : age <= bound;
@@ -1804,8 +2223,30 @@ async function advanceApp(
     // Volontairement sans quarantaine ni ecriture de version : on ne sait pas ou
     // l'operation s'est arretee, donc le lock reste sur ce qu'il savait.
     dropFlight(lock, key);
+    // Sauf pour un rebuild parti : son build peut echouer sans que personne le
+    // voie, et le releve suivant prendrait l'app pour jamais deployee, donc a
+    // sauvegarder, remplacant le point de restauration d'avant la derniere
+    // montee. La quarantaine attend le verdict de Scalingo sur ce deploiement,
+    // et suspend les rebuilds par age d'ici la.
+    if (flight.rebuild && flight.deployment) {
+      lock.apps[key] = {
+        ...lock.apps[key],
+        quarantine: {
+          target: flight.target,
+          reason: LOST_VERDICT,
+          at: new Date().toISOString(),
+          deploymentId: flight.deployment.id,
+          rebuild: true,
+        },
+      };
+    }
     emit(`    INTERROMPU : ${err.message}`);
-    note(key, `interrompu : ${err.message.slice(0, 240)}`);
+    note(
+      key,
+      flight.rebuild && flight.deployment
+        ? `rebuild interrompu : ${err.message.slice(0, 240)}. Quarantaine jusqu'au verdict de Scalingo sur ${flight.deployment.id}, rebuilds par age suspendus d'ici la.`
+        : `interrompu : ${err.message.slice(0, 240)}`,
+    );
     return "error";
   }
 }
@@ -1851,6 +2292,10 @@ export function scoutAfter(state: ScoutState, key: string, outcome: Outcome): Sc
     }
     case "started":
       return { ...state, scout: key };
+    // Un rebuild reussi prouve que Scalingo repond, pas que la cible d'une
+    // montee tient : il ne l'a pas essayee. L'app suivante prend le role.
+    case "rebuilt":
+      return { ...state, scout: null, interruptedScouts: 0 };
     // Une lecture qui passe ne dit pas qu'une ecriture passerait.
     case "paused":
       return state;
@@ -1866,12 +2311,35 @@ export function scoutAfter(state: ScoutState, key: string, outcome: Outcome): Sc
  * poursuivent le meme deploiement ; un manifeste qui a change en ouvre un autre,
  * avec son propre eclaireur, comme un nouveau passage le faisait.
  */
-export function rolloutFingerprint(apps: readonly AppEntry[], filter: string | null, force: boolean): string {
+export function rolloutFingerprint(
+  apps: readonly AppEntry[],
+  filter: string | null,
+  force: boolean,
+  rebuild = false,
+): string {
   const scope = apps
     .filter((e) => !e.paused && (!filter || e.app.includes(filter)))
     .map((e) => [keyOf(e), e.source.sha, e.tool.version]);
-  return createHash("sha256").update(JSON.stringify([filter, force, scope])).digest("hex").slice(0, 16);
+  // `rebuild` n'entre que s'il est vrai : l'empreinte d'un deploiement ouvert
+  // sans lui ne change pas, et une reprise ne le croit pas derive.
+  const asked = rebuild ? [filter, force, scope, true] : [filter, force, scope];
+  return createHash("sha256").update(JSON.stringify(asked)).digest("hex").slice(0, 16);
 }
+
+/**
+ * Vrai quand le lock dit l'app deja a sa cible, sans quarantaine ni forcage :
+ * le passage ne peut que la laisser en l'etat ou refaire son build.
+ */
+const atRestOnTarget = (entry: AppEntry, lock: Lock): boolean => {
+  const current = lock.apps[keyOf(entry)];
+  return (
+    !OPT.force &&
+    current?.deployment?.status === "success" &&
+    !current.quarantine &&
+    current.source.sha === entry.source.sha &&
+    current.tool.version === entry.tool.version
+  );
+};
 
 const rolloutScope = (manifest: Manifest, rollout: Rollout) =>
   manifest.apps.filter((e) => !rollout.filter || e.app.includes(rollout.filter));
@@ -1925,12 +2393,16 @@ async function runPass(
     const rollout = lock.rollout;
     if (rollout && flight.rollout === rollout.id) {
       if (!rollout.settled.includes(key)) rollout.settled.push(key);
+      if (outcome === "rebuilt" && !rollout.rebuildPassed) {
+        rollout.rebuildPassed = true;
+        log(`\nRebuild reussi, chaine de build saine : les rebuilds suivants avancent ${DEPLOY_CONCURRENCY} de front.`);
+      }
       if (rollout.scout === key) settleScout(rollout, key, outcome);
     }
   }
 
   if (!resume) {
-    const fingerprint = rolloutFingerprint(manifest.apps, OPT.appFilter, OPT.force);
+    const fingerprint = rolloutFingerprint(manifest.apps, OPT.appFilter, OPT.force, OPT.rebuild);
     const open = lock.rollout;
     const ownFlights = open ? inFlight(lock).some(([, v]) => v.inflight!.rollout === open.id) : false;
     if (!open || open.fingerprint !== fingerprint || (open.stopped && !ownFlights)) {
@@ -1942,6 +2414,7 @@ async function runPass(
         fingerprint,
         filter: OPT.appFilter,
         force: OPT.force,
+        ...(OPT.rebuild ? { rebuild: true as const } : {}),
         scout: null,
         scoutPassed: false,
         interruptedScouts: 0,
@@ -1956,12 +2429,13 @@ async function runPass(
   // qui a change depuis demande un nouvel eclaireur, que seul un passage
   // ordinaire designe : la reprise ne lance alors plus rien.
   const drifted = rollout !== null && rollout !== undefined && resume &&
-    rolloutFingerprint(manifest.apps, rollout.filter, rollout.force) !== rollout.fingerprint;
+    rolloutFingerprint(manifest.apps, rollout.filter, rollout.force, rollout.rebuild ?? false) !== rollout.fingerprint;
   if (drifted) log(`\nLe manifeste a change depuis l'ouverture du deploiement : la suite attend le prochain passage ordinaire.`);
   if (rollout && !rollout.stopped && !drifted) {
     // Le forcage vaut pour le deploiement qui l'a demande, et pour lui seul :
     // une reprise relancee par un ping ne porte aucune option.
     OPT.force = rollout.force;
+    OPT.rebuild = rollout.rebuild ?? false;
     let header = false;
     for (const entry of rolloutScope(manifest, rollout)) {
       const key = keyOf(entry);
@@ -1970,8 +2444,22 @@ async function runPass(
       // L'eclaireur passe seul, y compris face aux operations d'un deploiement
       // precedent encore en vol : sinon deux apps porteraient une cible sans
       // verdict, et le plafond de trois de front sauterait.
+      //
+      // Apres un rebuild reussi, les rebuilds se menent de front entre eux : la
+      // chaine de build est saine, et un par un la premiere nuit ou tout le parc
+      // a l'age, un job enchaine tiendrait le verrou des heures. Une montee
+      // attend toujours son eclaireur, seule.
+      let alongside = false;
       if (!rollout.scoutPassed) {
-        if (inFlight(lock).length > 0) break;
+        const flights = inFlight(lock);
+        if (flights.length > 0) {
+          alongside =
+            Boolean(rollout.rebuildPassed) &&
+            flights.length < DEPLOY_CONCURRENCY &&
+            flights.every(([, v]) => v.inflight!.rebuild) &&
+            atRestOnTarget(entry, lock);
+          if (!alongside) break;
+        }
       } else if (inFlight(lock).length >= DEPLOY_CONCURRENCY) break;
 
       if (!header) {
@@ -1984,7 +2472,7 @@ async function runPass(
       log(lines.join("\n"));
       tally[outcome]++;
       if (outcome !== "started") rollout.settled.push(key);
-      if (!rollout.scoutPassed) settleScout(rollout, key, outcome);
+      if (!rollout.scoutPassed && !alongside) settleScout(rollout, key, outcome);
     }
   }
 
@@ -2342,6 +2830,39 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
   }
   lines.push("");
 
+  const suspendedBy = rebuildSuspendedBy(lock, targets);
+  lines.push("## Runtimes", "");
+  lines.push("| App | Composant | En service | Un rebuild installerait | Dernier build | État |");
+  lines.push("| --- | --- | --- | --- | --- | --- |");
+  for (const entry of targets) {
+    const key = keyOf(entry);
+    const known = lock.apps[key];
+    const rows = observedRuntimes.get(key);
+    if (!known?.build || !rows) {
+      lines.push(`| [${entry.app}](${appUrl(entry)}) | inconnus | | | | pas de build réussi relevé |`);
+      continue;
+    }
+    // Le dernier deploiement peut etre un echec posterieur au build en service :
+    // sa date n'est alors pas celle de ce build.
+    const at = known.deployment?.at.slice(0, 10) ?? "";
+    const built = known.deployment?.id === known.build.deployment ? at : `avant le ${at}`;
+    for (const r of rows) {
+      const shown = (v: string | null, image: boolean) => (v ? `\`${inCell(image ? shortImage(v) : v)}\`` : "");
+      const image = r.component === "pile";
+      const next = r.state === "sans verdict" ? inCell(r.next ?? "") : r.state === "relevé" ? "non prévu" : shown(r.next, image);
+      lines.push(
+        `| [${entry.app}](${appUrl(entry)}) | ${inCell(r.component)} | ${shown(r.installed, image) || "non relevée"} ` +
+          `| ${next} | ${built} | ${entry.paused ? "en pause, " : ""}${r.state} |`,
+      );
+    }
+  }
+  lines.push("");
+  lines.push(
+    `Un build de plus de ${REBUILD_AFTER_DAYS} jours est refait à l'identique par la réconciliation.` +
+      (suspendedBy ? ` Suspendu : le dernier a échoué sur ${suspendedBy}.` : ""),
+    "",
+  );
+
   // Hors du marqueur : un deploiement qui avance n'est pas un changement d'etat,
   // et le tableau le dit sans faire sonner l'equipe a chaque etape.
   const flying = Object.entries(lock.apps).filter(([, v]) => v.inflight);
@@ -2402,11 +2923,19 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
       const q = entry!.quarantine!;
       lines.push(
         `- **${key}** depuis le ${q.at.slice(0, 10)}, cible ` +
-          `${q.target.version ?? "non epinglee"} @ ${q.target.sha.slice(0, 7)}`,
+          `${q.target.version ?? "non epinglee"} @ ${q.target.sha.slice(0, 7)}` +
+          `${q.rebuild ? ", rebuilds par âge suspendus" : ""}`,
         `  > ${q.reason.split("\n")[0].slice(0, 300)}`,
       );
     }
-    lines.push("", "Corriger le manifeste, ou relancer avec `--force` une fois la cause levee.", "");
+    lines.push("", "Corriger le manifeste, ou relancer avec `--force` une fois la cause levee.");
+    if (quarantined.some(([, v]) => v!.quarantine!.rebuild)) {
+      lines.push(
+        "Une quarantaine qui suspend les rebuilds se lève par `--rebuild --app`, sans sauvegarde, quand sa cible est le build en service. " +
+          "`--force` sauvegarderait et remplacerait le point de restauration d'avant la dernière montée.",
+      );
+    }
+    lines.push("");
   }
 
   if (warnings.length > 0) {
@@ -3255,6 +3784,215 @@ async function checkLifecycle(targets: AppEntry[], lock: Lock): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------- runtimes
+
+/** Un runtime, ou l'image de la pile, tel que le passage le juge. */
+type RuntimeRow = {
+  component: string;
+  installed: string | null;
+  /** Ce qu'un rebuild installerait, ou la raison de ne pas le savoir. */
+  next: string | null;
+  state: "à jour" | "rebuild utile" | "sans verdict" | "relevé";
+};
+
+const observedRuntimes = new Map<string, RuntimeRow[]>();
+
+/**
+ * Au-dela, Scalingo n'a pas repris une version qu'Heroku publie depuis une
+ * semaine. Le retard ordinaire va de quelques heures a deux semaines, et le
+ * seuil en leve une partie, au prix d'une echeance de plus, pour attraper le cas
+ * de 2025 : la ligne 17 a saute toute une mise a jour de securite pendant 108
+ * jours.
+ */
+export const SCALINGO_LAG_DAYS = 7;
+
+const textCache = new Map<string, Promise<Fetched>>();
+
+/**
+ * Texte brut d'une adresse, ou null quand elle n'a pas repondu. Memorise par
+ * adresse, echec compris : les apps d'un parc partagent le meme inventaire et
+ * souvent le meme commit, et relire la meme panne ne dirait rien de plus.
+ */
+function fetchText(url: string): Promise<Fetched> {
+  let pending = textCache.get(url);
+  if (!pending) {
+    pending = fetch(url)
+      .then(async (res) => ({ status: res.status, body: res.ok ? await res.text() : "" }))
+      .catch(() => null);
+    textCache.set(url, pending);
+  }
+  return pending;
+}
+
+/** Image de pile telle qu'affichee : `scalingo-22:v21`. */
+const shortImage = (image: string) => image.replace(/^scalingo\//, "");
+
+/**
+ * Pile de l'app et son image courante. La pile vient de l'etat de l'app quand
+ * le passage l'a lu, a defaut de l'image du dernier build, qui en porte le nom.
+ */
+async function stackOfApp(entry: AppEntry, built: string | null): Promise<{ name: string; baseImage: string | null } | null> {
+  const id = appStacks.get(keyOf(entry));
+  if (id) {
+    const stack = (await readStacks(entry.region)).get(id);
+    if (stack) return { name: stack.name, baseImage: stack.baseImage };
+  }
+  const named = built ? /scalingo-\d+(?:-minimal)?/.exec(built) : null;
+  return named ? { name: named[0], baseImage: null } : null;
+}
+
+/**
+ * Confronte ce que le dernier build reussi a installe a ce qu'un rebuild
+ * installerait.
+ *
+ * Le verdict ne declenche rien : la regle d'age refait les builds, qu'il y ait
+ * prevision ou non. Il dit ce qui tourne, et ce qu'un rebuild changerait, pour
+ * qu'on puisse l'avancer par --rebuild sans attendre.
+ *
+ * Seul le retard de Scalingo sur Heroku devient une echeance : aucun rebuild ne
+ * le resout, et il n'a pas de fin connue.
+ */
+async function checkRuntimes(targets: AppEntry[], lock: Lock): Promise<void> {
+  try {
+    await judgeRuntimes(targets, lock);
+  } catch (e) {
+    // Une prevision qui leve ne doit pas emporter l'ecriture du rapport, que le
+    // passage a de toute facon a rendre : le releve du KEV l'a fait une fois,
+    // apres une vague deja deployee.
+    warn(JVM_COMMON, `veille des runtimes interrompue, aucune prevision n'est sure : ${(e as Error).message.slice(0, 200)}`);
+  }
+}
+
+const isRepo = (a: string | null | undefined, b: string) => a?.toLowerCase() === b.toLowerCase();
+
+async function judgeRuntimes(targets: AppEntry[], lock: Lock): Promise<void> {
+  const unread = new Set<string>();
+  // Alias que les apps suivent sur l'inventaire principal du buildpack, sans
+  // l'epingler, avec la version que Scalingo y associe : ce sont ceux dont un
+  // retard sur Heroku prive le parc. L'inventaire de scalingo-20 est fige par
+  // choix et n'est pas un retard.
+  const followed = new Map<string, string>();
+  for (const entry of targets) {
+    const key = keyOf(entry);
+    const known = lock.apps[key];
+    const build = known?.build;
+    if (!known || !build) continue;
+    const stack = await stackOfApp(entry, build.stack);
+    const rows: RuntimeRow[] = [];
+    const used = known.buildpacks.find((b) => isRepo(b.repo, JVM_COMMON));
+
+    // Un journal illisible ou une ligne de JDK introuvable ne valent pas un
+    // parc sans JDK : sans ligne ni echeance, le JDK disparaitrait du tableau et
+    // le passage se dirait complet. Une ligne introuvable dit aussi que le
+    // buildpack a change de format, ce qui est deja arrive le 2025-02-26.
+    if (build.runtimes === null) {
+      rows.push({ component: "runtimes", installed: null, next: "journal du build illisible", state: "sans verdict" });
+      unread.add("journal du build illisible");
+    } else if (used && !build.runtimes.some((r) => r.component === "jdk")) {
+      rows.push({ component: "JDK", installed: null, next: "ligne du JDK absente du journal", state: "sans verdict" });
+      unread.add("ligne du JDK absente du journal de build");
+    }
+
+    for (const r of build.runtimes ?? []) {
+      if (r.component !== "jdk") {
+        rows.push({ component: r.name, installed: r.version, next: null, state: "relevé" });
+        continue;
+      }
+      const row: RuntimeRow = { component: r.name, installed: r.version, next: null, state: "sans verdict" };
+      rows.push(row);
+      if (r.exact === false) row.next = "version installée non écrite au journal";
+      else if (!isRepo(r.buildpack, JVM_COMMON)) row.next = "buildpack non suivi";
+      else if (r.refHidden) row.next = "référence du buildpack non écrite au journal";
+      else if (!isRepoRef(known.source.repo) || !isShaRef(known.source.sha)) row.next = "commit déployé illisible";
+      else if (used?.ref && !isBranchRef(used.ref)) row.next = "référence du buildpack illisible";
+      else if (!stack) row.next = "pile inconnue";
+      else {
+        const forecast: JdkForecast = await forecastJdk(
+          { ref: used?.ref ?? null, stack: stack.name, source: known.source },
+          fetchText,
+        );
+        if ("none" in forecast) {
+          row.next = forecast.none;
+          if (forecast.failed) unread.add(forecast.none);
+        } else {
+          row.next = forecast.version;
+          row.state = cmpJdk(forecast.version, r.version) > 0 ? "rebuild utile" : "à jour";
+          if (forecast.alias && !used?.ref && inventoryTarget(stack.name).file === "inventory.json") {
+            followed.set(forecast.alias, forecast.version);
+          }
+        }
+      }
+    }
+
+    const image: RuntimeRow = { component: "pile", installed: build.stack, next: null, state: "sans verdict" };
+    if (!build.stack) image.next = "image du build non relevée";
+    else if (!stack?.baseImage) image.next = "image courante non relevée";
+    else {
+      image.next = stack.baseImage;
+      image.state = stack.baseImage === build.stack ? "à jour" : "rebuild utile";
+    }
+    rows.push(image);
+    observedRuntimes.set(key, rows);
+  }
+
+  for (const [alias, version] of followed) {
+    const seen = await upstreamLag(alias, version, fetchText, ghJson);
+    if ("unreadable" in seen) {
+      unread.add(seen.unreadable);
+      continue;
+    }
+    const lag = seen.lag;
+    if (!lag) continue;
+    const behind = `JDK ${alias} : Heroku publie ${lag.upstream}, Scalingo en est a ${lag.scalingo}`;
+    const remedy = `Aucun rebuild ne l'installera tant que Scalingo ne l'a pas repris : le signaler au support Scalingo.`;
+    // Un retard etabli dont la date manque reste un retard : le taire parce que
+    // l'historique ne repond pas ferait repasser le rapport en etat sain.
+    if (!lag.since) {
+      warn(JVM_COMMON, `${behind}, depuis une date inconnue, l'historique de l'inventaire d'Heroku etant illisible. ${remedy}`);
+      continue;
+    }
+    const days = Math.floor((Date.now() - Date.parse(lag.since)) / 86_400_000);
+    const since = `${lag.atLeast ? "au moins " : ""}le ${lag.since.slice(0, 10)}`;
+    if (days < SCALINGO_LAG_DAYS) {
+      log(`\n${behind}, depuis ${since}, sous le seuil de ${SCALINGO_LAG_DAYS} jours.`);
+      continue;
+    }
+    warn(JVM_COMMON, `${behind}, publie par Heroku ${since}, il y a ${days} jours. ${remedy}`);
+  }
+
+  // Une source muette n'est pas un parc a jour : sans echeance, le rapport
+  // repasserait en etat sain sur une prevision qu'on n'a pas pu faire. Meme
+  // raison, et meme forme, qu'une liste de stacks ou une fin de vie illisibles.
+  for (const reason of unread) warn(JVM_COMMON, `${reason}, la prevision du JDK d'un rebuild n'a pas pu etre faite`);
+
+  const paused = new Set(targets.filter((e) => e.paused).map(keyOf));
+  const useful = [...observedRuntimes].filter(
+    ([key, rows]) => !paused.has(key) && rows.some((r) => r.state === "rebuild utile"),
+  );
+  if (useful.length > 0) {
+    log(`\n${useful.length} app(s) qu'un rebuild mettrait a jour :`);
+    for (const [key, rows] of useful) {
+      const moves = rows.filter((r) => r.state === "rebuild utile").map((r) => `${r.component} ${r.installed} -> ${r.next}`);
+      log(`  ${key} : ${moves.join(", ")}`);
+    }
+    log(
+      `La reconciliation refait a l'identique tout build de plus de ${REBUILD_AFTER_DAYS} jours, entre ` +
+        `${REBUILD_HOURS_UTC.from} h et ${REBUILD_HOURS_UTC.to} h UTC. --rebuild --app le fait sans attendre.`,
+    );
+  } else if (observedRuntimes.size > 0) {
+    // Une surveillance muette dit qu'elle a regarde, et sur quoi elle n'a pas pu
+    // conclure : sans ce decompte, un parc a jour et un releve sans verdict
+    // rendraient le meme silence.
+    const all = [...observedRuntimes.values()].flat();
+    const judged = all.filter((r) => r.state === "à jour").length;
+    const blind = all.filter((r) => r.state === "sans verdict").length;
+    log(
+      `\nAucun rebuild utile : ${judged} composant(s) sur ${all.length} confronte(s) a ce qu'un rebuild installerait` +
+        `${blind > 0 ? `, ${blind} sans verdict` : ""}.`,
+    );
+  }
+}
+
 /** L'echeance que porte une ligne en fin de support, en une ligne. */
 function lifecycleDeadline(v: LifecycleVerdict, version: string): string {
   const where = `${version} est sur la ${v.lts ? "ligne de support long" : "ligne"} ${v.cycle}`;
@@ -3683,6 +4421,14 @@ async function main() {
     log("--force redeploierait tout le parc. Restreins la cible avec --app.");
     process.exit(1);
   }
+  if (OPT.rebuild && !OPT.appFilter) {
+    log("--rebuild referait le build de tout le parc. Restreins la cible avec --app.");
+    process.exit(1);
+  }
+  if (OPT.rebuild && OPT.force) {
+    log("--rebuild refait le build en service sans sauvegarde, --force sauvegarde et redeploie : choisis l'un des deux.");
+    process.exit(1);
+  }
 
   if (targets.length === 0) {
     log("aucune app ne correspond au filtre.");
@@ -3730,7 +4476,7 @@ async function main() {
   // parc, puisqu'une variable peut avoir ete changee a la main. La
   // reconciliation traite les deux : elle releve le reel, signale ce qui a
   // bouge hors du watcher, puis laisse l'application converger.
-  if (OPT.reconcile && !OPT.resume && (token || fgp)) {
+  if ((OPT.reconcile || OPT.rebuild) && !OPT.resume && (token || fgp)) {
     log("RELEVE DE L'ETAT REEL\n");
     let drifts = 0;
     for (const entry of targets) {
@@ -3750,7 +4496,7 @@ async function main() {
         // git_ref du dernier deploiement n'est pas un sha, prendre celui du
         // manifeste fabriquait l'egalite qui fait conclure que la cible est
         // atteinte, et levait la quarantaine sans rien avoir constate.
-        real = await adoptApp(entry, log, known?.source.sha || entry.source.sha);
+        real = await adoptApp(entry, log, known?.source.sha || entry.source.sha, known);
       } catch (e) {
         log(`  ${key} : releve impossible (${(e as Error).message})`);
         continue;
@@ -3767,11 +4513,18 @@ async function main() {
       // adoptApp ne releve pas les sauvegardes, qui ne se lisent pas sur l'app :
       // les ecraser par null faisait perdre le point de restauration, c'est-a-dire
       // ce dont on a besoin precisement quand une migration a mal tourne.
-      lock.apps[key] = {
-        ...real,
-        backup: known?.backup ?? null,
-        quarantine: keptQuarantine(real, targetOf(entry), known?.quarantine ?? null),
-      };
+      const lost =
+        known?.quarantine?.reason === LOST_VERDICT &&
+        real.deployment?.id === known.quarantine.deploymentId &&
+        real.deployment.status === "success";
+      const quarantine = lost
+        ? await lostVerdictSettled(entry, manifest, known!.quarantine!)
+        : keptQuarantine(real, targetOf(entry), known?.quarantine ?? null);
+      lock.apps[key] = afterSurvey(real, known, quarantine);
+      if (unbuiltVariables.has(key)) {
+        drifts++;
+        log(`  ${key} : DERIVE, ${entry.tool.env} changee sans build, version servie gardee au lock`);
+      }
     }
     // Sans cette precision, "Aucune derive." precedait la derive d'une app en
     // pause, annoncee juste apres dans l'application.
@@ -3781,10 +4534,19 @@ async function main() {
     log(drifts === 0 ? `\nAucune derive${scope}.${pausedNote}\n` : `\n${drifts} derive(s) relevee(s)${scope}.${pausedNote}\n`);
   }
 
+  // Apres le releve, qui a pu lever une quarantaine, et sur toutes les apps
+  // actives du manifeste : un rebuild rate sur une app hors du filtre --app
+  // suspend aussi les autres.
+  const suspendedBy = rebuildSuspendedBy(lock, manifest.apps);
+  if (OPT.reconcile && suspendedBy) {
+    log(`Rebuilds par age suspendus : le dernier a echoue sur ${suspendedBy}, encore en quarantaine.\n`);
+  }
+
   const tally: Record<Outcome, number> = {
     "up-to-date": 0,
     "quarantined-skip": 0,
     deployed: 0,
+    rebuilt: 0,
     failed: 0,
     error: 0,
     planned: 0,
@@ -3807,7 +4569,8 @@ async function main() {
     for (; i < targets.length && !scoutDone; i++) {
       const outcome = await launchApp(targets[i], manifest, lock, token, log);
       tally[outcome]++;
-      if (outcome === "planned") scoutDone = true;
+      // Un rebuild planifie n'est pas l'eclaireur : il ne validera aucune montee.
+      if (outcome === "planned" && !atRestOnTarget(targets[i], lock)) scoutDone = true;
     }
     const rest = targets.slice(i);
     if (rest.length > 0) {
@@ -3851,7 +4614,7 @@ async function main() {
   const flying = inFlight(lock);
   log("");
   log(
-    `conformes ${tally["up-to-date"]}  deployees ${tally.deployed}  echecs ${tally.failed}  ` +
+    `conformes ${tally["up-to-date"]}  deployees ${tally.deployed}  refaites ${tally.rebuilt}  echecs ${tally.failed}  ` +
       `interrompues ${tally.error}  quarantaine ${tally["quarantined-skip"]}  ` +
       `rejetees ${tally.rejected}  en pause ${tally.paused}  ` +
       `non deployables ${tally["skipped-state"]}  planifiees ${tally.planned}  ` +
@@ -3883,6 +4646,7 @@ async function main() {
   await checkAdvisories(targets, lock);
   await checkLifecycle(targets, lock);
   await checkDatabases(targets, token);
+  await checkRuntimes(targets, lock);
 
   // Une surveillance silencieuse doit dire qu'elle a regarde, sinon son silence
   // se confond avec son absence.
@@ -3970,6 +4734,9 @@ async function main() {
     log(`\n${stuck.length} app(s) en quarantaine :`);
     for (const [k, v] of stuck) log(`  ${k} : ${v.quarantine!.reason} (cible ${v.quarantine!.target.version})`);
     log(`Corriger la cible au manifeste, ou relancer avec --force une fois la cause levee.`);
+    if (stuck.some(([, v]) => v.quarantine!.rebuild)) {
+      log(`Une quarantaine qui suspend les rebuilds se leve par --rebuild --app, sans sauvegarde, quand sa cible est le build en service.`);
+    }
   }
 
   if (!OPT.dryRun) await writeIncident(lock, targets);
