@@ -28,7 +28,7 @@ node <outil>/src/fgp-blobs.ts             # ecrit fgp.json
 
 `<outil>` est une copie du dépôt de l'outil, et c'est sa version qui décide des
 scopes écrits dans les blobs. Un parc en garde une dans `.scalingo-watcher`,
-épinglée sur la même version que ses workflows appelants : elle est donc d'une
+épinglée sur la même version que les actions de l'outil qu'il appelle : elle est donc d'une
 version de retard au moment précis où l'on monte le parc. La régénération qui
 précède une montée doit tourner sur la version visée et non sur celle-là, sinon
 elle écrit les scopes de l'ancienne, et rien ne le signale à la génération.

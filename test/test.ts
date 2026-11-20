@@ -29,7 +29,7 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { Ajv2020 } from "ajv/dist/2020.js";
-import { parse, parseDocument } from "yaml";
+import { parse, parseDocument, stringify } from "yaml";
 import {
   backupAddon,
   buildpacksDropped,
@@ -57,6 +57,7 @@ import {
   writeOptions,
 } from "../src/apply.ts";
 import { resolveLatest, upstreamKey, upstreamsDeclared } from "../src/audit.ts";
+import { type ActionInputs, checkCallers, type InputsAt, LOCK_GROUP, misalignedRefs } from "../src/callers.ts";
 import { renderManifest } from "../src/init.ts";
 import { compose, matrixPayload, slackPayload, teamsPayload } from "../src/notify.ts";
 import { apiScopes, backupScopes, deniedByProxy } from "../src/fgp-scopes.ts";
@@ -346,16 +347,18 @@ console.log("\nBattement de la veille de silence");
 // alerter le service de veille.
 {
   type Step = { id?: string; name?: string; if?: string; env?: Record<string, string>; run?: string };
-  const reconcile = parse(readFileSync(join(import.meta.dirname, "..", ".github", "workflows", "reconcile.yml"), "utf8")) as {
-    on: { workflow_call: { secrets: Record<string, { required?: boolean } | null> } };
-    jobs: { reconcile: { steps: Step[] } };
+  const reconcile = parse(readFileSync(join(import.meta.dirname, "..", "actions", "reconcile", "action.yml"), "utf8")) as {
+    inputs: Record<string, { required?: boolean } | null>;
+    runs: { steps: Step[] };
   };
-  const steps = reconcile.jobs.reconcile.steps;
+  const steps = reconcile.runs.steps;
   const at = (name: string) => steps.findIndex((s) => s.name === name);
   const signal = steps[at("signaler")];
   const beat = steps[at("battement")];
-  check("le secret de battement est facultatif", reconcile.on.workflow_call.secrets.HEARTBEAT_URL?.required, false);
-  check("le battement lit ce secret", beat?.env?.HEARTBEAT_URL, "${{ secrets.HEARTBEAT_URL }}");
+  // Requis comme les autres secrets, pour que validate refuse un appelant qui
+  // l'oublie. Vide, il ne fait rien battre.
+  check("l'URL de battement est un input requis, comme les autres secrets", reconcile.inputs["heartbeat-url"]?.required, true);
+  check("le battement lit cet input", beat?.env?.HEARTBEAT_URL, "${{ inputs.heartbeat-url }}");
   check("le battement suit la publication du tableau de bord", [at("signaler") >= 0, at("battement") > at("signaler"), signal?.id], [true, true, "signaler"]);
   // Sans always(), un passage avec une app en echec ne battrait pas alors que
   // le parc a ete regarde. Sans les filtres sur l'evenement et la tentative, un
@@ -926,24 +929,172 @@ const CITED_VERSIONS = preset("watcher").customManagers?.find((m) => m.depTypeTe
   );
 }
 
+console.log("\nActions de l'outil");
+
+// Une action distante est chargee a la mise en place du job : une cle refusee
+// la fait echouer avant le moindre pas, chez chaque parc qui monte de version.
+{
+  const ACTIONS_DIR = join(import.meta.dirname, "..", "actions");
+  const STEP_KEYS = new Set(["name", "id", "if", "run", "shell", "uses", "with", "env", "working-directory", "continue-on-error"]);
+  type Input = { description?: string; required?: boolean; default?: unknown } | null;
+  type Manifest = { name?: string; description?: string; inputs?: Record<string, Input>; runs?: { using?: string; steps?: Record<string, unknown>[] } };
+  const problems: string[] = [];
+  const names = readdirSync(ACTIONS_DIR).filter((d) => existsSync(join(ACTIONS_DIR, d, "action.yml")));
+  for (const name of names) {
+    const m = parse(readFileSync(join(ACTIONS_DIR, name, "action.yml"), "utf8")) as Manifest;
+    if (!m.name || !m.description) problems.push(`${name} : name et description`);
+    if (m.runs?.using !== "composite") problems.push(`${name} : runs.using vaut ${m.runs?.using}`);
+    // required marque ce que l'appelant doit ecrire, controle par src/callers.ts :
+    // un defaut le contredirait, et un facultatif sans defaut arriverait vide.
+    for (const [key, input] of Object.entries(m.inputs ?? {})) {
+      if (!input?.description) problems.push(`${name}.${key} : sans description`);
+      if (input?.required && input.default !== undefined) problems.push(`${name}.${key} : required avec un defaut`);
+      if (!input?.required && input?.default === undefined) problems.push(`${name}.${key} : facultatif sans defaut`);
+    }
+    const steps = m.runs?.steps ?? [];
+    const copied = steps.findIndex((s) => typeof s.run === "string" && s.run.includes("copy-tool.sh"));
+    steps.forEach((step, i) => {
+      const where = `${name}, pas ${i + 1}`;
+      for (const key of Object.keys(step).filter((k) => !STEP_KEYS.has(k))) problems.push(`${where} : cle ${key} refusee dans une composite`);
+      if ("run" in step && !("shell" in step)) problems.push(`${where} : run sans shell`);
+      // GitHub remplace l'expression dans le script avant que bash ne le lise,
+      // commentaires compris : une valeur d'input y deviendrait du code.
+      if (typeof step.run === "string" && step.run.includes("${{")) problems.push(where + " : expression ${{ }} dans le script, a passer par env");
+      const cond = typeof step.if === "string" ? step.if : "";
+      if (/!\s*inputs\./.test(cond)) problems.push(`${where} : !inputs.x vaut toujours faux, un input etant une chaine`);
+      const uses = typeof step.uses === "string" ? step.uses : "";
+      if (uses.startsWith("./")) {
+        const target = /^\.\/\.scalingo-watcher\/(actions\/[\w-]+)$/.exec(uses)?.[1];
+        if (!target || !existsSync(join(ACTIONS_DIR, "..", target, "action.yml"))) problems.push(`${where} : ${uses} ne designe aucune action de l'outil`);
+        if (copied < 0 || copied > i) problems.push(`${where} : ${uses} avant la copie de l'outil dans le workspace`);
+        // Apres un echec de la copie, le chemin local n'existe pas : le pas
+        // ajouterait sa propre erreur a celle qui compte.
+        if (/always\(\)/.test(cond) && !/steps\.outil\.outcome == 'success'/.test(cond)) {
+          problems.push(`${where} : always() sans condition sur la copie de l'outil`);
+        }
+      } else if (uses && !/@[0-9a-f]{40}$/.test(uses)) {
+        problems.push(`${where} : ${uses} non epinglee par sha`);
+      }
+    });
+  }
+  check("les actions publiques sont presentes", ["apply", "propose-db", "propose-security", "reconcile", "validate"].filter((n) => !names.includes(n)), []);
+  check("chaque action respecte les regles d'une composite distante", problems, []);
+  check("plus aucun workflow reutilisable dans l'outil", readdirSync(join(ACTIONS_DIR, "..", ".github", "workflows")).filter((f) => /workflow_call/.test(readFileSync(join(ACTIONS_DIR, "..", ".github", "workflows", f), "utf8"))), []);
+}
+
+console.log("\nControle des appels de l'outil par un parc");
+
+// L'appelant porte desormais le verrou et les secrets : l'action validate
+// controle ses workflows, et ce controle doit refuser chaque oubli.
+{
+  const PIN = `incubateur-ademe/scalingo-watcher/actions/reconcile@${"a".repeat(40)}`;
+  const inputs: ActionInputs = { "dry-run": { required: true }, "fgp-key": { required: true }, "manifest-path": { required: false } };
+  const at: InputsAt = (name) => (["reconcile", "apply", "validate", "propose-db"].includes(name) ? inputs : null);
+  const lock = { group: LOCK_GROUP, "cancel-in-progress": false, queue: "max" };
+  const withs = { "dry-run": "false", "fgp-key": "${{ secrets.FGP_KEY }}" };
+  type Shape = { top?: unknown; concurrency?: unknown; uses?: string; with?: Record<string, string> };
+  const run = (shape: Shape) => {
+    const job: Record<string, unknown> = { "runs-on": "ubuntu-latest", steps: [{ uses: shape.uses ?? PIN, with: shape.with ?? withs }] };
+    if (shape.concurrency !== undefined) job.concurrency = shape.concurrency;
+    const workflow: Record<string, unknown> = { on: "workflow_dispatch", jobs: { converger: job } };
+    if (shape.top !== undefined) workflow.concurrency = shape.top;
+    const { calls, errors, retired } = checkCallers([{ file: "parc.yml", text: stringify(workflow) }], at);
+    return { calls: calls.length, errors, retired };
+  };
+  const errorsOf = (shape: Shape, ...needles: string[]) => {
+    const { errors } = run(shape);
+    return needles.length === errors.length && needles.every((n, i) => errors[i].includes(n));
+  };
+
+  check("un appel conforme passe", run({ concurrency: lock }), { calls: 1, errors: [], retired: [] });
+  check("le groupe peut etre pose au niveau du workflow", run({ top: lock }).errors, []);
+  check("une convergence sans le groupe est refusee", errorsOf({}, "hors du groupe"), true);
+  check("une convergence sans queue: max est refusee", errorsOf({ concurrency: { group: LOCK_GROUP, "cancel-in-progress": false } }, "queue: max"), true);
+  check("le groupe ecrit en chaine est refuse, il ne porte pas queue: max", errorsOf({ concurrency: LOCK_GROUP }, "queue: max"), true);
+  check(
+    "queue: max posee sur un autre groupe ne vaut pas pour le verrou",
+    errorsOf({ top: { group: "autre", queue: "max" }, concurrency: { group: LOCK_GROUP, "cancel-in-progress": false } }, "queue: max"),
+    true,
+  );
+  check("un groupe calcule par une expression est refuse", errorsOf({ concurrency: { group: "${{ github.workflow }}" } }, "hors du groupe"), true);
+  check("le groupe aux deux niveaux est refuse (interblocage)", errorsOf({ top: lock, concurrency: lock }, "interblocage"), true);
+  check("cancel-in-progress vrai est refuse", errorsOf({ concurrency: { ...lock, "cancel-in-progress": true } }, "cancel-in-progress"), true);
+  check(
+    "cancel-in-progress par expression est refuse",
+    errorsOf({ concurrency: { ...lock, "cancel-in-progress": "${{ github.event_name == 'push' }}" } }, "cancel-in-progress"),
+    true,
+  );
+  check(
+    "un autre groupe annulable au niveau du workflow est refuse, il annulerait le job sous verrou",
+    errorsOf({ top: { group: "${{ github.workflow }}-${{ github.ref }}", "cancel-in-progress": true }, concurrency: lock }, "cancel-in-progress"),
+    true,
+  );
+  check(
+    "un autre groupe annulable au niveau du job est refuse quand le verrou est au niveau du workflow",
+    errorsOf({ top: lock, concurrency: { group: "autre", "cancel-in-progress": true } }, "cancel-in-progress"),
+    true,
+  );
+  const proposal = PIN.replace("reconcile", "propose-db");
+  check("une proposition sans groupe est refusee", errorsOf({ uses: proposal }, "sans groupe de concurrence"), true);
+  check("une proposition sous son propre groupe passe", run({ uses: proposal, concurrency: { group: "scalingo-watcher-propose-db" } }).errors, []);
+  check("une proposition sous le verrou de la convergence est refusee", errorsOf({ uses: proposal, concurrency: lock }, "sous le verrou"), true);
+  check(
+    "une proposition avec le meme groupe aux deux niveaux est refusee",
+    errorsOf({ uses: proposal, top: "scalingo-watcher-propose-db", concurrency: "scalingo-watcher-propose-db" }, "interblocage"),
+    true,
+  );
+  check(
+    "des appels epingles a des versions differentes sont signales",
+    [misalignedRefs([{ file: "a", job: "a", action: "a", ref: "x" }, { file: "b", job: "b", action: "b", ref: "y" }])?.includes("x, y"), misalignedRefs([])],
+    [true, null],
+  );
+  check(
+    "un input mal orthographie est refuse, et l'input attendu signale",
+    errorsOf({ concurrency: lock, with: { dryrun: "true", "fgp-key": "" } }, "pas d'input dryrun", "attend l'input dry-run"),
+    true,
+  );
+  check("un secret non passe est signale", errorsOf({ concurrency: lock, with: { "dry-run": "true" } }, "attend l'input fgp-key"), true);
+  check("une action inexistante est signalee", errorsOf({ uses: PIN.replace("reconcile", "reconcilier") }, "n'existe pas"), true);
+  check("une action qui ne converge pas n'exige pas le groupe", run({ uses: PIN.replace("reconcile", "validate") }).errors, []);
+  check(
+    "un appel de workflow reutilisable est annonce comme retire, pas comme erreur de version",
+    (() => {
+      const text = stringify({ jobs: { r: { uses: `incubateur-ademe/scalingo-watcher/.github/workflows/reconcile.yml@${"b".repeat(40)}` } } });
+      const { errors, retired } = checkCallers([{ file: "parc.yml", text }], at);
+      return [errors.length, retired.length, retired[0]?.includes("actions/reconcile")];
+    })(),
+    [0, 1, true],
+  );
+  check("une action d'un autre depot est ignoree", run({ uses: "exemple/autre/actions/reconcile@v1" }).calls, 0);
+}
+
 console.log("\nStarter : appelants, versions citees, managers");
 
-// Le job appele ne lit la valeur d'un secret de l'environment que si
-// l'appelant lui passe ce secret : non mappe, FGP_KEY arrivait vide et le parc
-// tournait sans acces, en vert. Le starter vit dans son propre depot, tenu a
-// jour par Renovate : la CI le recupere dans STARTER_DIR. Chaque appelant est
-// confronte au workflow de la version qu'il epingle. Les secrets que la version
-// en cours ajoute ne sont qu'annonces : le starter ne pourra les mapper qu'une
-// fois cette version publiee.
+// Un secret que l'appelant ne passe pas arrive vide : FGP_KEY non mappe faisait
+// tourner le parc sans acces, en vert. Le starter vit dans son propre depot,
+// tenu a jour par Renovate : la CI le recupere dans STARTER_DIR. Chaque appel
+// est confronte a la version qu'il epingle : workflow reutilisable jusqu'a la
+// v1, action ensuite. Ce que la version en cours ajoute ou retire n'est
+// qu'annonce : le starter ne pourra la suivre qu'une fois cette version publiee.
 {
   const ROOT_DIR = join(import.meta.dirname, "..");
   const starter = process.env.STARTER_DIR ?? join(ROOT_DIR, ".starter");
   const callersDir = join(starter, ".github", "workflows");
   type Workflow = { on?: { workflow_call?: { secrets?: Record<string, unknown> } }; jobs: Record<string, { uses?: string; secrets?: unknown }> };
-  const declaredAt = (ref: string, name: string) => {
-    const src = execFileSync("git", ["show", `${ref}:.github/workflows/${name}`], { cwd: ROOT_DIR, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    return Object.keys((parse(src) as Workflow).on?.workflow_call?.secrets ?? {});
-  };
+  const show = (ref: string, path: string) =>
+    execFileSync("git", ["show", `${ref}:${path}`], { cwd: ROOT_DIR, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const declaredAt = (ref: string, name: string) =>
+    Object.keys((parse(show(ref, `.github/workflows/${name}`)) as Workflow).on?.workflow_call?.secrets ?? {});
+  // Sans `rev`, chaque action est lue a la version que son appel epingle.
+  const inputsAt =
+    (rev?: string): InputsAt =>
+    (name, ref) => {
+      try {
+        return (parse(show(rev ?? ref, `actions/${name}/action.yml`)) as { inputs?: ActionInputs } | null)?.inputs ?? {};
+      } catch {
+        return null;
+      }
+    };
   if (!existsSync(callersDir)) {
     if (process.env.CI) check("le starter est recupere pour controler ses appelants", callersDir, "present");
     else console.log(`  (starter absent de ${callersDir} : cloner incubateur-ademe/scalingo-parc-template dans .starter pour ce controle)`);
@@ -951,8 +1102,11 @@ console.log("\nStarter : appelants, versions citees, managers");
     const gaps: string[] = [];
     const upcoming: string[] = [];
     let callers = 0;
-    for (const file of readdirSync(callersDir).filter((f) => f.endsWith(".yml"))) {
-      const caller = parse(readFileSync(join(callersDir, file), "utf8")) as Workflow;
+    const files = readdirSync(callersDir)
+      .filter((f) => f.endsWith(".yml"))
+      .map((file) => ({ file, text: readFileSync(join(callersDir, file), "utf8") }));
+    for (const { file, text } of files) {
+      const caller = parse(text) as Workflow;
       for (const job of Object.values(caller.jobs)) {
         const m = /^incubateur-ademe\/scalingo-watcher\/\.github\/workflows\/([^@]+)@(\S+)$/.exec(job.uses ?? "");
         if (!m) continue;
@@ -965,10 +1119,21 @@ console.log("\nStarter : appelants, versions citees, managers");
         } catch {
           gaps.push(`${file} : ${ref} introuvable dans ce depot, faire git fetch --tags`);
         }
-        upcoming.push(...missing(declaredAt("HEAD", name)).map((x) => `${file} : ${x}`));
       }
     }
-    check("le starter appelle les workflows de l'outil", callers, 4);
+    const pinned = checkCallers(files, inputsAt());
+    const head = checkCallers(files, inputsAt("HEAD"), "HEAD");
+    callers += pinned.calls.length;
+    gaps.push(...pinned.errors);
+    // Un starter deja passe aux actions est soumis aux regles que sa propre
+    // validate lui imposerait : plus d'appel v1, une seule version de l'outil.
+    if (pinned.calls.length > 0) {
+      gaps.push(...pinned.retired);
+      const misaligned = misalignedRefs(pinned.calls);
+      if (misaligned) gaps.push(misaligned);
+    }
+    upcoming.push(...head.errors.filter((e) => !pinned.errors.includes(e)), ...(pinned.calls.length > 0 ? [] : head.retired));
+    check("le starter appelle l'outil", callers >= 4, true);
     // Hors des appelants et de renovate.json, une version de l'outil n'avance
     // que par le manager de watcher.json : sans lui, le README faisait cloner
     // une version plus ancienne que celle de la CI du parc.
@@ -1010,8 +1175,8 @@ console.log("\nStarter : appelants, versions citees, managers");
         console.log("::warning::manager recopie dans le renovate.json du starter : a retirer, avec sa packageRule, a la montee vers la prochaine release");
       }
     }
-    check("chaque appelant du starter mappe les secrets du workflow qu'il epingle", gaps, []);
-    for (const u of upcoming) console.log(`::warning::secret a mapper dans le starter a la prochaine release : ${u}`);
+    check("chaque appel du starter est conforme a la version de l'outil qu'il epingle", gaps, []);
+    for (const u of upcoming) console.log(`::warning::starter a adapter a la prochaine release : ${u}`);
   }
 }
 

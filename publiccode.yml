@@ -43,8 +43,8 @@ description:
       commité dans le dépôt.
 
 
-      L'outil est distribué sous forme de workflows GitHub réutilisables,
-      d'actions composites et de presets Renovate, versionnés par release. Un
+      L'outil est distribué sous forme d'actions GitHub composites et de
+      presets Renovate, versionnés par release. Un
       dépôt consommateur ne contient que ses données : manifeste, lock et
       configuration Renovate. Un dépôt modèle en fournit le squelette, et une
       commande d'amorçage écrit le premier manifeste depuis l'état réel du

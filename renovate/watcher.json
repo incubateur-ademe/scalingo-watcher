@@ -1,12 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Mises a jour de scalingo-watcher chez un consommateur : workflows appelants epingles par sha, presets epingles par tag, versions citees par la documentation et le $schema du manifeste, avances ensemble dans une seule PR.",
+  "description": "Mises a jour de scalingo-watcher chez un consommateur : actions appelees epinglees par sha, presets epingles par tag, versions citees par la documentation et le $schema du manifeste, avances ensemble dans une seule PR.",
   "extends": [
     "helpers:pinGitHubActionDigests"
   ],
   "customManagers": [
     {
-      "description": "Versions de l'outil citees hors des workflows et de renovate.json : clone local du README, liens vers la documentation, $schema du manifeste. Sans elles, un parc lance init et apply en local avec une version plus ancienne que celle de sa CI.",
+      "description": "Versions de l'outil citees hors des appels d'actions et de renovate.json : clone local du README, liens vers la documentation, $schema du manifeste. Sans elles, un parc lance init et apply en local avec une version plus ancienne que celle de sa CI.",
       "customType": "regex",
       "managerFilePatterns": [
         "/(^|/)[^/]+\\.md$/",
