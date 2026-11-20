@@ -1,0 +1,11 @@
+{
+  "name": "scalingo-watcher-relay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node relay.ts"
+  },
+  "engines": {
+    "node": "26.x"
+  }
+}

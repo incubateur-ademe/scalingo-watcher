@@ -47,8 +47,11 @@ import {
   readManifest,
   RENAMED_FIELDS,
   resolveAliases,
+  rolloutFingerprint,
   runningVersionUnknown,
+  scoutAfter,
   settleOf,
+  type ScoutState,
   targetGoesBack,
   targetReached,
   writeOptions,
@@ -216,22 +219,38 @@ check("req expose le corps d'un refus", /\{ status: res\.status, body\b/.test(ap
 
 console.log("\nEclaireur");
 
-const wave = apply.slice(apply.indexOf("let scoutDone = false;"), apply.indexOf("const rest = stopped"));
-
+// L'eclaireur se decide desormais d'un passage a l'autre : ses regles sont une
+// fonction pure, exercee ici sur son comportement plutot que relue dans le texte.
+const fresh: ScoutState = { scout: null, scoutPassed: false, interruptedScouts: 0, stopped: null };
+check("le plafond d'interruptions vaut deux", /MAX_INTERRUPTED_SCOUTS = 2;/.test(apply), true);
+check("une app lancee devient l'eclaireur", scoutAfter(fresh, "osc-fr1/a", "started").scout, "osc-fr1/a");
+check("un eclaireur deploye ouvre la vague", scoutAfter(fresh, "osc-fr1/a", "deployed").scoutPassed, true);
 // Une interruption ne dit rien de la cible, contrairement a un echec. Les
 // confondre laissait une base lente sur la premiere app bloquer tout le parc.
 check(
   "un echec sur l'eclaireur arrete la vague",
-  /if \(outcome === "failed"\) \{[^}]*stopped = true;/s.test(wave),
+  scoutAfter(fresh, "osc-fr1/a", "failed").stopped !== null,
   true,
+);
+const onceInterrupted = scoutAfter({ ...fresh, scout: "osc-fr1/a" }, "osc-fr1/a", "error");
+check(
+  "une interruption isolee ne l'arrete pas, et libere le role",
+  [onceInterrupted.stopped, onceInterrupted.scout, onceInterrupted.interruptedScouts],
+  [null, null, 1],
 );
 check(
-  "une interruption isolee ne l'arrete pas",
-  /interruptedScouts >= MAX_INTERRUPTED_SCOUTS/.test(wave),
+  "deux interruptions d'affilee l'arretent",
+  /acces a Scalingo en cause/.test(scoutAfter(onceInterrupted, "osc-fr1/b", "error").stopped ?? ""),
   true,
 );
-check("le plafond d'interruptions vaut deux", /MAX_INTERRUPTED_SCOUTS = 2;/.test(apply), true);
-check("le compteur retombe hors interruption", /interruptedScouts = 0;/.test(wave), true);
+check("le compteur retombe hors interruption", scoutAfter(onceInterrupted, "osc-fr1/b", "up-to-date").interruptedScouts, 0);
+// Une lecture qui passe ne dit pas qu'une ecriture passerait.
+check("une app en pause ne rompt pas la serie", scoutAfter(onceInterrupted, "osc-fr1/b", "paused").interruptedScouts, 1);
+check(
+  "un eclaireur deja passe n'est plus remis en cause",
+  scoutAfter({ ...fresh, scout: "osc-fr1/a", scoutPassed: true }, "osc-fr1/b", "failed").stopped,
+  null,
+);
 
 console.log("\nMarqueur d'etat du tableau de bord");
 
@@ -968,7 +987,7 @@ console.log("\nControle des appels de l'outil par un parc");
   const PIN = `incubateur-ademe/scalingo-watcher/actions/reconcile@${"a".repeat(40)}`;
   const inputs: ActionInputs = { "dry-run": { required: true }, "fgp-key": { required: true }, "manifest-path": { required: false } };
   const at: InputsAt = (name) => (["reconcile", "apply", "validate", "propose-db"].includes(name) ? inputs : null);
-  const lock = { group: LOCK_GROUP, "cancel-in-progress": false };
+  const lock = { group: LOCK_GROUP, "cancel-in-progress": false, queue: "max" };
   const withs = { "dry-run": "false", "fgp-key": "${{ secrets.FGP_KEY }}" };
   type Shape = { top?: unknown; concurrency?: unknown; uses?: string; with?: Record<string, string> };
   const run = (shape: Shape) => {
@@ -985,15 +1004,21 @@ console.log("\nControle des appels de l'outil par un parc");
   };
 
   check("un appel conforme passe", run({ concurrency: lock }), { calls: 1, errors: [], retired: [] });
-  check("le groupe peut s'ecrire en chaine", run({ concurrency: LOCK_GROUP }).errors, []);
   check("le groupe peut etre pose au niveau du workflow", run({ top: lock }).errors, []);
   check("une convergence sans le groupe est refusee", errorsOf({}, "hors du groupe"), true);
+  check("une convergence sans queue: max est refusee", errorsOf({ concurrency: { group: LOCK_GROUP, "cancel-in-progress": false } }, "queue: max"), true);
+  check("le groupe ecrit en chaine est refuse, il ne porte pas queue: max", errorsOf({ concurrency: LOCK_GROUP }, "queue: max"), true);
+  check(
+    "queue: max posee sur un autre groupe ne vaut pas pour le verrou",
+    errorsOf({ top: { group: "autre", queue: "max" }, concurrency: { group: LOCK_GROUP, "cancel-in-progress": false } }, "queue: max"),
+    true,
+  );
   check("un groupe calcule par une expression est refuse", errorsOf({ concurrency: { group: "${{ github.workflow }}" } }, "hors du groupe"), true);
   check("le groupe aux deux niveaux est refuse (interblocage)", errorsOf({ top: lock, concurrency: lock }, "interblocage"), true);
-  check("cancel-in-progress vrai est refuse", errorsOf({ concurrency: { group: LOCK_GROUP, "cancel-in-progress": true } }, "cancel-in-progress"), true);
+  check("cancel-in-progress vrai est refuse", errorsOf({ concurrency: { ...lock, "cancel-in-progress": true } }, "cancel-in-progress"), true);
   check(
     "cancel-in-progress par expression est refuse",
-    errorsOf({ concurrency: { group: LOCK_GROUP, "cancel-in-progress": "${{ github.event_name == 'push' }}" } }, "cancel-in-progress"),
+    errorsOf({ concurrency: { ...lock, "cancel-in-progress": "${{ github.event_name == 'push' }}" } }, "cancel-in-progress"),
     true,
   );
   check(
@@ -1667,6 +1692,21 @@ console.log("\nFenetre de garde par defaut");
   });
 }
 
+console.log("\nDeploiement en cours");
+
+{
+  // Un manifeste qui change ouvre un autre deploiement, avec son eclaireur. La
+  // meme demande, elle, poursuit celui qui est ouvert.
+  const fpApps = (fixture.apps as never[]);
+  const fpBase = rolloutFingerprint(fpApps, null, false);
+  check("la meme demande garde l'empreinte", rolloutFingerprint(fpApps, null, false), fpBase);
+  check("une portee restreinte change l'empreinte", rolloutFingerprint(fpApps, "delta", false) === fpBase, false);
+  check("le forcage change l'empreinte", rolloutFingerprint(fpApps, null, true) === fpBase, false);
+  const fpBumped = JSON.parse(JSON.stringify(fixture.apps)) as Array<{ tool: { version: string } }>;
+  fpBumped[0].tool.version = "v0.63.19";
+  check("une cible qui bouge change l'empreinte", rolloutFingerprint(fpBumped as never[], null, false) === fpBase, false);
+}
+
 console.log("\nScopes des blobs du proxy");
 
 {
@@ -1800,11 +1840,12 @@ try {
     Object.keys(loadLock(join(FIXTURES, "lock.json")).apps).length,
     fixture.apps.length,
   );
-  check("un lock absent part vide", loadLock(join(lockSandbox, "absent.json")), { version: 1, generatedAt: null, apps: {} });
+  check("un lock absent part vide", loadLock(join(lockSandbox, "absent.json")), { version: 2, generatedAt: null, apps: {} });
   check("un lock en version 1 est accepte", readLockVersion({ version: 1, generatedAt: null, apps: {} }), 1);
+  check("un lock en version 2 est accepte", readLockVersion({ version: 2, generatedAt: null, apps: {} }), 2);
   check(
     "un lock d'une version superieure est refuse",
-    /version 2.*jusqu'a la version 1/.test(String(readLockVersion({ version: 2, generatedAt: null, apps: {} }))),
+    /version 3.*jusqu'a la version 2/.test(String(readLockVersion({ version: 3, generatedAt: null, apps: {} }))),
     true,
   );
   check("un lock sans version est refuse", /version illisible/.test(String(readLockVersion({ apps: {} }))), true);
@@ -2405,11 +2446,11 @@ try {
   const missingValue = run(b, "apply.ts", ["--dry-run", "--lock"]);
   check("une option sans valeur arrete la commande", [missingValue.status, /--lock attend une valeur/.test(missingValue.output)], [1, true]);
 
-  writeFileSync(join(b.root, "lock-v2.json"), JSON.stringify({ version: 2, generatedAt: null, apps: {} }));
-  const v2 = run(b, "apply.ts", ["--dry-run", "--manifest", "../parc/manifest.yaml", "--lock", "../lock-v2.json"]);
+  writeFileSync(join(b.root, "lock-v3.json"), JSON.stringify({ version: 3, generatedAt: null, apps: {} }));
+  const v3 = run(b, "apply.ts", ["--dry-run", "--manifest", "../parc/manifest.yaml", "--lock", "../lock-v3.json"]);
   check(
     "un lock trop recent arrete le plan avant tout appel",
-    [v2.status, /version 2/.test(v2.output), v2.calls],
+    [v3.status, /version 3/.test(v3.output), v3.calls],
     [1, true, []],
   );
 
@@ -2971,7 +3012,7 @@ try {
       status: out.status,
       version: entry.tool.version,
       quarantaine: entry.quarantine?.reason ?? null,
-      releves: out.calls.filter((l) => l.endsWith("/events?from=1")).length,
+      releves: out.calls.filter((l) => /\/events\?/.test(l)).length,
       conteneurs: out.calls.filter((l) => l.endsWith("/ps")).length,
       vague: /Echec sur l'eclaireur/.test(out.output),
     };
@@ -2982,12 +3023,13 @@ try {
   // conteneurs reste lu. Chaque route est aussi lue une fois avant le
   // deploiement, pour qu'un scope manquant arrete tout avant la moindre
   // ecriture. La fenetre par defaut est couverte par settleOf, ses deux minutes
-  // ne tenant pas dans le delai d'un test.
+  // ne tenant pas dans le delai d'un test. Le deploiement simule a fini bien
+  // avant le passage : la garde se lit d'un coup, apres coup.
   check("une fenetre nulle conclut encore sur l'etat des conteneurs", deploiement(withoutWait), {
     status: 0,
     version: "v0.63.19",
     quarantaine: null,
-    releves: 3,
+    releves: 2,
     conteneurs: 2,
     vague: false,
   });
@@ -2995,7 +3037,7 @@ try {
     status: 0,
     version: "v0.63.19",
     quarantaine: null,
-    releves: 3,
+    releves: 2,
     conteneurs: 2,
     vague: false,
   });
@@ -3005,9 +3047,20 @@ try {
     status: 1,
     version: "v0.63.18",
     quarantaine: "redemarrage en erreur pendant la fenetre de garde (restart)",
-    releves: 3,
+    releves: 2,
     conteneurs: 1,
     vague: true,
+  });
+  // Relue apres coup, la garde ne compte que la fenetre et le delai de
+  // demarrage qui la suit : une panne du lendemain n'est pas celle du
+  // deploiement.
+  check("un redemarrage bien apres la fenetre n'est pas impute au deploiement", deploiement(withSettle, { CRASH_LATE: "1" }), {
+    status: 0,
+    version: "v0.63.19",
+    quarantaine: null,
+    releves: 2,
+    conteneurs: 2,
+    vague: false,
   });
   // La relecture du statut en fin de fenetre attrape ce que les evenements ont
   // pu rater, mais seulement sur un statut qui dit quelque chose.
@@ -3015,7 +3068,7 @@ try {
     status: 1,
     version: "v0.63.18",
     quarantaine: 'app "stopped" au bout de la fenetre de garde',
-    releves: 3,
+    releves: 2,
     conteneurs: 1,
     vague: true,
   });
@@ -3026,7 +3079,7 @@ try {
     status: 1,
     version: "v0.63.18",
     quarantaine: 'conteneur web-1 "crashed" apres le deploiement',
-    releves: 3,
+    releves: 2,
     conteneurs: 2,
     vague: true,
   });
@@ -3034,24 +3087,35 @@ try {
     status: 1,
     version: "v0.63.18",
     quarantaine: 'conteneur web-1 "crashed" apres le deploiement',
-    releves: 3,
+    releves: 2,
     conteneurs: 2,
     vague: true,
   });
-  // Un conteneur qui demarre encore laisse attendre, et la boucle de crash se
-  // voit dans les evenements releves entre deux lectures, sans attendre le delai.
+  // Un conteneur qui demarre encore laisse attendre, mais la boucle de crash se
+  // voit dans les evenements sans attendre le delai de demarrage.
   check(
     "un conteneur qui redemarre en boucle est vu par ses evenements",
-    deploiement(withoutWait, { CONTAINER: "booting", CRASH_AFTER: "2" }),
+    deploiement(withoutWait, { CONTAINER: "booting", CRASH: "1" }),
     {
       status: 1,
       version: "v0.63.18",
       quarantaine: "redemarrage en erreur pendant la fenetre de garde (restart)",
-      releves: 4,
-      conteneurs: 2,
+      releves: 2,
+      conteneurs: 1,
       vague: true,
     },
   );
+  // Le delai de demarrage court depuis la fin de la fenetre, pas depuis le
+  // passage qui la relit : passe ce delai, un conteneur qui ne tourne pas
+  // condamne le deploiement.
+  check("un conteneur encore au demarrage apres le delai met en quarantaine", deploiement(withoutWait, { CONTAINER: "booting" }), {
+    status: 1,
+    version: "v0.63.18",
+    quarantaine: 'conteneurs non demarres au bout de 5 min (web-1 "booting")',
+    releves: 2,
+    conteneurs: 2,
+    vague: true,
+  });
 
   // Un fgp.json sans les routes de la fenetre laissait deployer, puis
   // interrompait : la cible tournait sans controle, et le releve la consignait.
@@ -3071,6 +3135,297 @@ try {
         /INTERROMPU/.test(out.output),
       ],
       [[], "v0.63.18", true],
+    );
+  }
+
+  console.log("\nDeploiement asynchrone, contre un fetch simule");
+
+  // Chaque passage --async lance ce qu'il peut, consigne l'etat en vol dans le
+  // lock et rend la main. Le passage suivant relit, conclut et enchaine.
+  {
+    const ALPHA = "osc-fr1/alpha-metabase";
+    const real = { [DELTA]: { version: "v0.63.18", sha: "a".repeat(40) }, [ALPHA]: { version: "v0.63.18", sha: "a".repeat(40) } };
+    const bumpedAlpha = fixtureSrc.replace("version: v0.63.18", "version: v0.63.19");
+    const async = (b: Sandbox, args: string[], env: Record<string, string> = {}) => {
+      // Le rapport d'un passage precedent ne doit pas passer pour celui-ci.
+      rmSync(join(b.outDir, "incident.md"), { force: true });
+      const out = run(b, "apply.ts", ["--async", ...args, ...FLEET, "--out-dir", "../sortie"], {
+        SCALINGO_API_TOKEN: "faux",
+        REAL: JSON.stringify(real),
+        ...env,
+      });
+      const lock = loadLock(join(b.fleet, "lock.json")) as ReturnType<typeof loadLock> & { rollout?: unknown };
+      const incident = join(b.outDir, "incident.md");
+      return {
+        out,
+        lock,
+        writes: out.calls.filter((l) => /^(POST|PATCH) \S+\/(variables|deployments|backups)(\/|$)/.test(l)),
+        report: existsSync(incident) ? readFileSync(incident, "utf8") : null,
+      };
+    };
+    const flightOf = (lock: ReturnType<typeof loadLock>, key: string) =>
+      (lock.apps[key] as { inflight?: { step: string } }).inflight ?? null;
+
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), bumped);
+    const first = async(b, ["--app", "delta"]);
+    check(
+      "un passage --async lance le deploiement et rend la main sans le conclure",
+      [first.out.status, first.writes.map((l) => l.replace(/ \S+\/v1\/apps\/[^/]+/, " ")), flightOf(first.lock, DELTA)?.step, first.lock.apps[DELTA].tool.version],
+      [0, ["PATCH /variables/var-1", "POST /deployments"], "deploy", "v0.63.18"],
+    );
+    check("le lock passe en version 2 et porte le deploiement en cours", [first.lock.version, first.lock.rollout !== null], [2, true]);
+    check(
+      "le tableau de bord dit ce qui est en vol, hors du marqueur",
+      [/## Déploiement en cours/.test(first.report ?? ""), (first.report ?? "").indexOf("Déploiement en cours") < (first.report ?? "").indexOf("<!-- etat:")],
+      [true, true],
+    );
+
+    const second = async(b, ["--resume"]);
+    check(
+      "la reprise conclut, sans rien relancer, et referme le deploiement",
+      [second.out.status, second.writes, flightOf(second.lock, DELTA), second.lock.apps[DELTA].tool.version, second.lock.rollout ?? null, /Deploiement termine/.test(second.out.output)],
+      [0, [], null, "v0.63.19", null, true],
+    );
+    // Au repos, le lock reste lisible par un moteur en version 1 : un retour
+    // arriere de l'outil, ou un appelant epingle plus bas, continuent de marcher.
+    check(
+      "refermé, le lock repasse en version 1, sans cle de deploiement",
+      [second.lock.version, "rollout" in JSON.parse(readFileSync(join(b.fleet, "lock.json"), "utf8"))],
+      [1, false],
+    );
+    check(
+      "a la fermeture, la reprise reecrit le tableau de bord sans la section en cours",
+      [second.report !== null, /Déploiement en cours/.test(second.report ?? "")],
+      [true, false],
+    );
+
+    // Le plan ne fait rien avancer : il doit dire qu'une app est en vol, et non
+    // annoncer comme a faire un deploiement deja parti.
+    {
+      const p = sandbox();
+      writeFileSync(join(p.fleet, "manifest.yaml"), bumped);
+      async(p, ["--app", "delta"]);
+      const plan = run(p, "apply.ts", ["--dry-run", ...FLEET, "--out-dir", "../sortie"], { SCALINGO_API_TOKEN: "faux", REAL: JSON.stringify(real) });
+      check(
+        "le plan dit qu'une app est en vol au lieu de la replanifier",
+        [plan.status, /delta-metabase : deploiement en cours depuis .*, conclue par un passage suivant/.test(plan.output), /outil v0\.63\.18 -> v0\.63\.19/.test(plan.output)],
+        [0, true, false],
+      );
+    }
+
+    // Une reprise n'ouvre jamais de deploiement : un eclaireur en echec ne se
+    // rejoue sur l'app suivante qu'au passage ordinaire d'apres.
+    const idle = sandbox();
+    writeFileSync(join(idle.fleet, "manifest.yaml"), bumped);
+    const lone = async(idle, ["--resume"]);
+    check(
+      "une reprise sans deploiement ouvert n'ecrit rien, pas meme le tableau de bord",
+      [lone.out.status, lone.writes, lone.report, readFileSync(join(idle.fleet, "lock.json"), "utf8") === lockFixture],
+      [0, [], null, true],
+    );
+
+    // La sauvegarde est demandee puis relue au passage suivant, jamais attendue.
+    const bk = sandbox();
+    writeFileSync(join(bk.fleet, "manifest.yaml"), bumpedAlpha);
+    const bk1 = async(bk, ["--app", "alpha"]);
+    const bk2 = async(bk, ["--resume"]);
+    const bk3 = async(bk, ["--resume"]);
+    check(
+      "sauvegarde, puis deploiement, puis verdict, un passage chacun",
+      [
+        [bk1.out.status, flightOf(bk1.lock, ALPHA)?.step, bk1.writes.some((l) => l.endsWith("/backups")), bk1.writes.some((l) => l.endsWith("/deployments"))],
+        [bk2.out.status, flightOf(bk2.lock, ALPHA)?.step, bk2.writes.some((l) => l.endsWith("/deployments"))],
+        [bk3.out.status, flightOf(bk3.lock, ALPHA), bk3.lock.apps[ALPHA].tool.version, bk3.lock.apps[ALPHA].backup?.id],
+      ],
+      [
+        [0, "backup", true, false],
+        [0, "deploy", true],
+        [0, null, "v0.63.19", "bkp-neuve"],
+      ],
+    );
+
+    // Le 2026-11-18, des sauvegardes sont restees pres de deux heures en
+    // `scheduled` : en --async, les attendre ne coute plus rien, jusqu'a la borne.
+    const stuck = sandbox();
+    writeFileSync(join(stuck.fleet, "manifest.yaml"), bumpedAlpha);
+    async(stuck, ["--app", "alpha"], { BACKUP_STATUS: "scheduled" });
+    const waiting = async(stuck, ["--resume"], { BACKUP_STATUS: "scheduled" });
+    check(
+      "une sauvegarde bloquee laisse l'app en vol sans interruption",
+      [waiting.out.status, flightOf(waiting.lock, ALPHA)?.step, /INTERROMPU/.test(waiting.out.output)],
+      [0, "backup", false],
+    );
+    const aged = JSON.parse(readFileSync(join(stuck.fleet, "lock.json"), "utf8"));
+    aged.apps[ALPHA].inflight.since = new Date(Date.now() - 7 * 3600_000).toISOString();
+    writeFileSync(join(stuck.fleet, "lock.json"), JSON.stringify(aged, null, 2));
+    const expired = async(stuck, ["--resume"], { BACKUP_STATUS: "scheduled" });
+    check(
+      "passee la borne, elle interrompt l'app sans la mettre en quarantaine",
+      [expired.out.status, flightOf(expired.lock, ALPHA), expired.lock.apps[ALPHA].quarantine, /INTERROMPU : sauvegarde bkp-neuve non conclue/.test(expired.out.output), expired.lock.rollout ?? null],
+      [1, null, null, true, null],
+    );
+
+    // Tant que rien n'est ecrit sur l'app, le manifeste reprend la main.
+    const editedAfter = (label: string, edit: (src: string) => string) => {
+      const x = sandbox();
+      writeFileSync(join(x.fleet, "manifest.yaml"), bumpedAlpha);
+      async(x, ["--app", "alpha"], { BACKUP_STATUS: "scheduled" });
+      writeFileSync(join(x.fleet, "manifest.yaml"), edit(bumpedAlpha));
+      const after = async(x, ["--resume"]);
+      return [label, after.out.status, after.writes, flightOf(after.lock, ALPHA), after.lock.apps[ALPHA].tool.version, /abandonnee avant toute ecriture/.test(after.out.output)];
+    };
+    check(
+      "une app mise en pause pendant sa sauvegarde n'est pas deployee",
+      editedAfter("pause", (src) => src.replace("  - app: alpha-metabase\n    region: osc-fr1\n", "  - app: alpha-metabase\n    region: osc-fr1\n    paused: true\n")),
+      ["pause", 0, [], null, "v0.63.18", true],
+    );
+    check(
+      "une cible retiree du manifeste pendant la sauvegarde n'est pas deployee",
+      editedAfter("retour", () => fixtureSrc),
+      ["retour", 0, [], null, "v0.63.18", true],
+    );
+
+    // La borne est celle du passage qui a lance : un passage enchaine ne coupe
+    // pas a trente minutes une sauvegarde lancee en --async, et ne l'attend pas
+    // non plus des heures.
+    {
+      const x = sandbox();
+      writeFileSync(join(x.fleet, "manifest.yaml"), bumpedAlpha);
+      async(x, ["--app", "alpha"], { BACKUP_STATUS: "scheduled" });
+      const held = JSON.parse(readFileSync(join(x.fleet, "lock.json"), "utf8"));
+      held.apps[ALPHA].inflight.since = new Date(Date.now() - 45 * 60_000).toISOString();
+      writeFileSync(join(x.fleet, "lock.json"), JSON.stringify(held, null, 2));
+      const started = Date.now();
+      const chained = run(x, "apply.ts", ["--resume", ...FLEET, "--out-dir", "../sortie"], {
+        SCALINGO_API_TOKEN: "faux",
+        REAL: JSON.stringify(real),
+        BACKUP_STATUS: "scheduled",
+      });
+      check(
+        "un passage enchaine laisse a sa borne une sauvegarde lancee en --async",
+        [chained.status, flightOf(loadLock(join(x.fleet, "lock.json")), ALPHA)?.step, /INTERROMPU/.test(chained.output), Date.now() - started < 30_000],
+        [0, "backup", false, true],
+      );
+    }
+
+    // Une reprise ne lance pas une cible apparue apres l'ouverture : son
+    // eclaireur, c'est un passage ordinaire qui le designe.
+    {
+      const x = sandbox();
+      writeFileSync(join(x.fleet, "manifest.yaml"), bumpedAlpha);
+      async(x, []);
+      writeFileSync(join(x.fleet, "manifest.yaml"), bumpedAlpha.replace(/version: v0\.63\.18(\n\s*$)/, "version: v0.63.19$1").replace(/(delta-metabase[\s\S]*?version: )v0\.63\.18/, "$1v0.63.19"));
+      async(x, ["--resume"]);
+      const third = async(x, ["--resume"]);
+      check(
+        "une reprise ne lance pas une cible apparue depuis l'ouverture",
+        [third.out.status, third.lock.apps[ALPHA].tool.version, third.writes.some((l) => l.includes("delta-metabase")), /la suite attend le prochain passage ordinaire/.test(third.out.output)],
+        [0, "v0.63.19", false, true],
+      );
+    }
+
+    // L'eclaireur d'un nouveau deploiement attend que plus rien ne soit en vol.
+    {
+      const x = sandbox();
+      writeFileSync(join(x.fleet, "manifest.yaml"), bumpedAlpha);
+      async(x, ["--app", "alpha"], { BACKUP_STATUS: "scheduled" });
+      writeFileSync(join(x.fleet, "manifest.yaml"), bumpedAlpha.replace(/(delta-metabase[\s\S]*?version: )v0\.63\.18/, "$1v0.63.19"));
+      const other = async(x, ["--app", "delta"], { BACKUP_STATUS: "scheduled" });
+      check(
+        "l'eclaireur d'un nouveau deploiement attend les operations encore en vol",
+        [other.out.status, other.writes, flightOf(other.lock, ALPHA)?.step, flightOf(other.lock, DELTA)],
+        [0, [], "backup", null],
+      );
+    }
+
+    // Une ecriture ratee ne se rejoue pas comme une lecture : un POST accepte
+    // dont la reponse s'est perdue empilerait un deploiement par passage.
+    {
+      const x = sandbox();
+      writeFileSync(join(x.fleet, "manifest.yaml"), bumpedAlpha);
+      async(x, ["--app", "alpha"]);
+      const lost = async(x, ["--resume"], { DEPLOY_POST_FAIL: "1" });
+      check(
+        "un deploiement demande sans reponse interrompt l'app au lieu d'etre redemande",
+        [lost.out.status, flightOf(lost.lock, ALPHA), /INTERROMPU/.test(lost.out.output)],
+        [1, null, true],
+      );
+    }
+
+    // Faute de ping, le cron conclut parfois des heures apres le build. Une
+    // lecture ratee ne doit pas alors perdre le verdict : le build est fini, et
+    // attendre un passage de plus ne coute rien en --async.
+    {
+      const x = sandbox();
+      writeFileSync(join(x.fleet, "manifest.yaml"), bumped);
+      async(x, ["--app", "delta"]);
+      const held = JSON.parse(readFileSync(join(x.fleet, "lock.json"), "utf8"));
+      held.apps[DELTA].inflight.since = new Date(Date.now() - 3 * 3600_000).toISOString();
+      writeFileSync(join(x.fleet, "lock.json"), JSON.stringify(held, null, 2));
+      const late = async(x, ["--resume"], { FINISHED_AGO: "170", EVENTS_FAIL: "1" });
+      check(
+        "une lecture ratee a la conclusion tardive laisse l'app en vol",
+        [late.out.status, flightOf(late.lock, DELTA)?.step, /INTERROMPU/.test(late.out.output), /lecture impossible, l'app reste en vol/.test(late.out.output)],
+        [0, "deploy", false, true],
+      );
+    }
+
+    // Une interruption constatee par une reprise qui ne referme pas atteint le
+    // tableau de bord a la fermeture, avec ses notifications.
+    {
+      const x = sandbox();
+      const both = bumpedAlpha.replace(/(delta-metabase[\s\S]*?version: )v0\.63\.18/, "$1v0.63.19");
+      writeFileSync(join(x.fleet, "manifest.yaml"), both);
+      async(x, [], { BACKUP_STATUS: "scheduled" });
+      const held = JSON.parse(readFileSync(join(x.fleet, "lock.json"), "utf8"));
+      held.apps[ALPHA].inflight.since = new Date(Date.now() - 7 * 3600_000).toISOString();
+      writeFileSync(join(x.fleet, "lock.json"), JSON.stringify(held, null, 2));
+      const cut = async(x, ["--resume"], { BACKUP_STATUS: "scheduled" });
+      const closing = async(x, ["--resume"]);
+      check(
+        "une interruption vue en reprise figure au tableau de bord a la fermeture",
+        [cut.out.status, cut.report, closing.lock.rollout ?? null, /alpha-metabase\*\* : interrompu : sauvegarde bkp-neuve non conclue/.test(closing.report ?? "")],
+        [1, null, null, true],
+      );
+    }
+
+    // Un build pas encore conclu laisse l'app en vol, sans rien relancer.
+    const slow = sandbox();
+    writeFileSync(join(slow.fleet, "manifest.yaml"), bumped);
+    async(slow, ["--app", "delta"]);
+    const building = async(slow, ["--resume"], { DEPLOY_STATUS: "building" });
+    check(
+      "un build en cours laisse l'app en vol",
+      [building.out.status, flightOf(building.lock, DELTA)?.step, building.writes],
+      [0, "deploy", []],
+    );
+
+    // Un passage parti d'un lock perime ne sait pas qu'un deploiement tourne
+    // deja. Scalingo le sait, et rien n'est lance par-dessus.
+    const busy = sandbox();
+    writeFileSync(join(busy.fleet, "manifest.yaml"), bumped);
+    const crowded = async(busy, ["--app", "delta"], { REAL: JSON.stringify({ ...real, [DELTA]: { ...real[DELTA], status: "building" } }) });
+    check(
+      "un deploiement deja en cours sur Scalingo n'est pas doublonne",
+      [crowded.out.status, crowded.writes, flightOf(crowded.lock, DELTA), /deja en cours sur Scalingo/.test(crowded.out.output)],
+      [0, [], null, true],
+    );
+
+    // Le releve ecraserait l'etat en vol : il passe son tour sur ces apps.
+    const rel = sandbox();
+    writeFileSync(join(rel.fleet, "manifest.yaml"), bumped);
+    async(rel, ["--app", "delta"]);
+    const relOut = run(rel, "apply.ts", ["--reconcile", "--async", ...FLEET, "--out-dir", "../sortie"], {
+      SCALINGO_API_TOKEN: "faux",
+      REAL: JSON.stringify(real),
+      DEPLOY_STATUS: "building",
+    });
+    const relLock = loadLock(join(rel.fleet, "lock.json"));
+    check(
+      "le releve ne touche pas une app en vol",
+      [relOut.status, /en vol, releve differe/.test(relOut.output), flightOf(relLock, DELTA)?.step],
+      [0, true, "deploy"],
     );
   }
 

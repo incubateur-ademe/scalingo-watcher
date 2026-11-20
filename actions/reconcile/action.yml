@@ -47,6 +47,18 @@ inputs:
       equivalent), plusieurs separees par des blancs. Passer
       secrets.HEARTBEAT_URL, meme vide.
     required: true
+  async:
+    description: >
+      "true" pour un passage qui rend la main, l'etat en vol dans le lock, la
+      suite revenant au relais ou au cron. A n'activer qu'avec un relais.
+    required: false
+    default: "false"
+  resume:
+    description: >
+      "true" pour faire avancer le deploiement en cours sans en ouvrir un : le
+      passage que declenche le relais, par l'input resume du workflow_dispatch.
+    required: false
+    default: "false"
   matrix-homeserver:
     description: Serveur Matrix du compte bot qui notifie (Tchap ou autre)
     required: false
@@ -81,8 +93,9 @@ inputs:
     default: "chore(lock): etat du parc apres reconciliation"
   checkout:
     description: >
-      "false" quand le job a deja recupere le depot du parc avec un jeton qui
-      peut pousser. Par defaut, l'action le recupere elle-meme avec push-token.
+      "false" quand le job a deja recupere le depot du parc, a la tete de
+      github.ref, avec un jeton qui peut pousser. Par defaut, l'action le
+      recupere elle-meme avec push-token.
     required: false
     default: "true"
 
@@ -95,6 +108,8 @@ runs:
       shell: bash
       env:
         DRY_RUN: ${{ inputs.dry-run }}
+        ASYNC: ${{ inputs.async }}
+        RESUME: ${{ inputs.resume }}
         FGP_KEY: ${{ inputs.fgp-key }}
         SCALINGO_API_TOKEN: ${{ inputs.scalingo-api-token }}
       run: |
@@ -106,6 +121,17 @@ runs:
             exit 1
             ;;
         esac
+        # Vide vaut false : un cron ou un push n'ont pas d'inputs, et
+        # ${{ inputs.resume }} y arrive vide. Faux, il donne un passage ordinaire.
+        for pair in "async=$ASYNC" "resume=$RESUME"; do
+          case "${pair#*=}" in
+            true|false|"") ;;
+            *)
+              echo "::error::${pair%%=*} vaut '${pair#*=}' : attendu true ou false"
+              exit 1
+              ;;
+          esac
+        done
         if [ -z "$FGP_KEY" ] && [ -z "$SCALINGO_API_TOKEN" ]; then
           if [ "$DRY_RUN" = "true" ]; then
             echo "::warning::ni fgp-key ni scalingo-api-token : le plan ignore l'etat reel des apps. Le job declare-t-il l'environment qui porte les secrets ?"
@@ -119,9 +145,14 @@ runs:
           exit 1
         fi
 
+    # La tete de la branche, et non le commit de l'evenement : un passage mis en
+    # file derriere un autre garde le sha de sa creation, et relirait un lock
+    # d'avant ce que le precedent a lance. En asynchrone, il relancerait ce qui
+    # est deja en vol.
     - if: ${{ inputs.checkout == 'true' }}
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
+        ref: ${{ github.ref }}
         token: ${{ inputs.push-token || github.token }}
 
     - id: outil
@@ -142,6 +173,8 @@ runs:
         FGP_KEY: ${{ inputs.fgp-key }}
         GITHUB_TOKEN: ${{ github.token }}
         DRY_RUN: ${{ inputs.dry-run }}
+        ASYNC: ${{ inputs.async }}
+        RESUME: ${{ inputs.resume }}
         MANIFEST_PATH: ${{ inputs.manifest-path }}
         LOCK_PATH: ${{ inputs.lock-path }}
         FGP_PATH: ${{ inputs.fgp-path }}
@@ -150,6 +183,8 @@ runs:
         mkdir -p "$out"
         args=(--reconcile --manifest "$MANIFEST_PATH" --lock "$LOCK_PATH" --fgp "$FGP_PATH" --out-dir "$out")
         if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+        if [ "$ASYNC" = "true" ]; then args+=(--async); fi
+        if [ "$RESUME" = "true" ]; then args+=(--resume); fi
         # Sans pipefail, le code retenu serait celui de tee : une convergence
         # en echec ressortait en vert.
         set -o pipefail

@@ -33,7 +33,7 @@ export type ActionInputs = Record<string, { required?: boolean } | null>;
 /** Inputs de l'action `name` a la version `ref`, null si elle n'y existe pas. */
 export type InputsAt = (name: string, ref: string) => ActionInputs | null;
 
-type Concurrency = string | { group?: unknown; "cancel-in-progress"?: unknown } | null | undefined;
+type Concurrency = string | { group?: unknown; "cancel-in-progress"?: unknown; queue?: unknown } | null | undefined;
 type Step = { uses?: unknown; with?: unknown } | null;
 type Job = { uses?: unknown; steps?: unknown; concurrency?: Concurrency } | null;
 type Workflow = { concurrency?: Concurrency; jobs?: Record<string, Job> } | null;
@@ -53,10 +53,20 @@ function concurrencyErrors(where: string, action: string, top: Concurrency, own:
   if (atTop !== undefined && atTop === atJob) {
     errors.push(`${where} : groupe ${String(atTop)} declare au niveau du workflow et du job, GitHub annule le run pour interblocage. Le garder au seul niveau du job.`);
   }
-  if (CONVERGING.has(action) && atTop !== LOCK_GROUP && atJob !== LOCK_GROUP) {
+  const locked = atJob === LOCK_GROUP ? own : atTop === LOCK_GROUP ? top : undefined;
+  if (CONVERGING.has(action) && locked === undefined) {
     errors.push(
       `${where} : actions/${action} converge hors du groupe de concurrence ${LOCK_GROUP}, deux convergences pourraient tourner en parallele. ` +
-        `Declarer sur le job : concurrency: { group: ${LOCK_GROUP}, cancel-in-progress: false }`,
+        `Declarer sur le job : concurrency: { group: ${LOCK_GROUP}, cancel-in-progress: false, queue: max }`,
+    );
+  }
+  // Par defaut, GitHub ne garde qu'un passage en attente par groupe et annule
+  // le precedent : un dispatch de reprise annulerait un passage ordinaire, seul
+  // a pouvoir ouvrir un deploiement.
+  if (CONVERGING.has(action) && locked !== undefined && (typeof locked !== "object" || locked?.queue !== "max")) {
+    errors.push(
+      `${where} : le groupe ${LOCK_GROUP} doit declarer queue: max, sans quoi un passage en attente est annule par le suivant. ` +
+        `Declarer sur le job : concurrency: { group: ${LOCK_GROUP}, cancel-in-progress: false, queue: max }`,
     );
   }
   if (PROPOSING.has(action) && !atTop && !atJob) {
@@ -65,7 +75,7 @@ function concurrencyErrors(where: string, action: string, top: Concurrency, own:
         `Declarer sur le job : concurrency: { group: scalingo-watcher-${action}, cancel-in-progress: false }`,
     );
   }
-  if (PROPOSING.has(action) && (atTop === LOCK_GROUP || atJob === LOCK_GROUP)) {
+  if (PROPOSING.has(action) && locked !== undefined) {
     errors.push(
       `${where} : actions/${action} tourne sous le verrou ${LOCK_GROUP} de la convergence, qu'elle retiendrait sans y toucher. ` +
         `Declarer sur le job : concurrency: { group: scalingo-watcher-${action}, cancel-in-progress: false }`,

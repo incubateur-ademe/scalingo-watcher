@@ -15,6 +15,7 @@ jobs:
     concurrency:
       group: scalingo-apply
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: incubateur-ademe/scalingo-watcher/actions/reconcile@v2
         with:

@@ -24,6 +24,17 @@ inputs:
     description: '"true" pour redeployer meme si l''app est deja conforme (exige app)'
     required: false
     default: "false"
+  async:
+    description: >
+      "true" pour un passage qui rend la main, l'etat en vol dans le lock, la
+      suite revenant au relais ou au cron. A n'activer qu'avec un relais.
+    required: false
+    default: "false"
+  resume:
+    description: >
+      "true" pour faire avancer le deploiement en cours sans en ouvrir un.
+    required: false
+    default: "false"
   fgp-key:
     description: Cle du proxy FGP, lue avec fgp-path. Passer secrets.FGP_KEY, meme vide.
     required: true
@@ -78,8 +89,9 @@ inputs:
     default: "chore(lock): etat du parc apres deploiement"
   checkout:
     description: >
-      "false" quand le job a deja recupere le depot du parc avec un jeton qui
-      peut pousser. Par defaut, l'action le recupere elle-meme avec push-token.
+      "false" quand le job a deja recupere le depot du parc, a la tete de
+      github.ref, avec un jeton qui peut pousser. Par defaut, l'action le
+      recupere elle-meme avec push-token.
     required: false
     default: "true"
 
@@ -93,6 +105,8 @@ runs:
       env:
         DRY_RUN: ${{ inputs.dry-run }}
         FORCE: ${{ inputs.force }}
+        ASYNC: ${{ inputs.async }}
+        RESUME: ${{ inputs.resume }}
         FGP_KEY: ${{ inputs.fgp-key }}
         SCALINGO_API_TOKEN: ${{ inputs.scalingo-api-token }}
       run: |
@@ -100,6 +114,17 @@ runs:
         for pair in "dry-run=$DRY_RUN" "force=$FORCE"; do
           case "${pair#*=}" in
             true|false) ;;
+            *)
+              echo "::error::${pair%%=*} vaut '${pair#*=}' : attendu true ou false"
+              exit 1
+              ;;
+          esac
+        done
+        # Vide vaut false : un cron ou un push n'ont pas d'inputs, et
+        # ${{ inputs.resume }} y arrive vide. Faux, il donne un passage ordinaire.
+        for pair in "async=$ASYNC" "resume=$RESUME"; do
+          case "${pair#*=}" in
+            true|false|"") ;;
             *)
               echo "::error::${pair%%=*} vaut '${pair#*=}' : attendu true ou false"
               exit 1
@@ -119,9 +144,14 @@ runs:
           exit 1
         fi
 
+    # La tete de la branche, et non le commit de l'evenement : un passage mis en
+    # file derriere un autre garde le sha de sa creation, et relirait un lock
+    # d'avant ce que le precedent a lance. En asynchrone, il relancerait ce qui
+    # est deja en vol.
     - if: ${{ inputs.checkout == 'true' }}
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
+        ref: ${{ github.ref }}
         token: ${{ inputs.push-token || github.token }}
 
     - id: outil
@@ -144,6 +174,8 @@ runs:
         DRY_RUN: ${{ inputs.dry-run }}
         APP: ${{ inputs.app }}
         FORCE: ${{ inputs.force }}
+        ASYNC: ${{ inputs.async }}
+        RESUME: ${{ inputs.resume }}
         MANIFEST_PATH: ${{ inputs.manifest-path }}
         LOCK_PATH: ${{ inputs.lock-path }}
         FGP_PATH: ${{ inputs.fgp-path }}
@@ -156,6 +188,8 @@ runs:
         if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
         if [ -n "$APP" ]; then args+=(--app "$APP"); fi
         if [ "$FORCE" = "true" ]; then args+=(--force); fi
+        if [ "$ASYNC" = "true" ]; then args+=(--async); fi
+        if [ "$RESUME" = "true" ]; then args+=(--resume); fi
         set -o pipefail
         node .scalingo-watcher/src/apply.ts "${args[@]}" | tee "$out/apply.log"
 

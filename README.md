@@ -68,7 +68,8 @@ la racine de l'outil :
 | `propose-security` | `src/apply.ts --propose-security` | Monte les versions que les avis de l'amont couvrent, dans le manifeste |
 | `init` | `src/init.ts` | Écrit un premier manifeste depuis l'état réel |
 | `fgp:blobs` | `src/fgp-blobs.ts` | Génère `fgp.json` pour le proxy FGP |
-| `test` | `test/test.ts` | Tests hors ligne |
+| `notifiers` | `src/notifiers.ts` | Pose les notifiers Scalingo qui appellent le relais |
+| `test` | `test/test.ts`, `test/relay.test.ts`, `test/notifiers.test.ts` | Tests hors ligne |
 | `typecheck` | `tsc --noEmit` | Vérification des types |
 
 `pnpm init`, `pnpm audit` et `pnpm prune` sont des commandes de pnpm, qui
@@ -100,7 +101,10 @@ Par commande :
 - `apply.ts` : `--dry-run`, `--app <fragment>`, `--force` (redéploie une app
   conforme, exige `--app`), `--reconcile`, `--prune`, `--validate`, `--adopt`
   (amorce le lock depuis l'état réel, sans déployer), `--propose-db`,
-  `--propose-security`.
+  `--propose-security`, `--async` (un passage puis rend la main, l'état en vol
+  dans le lock), `--resume` (fait avancer le déploiement en cours sans en ouvrir).
+- `notifiers.ts` : `--dry-run`, `--app <fragment>`, `--remove`. Lit
+  `SCALINGO_API_TOKEN` et `RELAY_URL` dans l'environnement.
 - `audit.ts` : `--app <fragment>`, `--region <nom>` (répétable, prime sur les
   régions du manifeste), `--json` (inventaire complet sur la sortie standard),
   `--no-build-log`.
@@ -150,6 +154,7 @@ Inputs :
 | `push-token` | toutes sauf `validate` | requis |
 | `teams-webhook`, `slack-webhook`, `matrix-access-token` | `reconcile`, `apply` | requis |
 | `heartbeat-url` | `reconcile` | requis (voir [Veille de silence](#veille-de-silence)) |
+| `async`, `resume` | `reconcile`, `apply` | `"false"`, `"false"` (voir [Relais et notifiers](FEATURES.md#relais-et-notifiers)) |
 | `matrix-homeserver`, `matrix-room-id` | `reconcile`, `apply` | `""` (notification Matrix désactivée) |
 | `manifest-path`, `lock-path` | toutes | `manifest.yaml`, `lock.json` |
 | `fgp-path` | toutes sauf `propose-security` | `fgp.json` |
@@ -159,7 +164,7 @@ Inputs :
 | `branch`, `commit-message` | `propose-db` | `montee-base`, `chore(base): proposer la montee de version des bases` |
 | `branch`, `commit-message` | `propose-security` | `montee-securite`, `fix(securite): monter les versions couvertes par un avis amont` |
 | `comment` | `validate` | `"true"` ; `"false"` publie le plan dans le seul résumé du job |
-| `checkout` | toutes | `"true"` ; `"false"` quand le job a déjà récupéré le dépôt avec un jeton qui peut pousser, `push-token` ne servant plus alors qu'aux pull requests des propositions |
+| `checkout` | toutes | `"true"` ; `"false"` quand le job a déjà récupéré le dépôt, à la tête de `github.ref`, avec un jeton qui peut pousser, `push-token` ne servant plus alors qu'aux pull requests des propositions |
 
 Un input est une chaîne : `"true"` et `"false"` s'écrivent entre guillemets ou
 sortent d'une expression. GitHub ne vérifie pas les inputs d'une action. Un
@@ -167,6 +172,8 @@ input inconnu ne donne qu'un avertissement, un input requis absent arrive vide.
 Un input requis s'écrit donc toujours, même quand le secret qu'il porte est
 vide. `dry-run` n'a pas de défaut pour `reconcile` : une clé mal orthographiée
 arrête le passage au lieu de déployer.
+Vides, `async` et `resume` valent `"false"`, ce qui couvre un cron ou un push
+sans inputs.
 
 Le job lit les secrets de l'environment qu'il déclare et les passe en inputs.
 Les secrets d'accès et `PUSH_TOKEN` ont leur place dans l'environment, réservé à
@@ -175,8 +182,11 @@ Les secrets d'accès et `PUSH_TOKEN` ont leur place dans l'environment, réserv�
 
 **Le verrou de la convergence est déclaré par le parc.** Les jobs qui appellent
 `reconcile` et `apply` déclarent le groupe `scalingo-apply` avec
-`cancel-in-progress: false`, au niveau du job. C'est la seule garde contre deux
-convergences en parallèle, et le nom doit rester exactement celui-ci. Le même
+`cancel-in-progress: false` et `queue: max`, au niveau du job. C'est la seule
+garde contre deux convergences en parallèle, et le nom doit rester exactement
+celui-ci. Sans `queue: max`, GitHub ne garde qu'un passage en attente par groupe
+et annule le précédent, si bien qu'une reprise lancée par le relais annulerait
+un passage ordinaire. Le même
 groupe déclaré aussi au niveau du workflow fait annuler le run par GitHub pour
 interblocage. Un `cancel-in-progress` autre que `false`, à l'un ou l'autre
 niveau et quel que soit le groupe, peut annuler un passage en cours. Chaque
@@ -218,6 +228,7 @@ jobs:
     concurrency:
       group: scalingo-apply
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: incubateur-ademe/scalingo-watcher/actions/reconcile@<sha> # v2.0.0
         with:
@@ -273,7 +284,8 @@ Pour chaque appelant :
 1. Le job perd `uses:`, `with:` et `secrets:`. Il gagne `runs-on`,
    `environment` (l'ancien input du même nom), un groupe de concurrence et un pas
    `uses: incubateur-ademe/scalingo-watcher/actions/<nom>@<sha> # v2.x.y`. Le
-   groupe vaut `scalingo-apply` pour `reconcile` et `apply`,
+   groupe vaut `scalingo-apply` pour `reconcile` et `apply`, avec
+   `cancel-in-progress: false` et `queue: max`,
    `scalingo-watcher-propose-db` et `scalingo-watcher-propose-security` pour les
    propositions : ce sont ceux que posait l'outil.
 2. Chaque secret mappé devient un input sous `with:` : `FGP_KEY` devient
@@ -284,7 +296,9 @@ Pour chaque appelant :
 3. `dry_run` devient `dry-run`, une chaîne. Depuis un input booléen de
    `workflow_dispatch`, `${{ inputs.dry_run == true }}` donne `"true"` ou
    `"false"`.
-4. Les autres inputs gardent leur nom.
+4. Les autres inputs gardent leur nom. Un parc qui utilise le relais garde
+   l'input `resume` de son `workflow_dispatch` et le passe en
+   `resume: ${{ inputs.resume == true }}`.
 
 La pull request de migration fait tourner la `validate` de la v2, qui contrôle
 les autres appelants.

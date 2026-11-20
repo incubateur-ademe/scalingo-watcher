@@ -20,7 +20,8 @@
     "propose-security": "node src/apply.ts --propose-security",
     "init": "node src/init.ts",
     "fgp:blobs": "node src/fgp-blobs.ts",
-    "test": "node test/test.ts",
+    "notifiers": "node src/notifiers.ts",
+    "test": "node test/test.ts && node test/relay.test.ts && node test/notifiers.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
