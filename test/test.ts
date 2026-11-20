@@ -957,6 +957,9 @@ console.log("\nActions de l'outil");
       const where = `${name}, pas ${i + 1}`;
       for (const key of Object.keys(step).filter((k) => !STEP_KEYS.has(k))) problems.push(`${where} : cle ${key} refusee dans une composite`);
       if ("run" in step && !("shell" in step)) problems.push(`${where} : run sans shell`);
+      // GitHub remplace l'expression dans le script avant que bash ne le lise,
+      // commentaires compris : une valeur d'input y deviendrait du code.
+      if (typeof step.run === "string" && step.run.includes("${{")) problems.push(where + " : expression ${{ }} dans le script, a passer par env");
       const cond = typeof step.if === "string" ? step.if : "";
       if (/!\s*inputs\./.test(cond)) problems.push(`${where} : !inputs.x vaut toujours faux, un input etant une chaine`);
       const uses = typeof step.uses === "string" ? step.uses : "";

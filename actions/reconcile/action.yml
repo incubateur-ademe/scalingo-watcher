@@ -121,8 +121,8 @@ runs:
             exit 1
             ;;
         esac
-        # Vide vaut false : un cron ou un push n'ont pas d'inputs, et
-        # ${{ inputs.resume }} y arrive vide. Faux, il donne un passage ordinaire.
+        # Vide vaut false. Un cron ou un push n'ont pas d'inputs, et l'expression
+        # inputs.resume de l'appelant y arrive vide.
         for pair in "async=$ASYNC" "resume=$RESUME"; do
           case "${pair#*=}" in
             true|false|"") ;;
