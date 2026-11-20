@@ -42,11 +42,16 @@ import {
   isRepoRef,
   isShaRef,
   keptBuild,
+  keptQuarantine,
   loadLock,
+  LOST_VERDICT,
   parseBuildpackRef,
   policyReadByRenovate,
   readManifest,
   inRebuildWindow,
+  rebuildPlan,
+  rebuildRefusal,
+  rebuildSuspendedBy,
   REBUILD_AFTER_DAYS,
   RENAMED_FIELDS,
   resolveAliases,
@@ -2380,6 +2385,109 @@ check(
     { deployment: "dep-1", version: "v1", stack: "img", runtimes: JDK_LU },
     { deployment: "dep-2", version: "v1", stack: "img", runtimes: [] },
   ],
+);
+
+const CIBLE = { sha: "a".repeat(40), version: "v0.63.18" };
+const BUILD_EN_SERVICE: { deployment: string; version: string | null; stack: null; runtimes: null } = {
+  deployment: "dep-1",
+  version: "v0.63.18",
+  stack: null,
+  runtimes: null,
+};
+const LOCK_CONFORME = {
+  source: { repo: "exemple/metabase-scalingo", sha: CIBLE.sha },
+  tool: { env: "METABASE_VERSION", version: "v0.63.18" },
+  buildpacks: [],
+  deployment: { id: "dep-1", status: "success", at: "2026-11-01T00:00:00.000Z" },
+  build: BUILD_EN_SERVICE,
+  backup: null,
+  quarantine: null,
+};
+const deploiement = (id: string, status: string, git_ref: string = CIBLE.sha) => ({ id, status, created_at: "2026-11-01T00:00:00.000Z", git_ref });
+const refus = (lock: Parameters<typeof rebuildRefusal>[0], liste: ReturnType<typeof deploiement>[], variable: string | null, lift = false) =>
+  rebuildRefusal(lock, liste, variable, CIBLE, "METABASE_VERSION", lift)?.outcome ?? null;
+const versionDuBuild = (version: string | null) => ({ ...LOCK_CONFORME, build: { ...BUILD_EN_SERVICE, version } });
+check(
+  "un rebuild ne part que sur le build en service, au meme commit, a la meme version, variable comprise",
+  [
+    refus(LOCK_CONFORME, [deploiement("dep-1", "success")], "v0.63.18"),
+    refus(LOCK_CONFORME, [deploiement("dep-2", "build-error"), deploiement("dep-1", "success")], "v0.63.18"),
+    refus(LOCK_CONFORME, [deploiement("dep-2", "success"), deploiement("dep-1", "success")], "v0.63.18"),
+    refus(LOCK_CONFORME, [deploiement("dep-2", "build-error")], "v0.63.18"),
+    refus(LOCK_CONFORME, [deploiement("dep-1", "success", "main")], "v0.63.18"),
+    refus(versionDuBuild("v0.63.17"), [deploiement("dep-1", "success")], "v0.63.18"),
+    refus(versionDuBuild("v0.63.17"), [deploiement("dep-1", "success")], "v0.63.18", true),
+    refus(versionDuBuild(null), [deploiement("dep-1", "success")], "v0.63.18"),
+    refus(LOCK_CONFORME, [deploiement("dep-1", "success")], "v0.63.19"),
+  ],
+  [null, null, "skipped-state", "skipped-state", "up-to-date", "skipped-state", "quarantined-skip", "skipped-state", "skipped-state"],
+);
+const NUIT_FIXE = Date.parse("2026-11-20T03:00:00.000Z");
+const plan = (lock: Parameters<typeof rebuildPlan>[0], suspendu: string | null, now: number, rebuild: boolean, reconcile: boolean) => {
+  const r = rebuildPlan(lock, suspendu, now, { rebuild, reconcile });
+  return r === null ? null : "due" in r ? `due : ${r.due}` : `plus tard : ${r.later}`;
+};
+const { build: _sansBuild, ...SANS_BUILD } = LOCK_CONFORME;
+check(
+  "le plan d'un rebuild : --rebuild d'abord, puis l'age, le build releve, la suspension et la plage",
+  [
+    plan(LOCK_CONFORME, "r/x", Date.parse("2026-11-20T12:00:00.000Z"), true, false),
+    plan(LOCK_CONFORME, null, NUIT_FIXE, false, false),
+    plan({ ...LOCK_CONFORME, deployment: { ...LOCK_CONFORME.deployment, at: "2026-11-15T00:00:00.000Z" } }, null, NUIT_FIXE, false, true),
+    plan(SANS_BUILD, null, NUIT_FIXE, false, true),
+    plan(LOCK_CONFORME, "r/x", NUIT_FIXE, false, true),
+    plan(LOCK_CONFORME, null, Date.parse("2026-11-20T12:00:00.000Z"), false, true),
+    plan(LOCK_CONFORME, null, NUIT_FIXE, false, true),
+  ],
+  [
+    "due : demande par --rebuild",
+    null,
+    null,
+    "plus tard : build du 2026-11-01, vieux de 19 jours, build en service pas encore releve",
+    "plus tard : build du 2026-11-01, vieux de 19 jours, rebuilds par age suspendus",
+    "plus tard : build du 2026-11-01, vieux de 19 jours, refait entre 0 h et 5 h UTC",
+    "due : build du 2026-11-01, vieux de 19 jours",
+  ],
+);
+const appsSuspension = [
+  { app: "alpha", region: "r", paused: false },
+  { app: "beta", region: "r", paused: true },
+] as unknown as Parameters<typeof rebuildSuspendedBy>[1];
+const suspensionDe = (marques: string[]) =>
+  rebuildSuspendedBy(
+    {
+      version: 1,
+      generatedAt: "",
+      apps: Object.fromEntries(marques.map((k) => [k, { ...LOCK_CONFORME, quarantine: { target: CIBLE, reason: "build-error", at: "", deploymentId: null, rebuild: true as const } }])),
+    } as unknown as Parameters<typeof rebuildSuspendedBy>[0],
+    appsSuspension,
+  );
+check(
+  "seule une app active du manifeste suspend les rebuilds, jamais une app en pause ni une orpheline",
+  [suspensionDe(["r/beta"]), suspensionDe(["r/orpheline"]), suspensionDe(["r/beta", "r/alpha"])],
+  [null, null, "r/alpha"],
+);
+const perdu = { target: CIBLE, reason: LOST_VERDICT, at: "", deploymentId: "dep-2", rebuild: true as const };
+const releve = (id: string, status: string) => ({ ...LOCK_CONFORME, deployment: { id, status, at: "" } });
+check(
+  "le verdict perdu d'un rebuild se lit au releve sur le meme deploiement",
+  [
+    keptQuarantine(releve("dep-2", "success"), CIBLE, perdu),
+    keptQuarantine(releve("dep-2", "build-error"), CIBLE, perdu)?.reason,
+    keptQuarantine(releve("dep-2", "building"), CIBLE, perdu)?.reason,
+    keptQuarantine(releve("dep-3", "success"), CIBLE, perdu),
+  ],
+  [null, "build-error, constate au releve", LOST_VERDICT, null],
+);
+check(
+  "un rebuild reussi rend le role d'eclaireur sans valider la vague",
+  scoutAfter({ scout: "r/a", scoutPassed: false, interruptedScouts: 1, stopped: null }, "r/a", "rebuilt"),
+  { scout: null, scoutPassed: false, interruptedScouts: 0, stopped: null },
+);
+check(
+  "--rebuild change l'empreinte du deploiement, son absence ne la change pas",
+  [rolloutFingerprint([], null, false) === rolloutFingerprint([], null, false, false), rolloutFingerprint([], null, false) === rolloutFingerprint([], null, false, true)],
+  [true, false],
 );
 
 console.log("\nCommandes lancees hors du depot, contre un fetch simule");
@@ -5155,6 +5263,196 @@ try {
     return [e.buildpacks, e.build?.runtimes];
   })();
   check("le releve d'une app en pause garde lui aussi ce qu'un journal illisible ne dit plus", pauseMuette, [BUILDPACKS_CONNUS, JDK_LU]);
+
+  console.log("\nRebuild par age dans la machine a etats du deploiement");
+
+  const APP_GAMMA = "osc-secnum-fr1/gamma-metabase";
+  const APP_DELTA = "osc-secnum-fr1/delta-metabase";
+  const ENV_RT = {
+    SCALINGO_API_TOKEN: "faux",
+    JDK: "25.0.5.0.3",
+    STACK_IMAGE: "scalingo/scalingo-24:v10",
+    STACK_CURRENT: "scalingo/scalingo-24:v11",
+    SYSTEM_PROPERTIES: "java.runtime.version=25\n",
+    INVENTORY: inventaireJson("25.0.5.1"),
+    UPSTREAM_INVENTORY: inventaireJson("25.0.5.1"),
+  };
+  const TROIS_RELEVABLES = JSON.stringify({
+    [RT]: { version: "v0.63.18", sha: "a".repeat(40) },
+    [APP_GAMMA]: { version: "v0.63.18", sha: "b".repeat(40) },
+    [APP_DELTA]: { version: "v0.63.18", sha: "a".repeat(40) },
+  });
+  const lances = (calls: string[]) =>
+    calls.flatMap((l) => {
+      const m = /^POST \S+\/apps\/([^/]+)\/deployments$/.exec(l);
+      return m ? [m[1]] : [];
+    });
+  const sauvegardes = (calls: string[]) => calls.filter((l) => /backup/i.test(l)).length;
+  const enSuite = (manifeste: string, lockSrc: string | null, passages: Array<{ args: string[]; env: Record<string, string> }>) => {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), manifeste);
+    if (lockSrc) writeFileSync(join(b.fleet, "lock.json"), lockSrc);
+    return passages.map(({ args, env }) => {
+      const out = run(b, "apply.ts", [...args, ...FLEET, "--out-dir", "../sortie"], { ...ENV_RT, ...env });
+      return { out, lock: loadLock(join(b.fleet, "lock.json")) };
+    });
+  };
+
+  const nuitVieille = { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10), REAL: TROIS_RELEVABLES };
+  const [lance, reprise] = enSuite(sansAttenteAlpha, null, [
+    { args: ["--reconcile", "--async"], env: nuitVieille },
+    { args: ["--reconcile", "--async", "--resume"], env: { ...nuitVieille, TRIGGERED: "alpha-metabase", JDK_AFTER: "25.0.5.1" } },
+  ]);
+  check(
+    "en --async, le passage de nuit lance un seul rebuild, l'eclaireur, sans sauvegarde",
+    [lance.out.status, lances(lance.out.calls), sauvegardes(lance.out.calls), lance.lock.apps[RT].inflight?.rebuild, lance.lock.apps[APP_GAMMA].inflight ?? null],
+    [0, ["alpha-metabase"], 0, true, null],
+  );
+  check(
+    "la reprise conclut le rebuild, consigne le build, puis lance les deux suivants de front",
+    [
+      reprise.out.status,
+      /Rebuild reussi, chaine de build saine/.test(reprise.out.output),
+      reprise.lock.apps[RT].inflight ?? null,
+      reprise.lock.apps[RT].build?.version,
+      reprise.lock.apps[RT].build?.runtimes?.[0]?.version,
+      lances(reprise.out.calls),
+      sauvegardes(reprise.out.calls),
+      reprise.lock.apps[APP_GAMMA].inflight?.rebuild,
+      reprise.lock.apps[APP_DELTA].inflight?.rebuild,
+    ],
+    [0, true, null, "v0.63.18", "25.0.5.1", ["gamma-metabase", "delta-metabase"], 0, true, true],
+  );
+
+  const alphaMonte = sansAttenteAlpha.replace("version: v0.63.18\n\n  - app: beta-metabase", "version: v0.63.19\n\n  - app: beta-metabase");
+  const [monteeEnVol] = enSuite(alphaMonte, null, [{ args: ["--reconcile", "--async"], env: nuitVieille }]);
+  check(
+    "aucun rebuild ne part a cote d'une montee qui attend son eclaireur",
+    [monteeEnVol.out.status, monteeEnVol.lock.apps[RT].inflight?.step, monteeEnVol.lock.apps[RT].inflight?.rebuild ?? null, monteeEnVol.lock.apps[APP_GAMMA].inflight ?? null],
+    [0, "backup", null, null],
+  );
+
+  const monteeCachee = passage(
+    ["--reconcile"],
+    { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10) },
+    lockAvec((alpha) => {
+      alpha.tool = { env: "METABASE_VERSION", version: "v0.63.17" };
+      alpha.deployment = { id: "dep-alpha-metabase", status: "success", at: avant(NUIT, 10) };
+    }),
+  );
+  check(
+    "une variable posee sans build ne vaut pas montee : le releve garde la version servie, et la montee se fait avec sauvegarde",
+    [
+      /METABASE_VERSION porte v0\.63\.18, qu'aucun build n'a servi depuis dep-alpha-metabase : v0\.63\.17 gardee/.test(monteeCachee.out.output),
+      /outil v0\.63\.17 -> v0\.63\.18/.test(monteeCachee.out.output),
+      /rebuild a l'identique/.test(monteeCachee.out.output),
+      monteeCachee.backups > 0,
+      monteeCachee.deployments,
+    ],
+    [true, true, false, true, 1],
+  );
+
+  const variableBougee = passage(
+    ["--reconcile"],
+    { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10), REAL: JSON.stringify({ [RT]: { version: "v0.63.19", sha: "a".repeat(40) } }) },
+    lockAvec((alpha) => {
+      alpha.deployment = { id: "dep-alpha-metabase", status: "success", at: avant(NUIT, 10) };
+      alpha.build = { deployment: "dep-alpha-metabase", version: "v0.63.18", stack: "scalingo/scalingo-24:v10", runtimes: JDK_LU };
+    }),
+  );
+  check(
+    "un rebuild n'ecrit jamais la variable, et ne part pas quand elle a bouge sans build",
+    [variableBougee.deployments, variableBougee.out.calls.some((l) => /^(POST|PATCH) \S+\/variables/.test(l)), /METABASE_VERSION porte v0\.63\.19, pas la version du build en service/.test(variableBougee.out.output)],
+    [0, false, true],
+  );
+
+  const sansCommit = passage(["--reconcile"], { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10), REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "main" } }) });
+  check(
+    "un build en service sans commit lisible n'est jamais refait, et l'app reste conforme",
+    [sansCommit.out.status, sansCommit.deployments, /build en service sans commit lisible \(git_ref "main"\), rebuild impossible/.test(sansCommit.out.output), /non deployables 0/.test(sansCommit.out.output)],
+    [0, 0, true, true],
+  );
+
+  const quarantaineDeRebuild = (deploymentId: string, version: string) =>
+    lockAvec((alpha) => {
+      alpha.backup = { id: "bkp-42", at: "2026-11-01T03:00:00.000Z" };
+      alpha.build = { deployment: "dep-ancien", version, stack: "scalingo/scalingo-24:v10", runtimes: JDK_LU };
+      alpha.quarantine = { target: { sha: "a".repeat(40), version: "v0.63.18" }, reason: "build-error", at: "2026-11-18T03:00:00.000Z", deploymentId, rebuild: true };
+    });
+  const deuxEchecs = passage(["--rebuild", "--app", "alpha"], {
+    REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40), status: "build-error" } }),
+    AFTER_STATUS: JSON.stringify({ "alpha-metabase": "success" }),
+    DEPLOYMENTS: JSON.stringify({ [RT]: [{ id: "dep-alpha-metabase", status: "build-error" }, { id: "dep-rate", status: "build-error" }, { id: "dep-ancien", status: "success" }] }),
+  }, quarantaineDeRebuild("dep-rate", "v0.63.18"));
+  check(
+    "--rebuild --app leve encore la quarantaine quand un autre build a echoue depuis",
+    [deuxEchecs.out.status, deuxEchecs.deployments, deuxEchecs.backups, deuxEchecs.entry.quarantine],
+    [0, 1, 0, null],
+  );
+  const monteeRateeLevee = passage(["--rebuild", "--app", "alpha"], {
+    REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40), status: "build-error" } }),
+    DEPLOYMENTS: JSON.stringify({ [RT]: [{ id: "dep-alpha-metabase", status: "build-error" }, { id: "dep-ancien", status: "success" }] }),
+  }, quarantaineDeRebuild("dep-alpha-metabase", "v0.63.17"));
+  check(
+    "--rebuild ne leve pas la quarantaine d'une montee ratee : ce serait monter sans sauvegarde",
+    [monteeRateeLevee.out.status, monteeRateeLevee.deployments, monteeRateeLevee.backups, /quarantaine d'une montee ratee, a lever par --force --app/.test(monteeRateeLevee.out.output), monteeRateeLevee.entry.quarantine?.rebuild],
+    [0, 0, 0, true, true],
+  );
+
+  const enVolDepuisHier = lockAvec((alpha) => {
+    alpha.inflight = {
+      target: { sha: "a".repeat(40), version: "v0.63.18" },
+      step: "deploy",
+      since: avant(NUIT, 1),
+      rollout: "",
+      async: false,
+      backups: [],
+      deployment: { id: "dep-alpha-metabase", at: avant(NUIT, 1) },
+      rebuild: true,
+    };
+  });
+  const [verdictPerdu, verdictLu] = enSuite(sansAttenteAlpha, enVolDepuisHier, [
+    { args: ["--reconcile"], env: { NOW: NUIT, DEPLOY_STATUS: "building", REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40) } }) } },
+    { args: ["--reconcile"], env: { NOW: NUIT, REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40) } }) } },
+  ]);
+  check(
+    "un rebuild dont le verdict se perd met l'app en quarantaine jusqu'au verdict de Scalingo",
+    [verdictPerdu.out.status, verdictPerdu.lock.apps[RT].inflight ?? null, verdictPerdu.lock.apps[RT].quarantine?.reason, verdictPerdu.lock.apps[RT].quarantine?.rebuild, sauvegardes(verdictPerdu.out.calls)],
+    [1, null, LOST_VERDICT, true, 0],
+  );
+  check(
+    "le releve leve cette quarantaine quand Scalingo conclut le meme deploiement en succes",
+    [verdictLu.out.status, verdictLu.lock.apps[RT].quarantine, lances(verdictLu.out.calls)],
+    [0, null, []],
+  );
+
+  const pauseEnQuarantaine = passage(["--reconcile"], { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10) }, lockAvec((_, apps) => {
+    apps["osc-fr1/beta-metabase"].quarantine = { target: { sha: "a".repeat(40), version: "v0.63.18" }, reason: "build-error", at: "2026-11-18T03:00:00.000Z", deploymentId: "dep-x", rebuild: true };
+  }));
+  check(
+    "une app en pause en quarantaine de rebuild ne suspend pas les autres",
+    [pauseEnQuarantaine.deployments, /suspendus/.test(pauseEnQuarantaine.out.output)],
+    [1, false],
+  );
+
+  const derriereUnEchec = passage(["--reconcile"], {
+    REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40), status: "build-error" } }),
+    DEPLOYMENTS: JSON.stringify({ [RT]: [{ id: "dep-alpha-metabase", status: "build-error" }, { id: "dep-ancien", status: "success" }] }),
+  }, lockAvec((alpha) => {
+    alpha.quarantine = { target: { sha: "a".repeat(40), version: "v0.63.18" }, reason: "build-error", at: "2026-11-18T03:00:00.000Z", deploymentId: "dep-alpha-metabase" };
+  }));
+  check(
+    "le releve prend le build en service derriere un echec, sans en deviner la version",
+    [derriereUnEchec.entry.build?.deployment, derriereUnEchec.entry.build?.version, derriereUnEchec.deployments],
+    ["dep-ancien", null, 0],
+  );
+
+  const rebuildForce = (() => {
+    const b = sandbox();
+    const out = run(b, "apply.ts", ["--rebuild", "--force", "--app", "alpha", ...FLEET], { SCALINGO_API_TOKEN: "faux" });
+    return [out.status, /choisis l'un des deux/.test(out.output), out.calls];
+  })();
+  check("--rebuild --force est refuse avant tout appel", rebuildForce, [1, true, []]);
 } finally {
   for (const root of sandboxes) rmSync(root, { recursive: true, force: true });
 }

@@ -100,7 +100,8 @@ Par commande :
 
 - `apply.ts` : `--dry-run`, `--app <fragment>`, `--force` (redéploie une app
   conforme, exige `--app`), `--rebuild` (relève puis refait à l'identique le
-  build d'une app conforme, sans sauvegarde, exige `--app`), `--reconcile`, `--prune`,
+  build en service d'une app conforme, sans sauvegarde ni écriture de variable,
+  exige `--app`, refusé avec `--force`), `--reconcile`, `--prune`,
   `--validate`, `--adopt`
   (amorce le lock depuis l'état réel, sans déployer), `--propose-db`,
   `--propose-security`, `--async` (un passage puis rend la main, l'état en vol

@@ -190,9 +190,12 @@ et l'éventuelle quarantaine.
 les autres applications correctement consignées.
 
 **[fait]** Consigne aussi ce que le dernier build réussi a installé, sous
-`build` : l'identifiant de ce déploiement, l'image de pile lue sur lui, et les
-runtimes lus dans son journal, `null` quand le journal n'a pas pu être lu. Un
-build raté n'y entre jamais. Scalingo garde alors les conteneurs précédents, mais
+`build` : l'identifiant de ce déploiement, la version de l'outil avec laquelle il
+a été fait, l'image de pile lue sur lui, et les runtimes lus dans son journal,
+`null` quand le journal n'a pas pu être lu. La version est exacte quand le moteur
+a conclu le build. Le relevé la lit sur la variable quand ce build est le dernier
+déploiement, et la laisse à `null` derrière un échec, où la variable porte déjà
+la cible de l'échec. Un build raté n'y entre jamais. Scalingo garde alors les conteneurs précédents, mais
 le journal annonce déjà le nouveau JDK et le déploiement porte déjà la nouvelle
 pile : les consigner ferait passer pour à jour une application qui tourne
 l'ancien build.
@@ -204,13 +207,16 @@ comme le chemin de déploiement le faisait déjà pour les buildpacks. Le relev�
 relevé vide à chaque erreur passagère, et le passage suivant la réécrivait :
 chaque aller-retour faisait un commit de lock sans rien de neuf.
 
-**[fait]** Le format reste en version 1. La version ne monte que pour un champ
-dont la perte casserait le passage suivant. `build` n'en est pas : il est
-optionnel, un lock antérieur reste lisible, et un moteur plus ancien le perd à
-la réécriture. Le relevé suivant le reconstitue si le dernier déploiement a
-réussi, au premier build réussi sinon. La quarantaine d'un rebuild porte
+**[fait]** `build` ne fait pas monter la version du format. La version ne monte
+que pour un champ dont la perte casserait le passage suivant. `build` n'en est
+pas : il est optionnel, un lock antérieur reste lisible, et un moteur plus ancien
+le perd à la réécriture. Le relevé suivant le reconstitue sur le dernier
+déploiement réussi, même derrière un échec. La quarantaine d'un rebuild porte
 `rebuild: true`, qu'un moteur plus ancien conserve en recopiant la quarantaine
-telle quelle.
+telle quelle. L'opération en vol d'un rebuild porte aussi `rebuild: true`, dans
+le lock en version 2 du déploiement asynchrone. Les deux sont sortis dans la
+même version de l'outil : aucun moteur publié ne lit une version 2 sans
+connaître cette marque.
 
 **[fait]** N'est réécrit que si l'état a réellement changé. Son horodatage date
 le dernier changement, pas la dernière vérification : sinon la réconciliation
@@ -883,47 +889,71 @@ partirait au premier passage suivant les sept jours. Les passages réels
 s'espacent de trois à six heures et demie, et son heure glisserait donc d'une
 semaine à l'autre vers la journée. Le moteur ne connaît pas le fuseau du parc :
 la plage est fixe, en UTC. Un build qui a l'âge hors de la plage attend, et le
-passage le dit.
+passage le dit. La plage se juge au lancement : un rebuild lancé à 4 h 55 se
+conclut après 5 h, au passage qui le relit.
 
-**[fait]** Seulement sous `--reconcile`, et sur une application dont le relevé
-du passage vient de constater l'état, commit déployé compris. Dans le doute on
-ne déploie pas : un lock non vérifié peut dater d'avant un déploiement fait hors
-du watcher. Un commit que le relevé n'a pas pu lire, un `git_ref` qui n'est pas
-un sha, ne vaut pas constat. Une application en pause est relevée mais jamais
-rebuildée.
+**[fait]** Seulement sous `--reconcile`, au passage ordinaire comme à la reprise
+que relance le relais. Avant de lancer, le moteur confirme sur Scalingo que le
+build en service, le dernier déploiement réussi, est celui que le lock décrit,
+au même commit et à la même version, et que la variable de version n'a pas bougé
+depuis. Le lock seul ne le prouve pas : il peut dater d'avant un déploiement fait
+hors du watcher. Un build en service que le lock ne connaît pas encore attend le
+relevé suivant. Un build dont le `git_ref` n'est pas un sha n'est jamais refait,
+et l'application reste conforme. Une application en pause est relevée mais
+jamais rebuildée.
+
+**[fait]** Un rebuild passe par la machine à états du déploiement, comme une
+montée : opération en vol marquée `rebuild` dans le lock, fenêtre de garde lue
+après coup, quarantaine. N'importe quel passage le conclut, la reprise du relais
+comprise. Il ne part jamais à côté d'une montée qui attend son éclaireur.
 
 **[fait]** Un rebuild ne tient pas lieu d'éclaireur. Refaire un build à
 l'identique ne dit rien d'une version nouvelle : compté comme éclaireur, il
 laisserait partir de front derrière lui des montées qu'aucune application n'a
-validées.
+validées. L'application suivante prend le rôle.
+
+**[fait]** Après un premier rebuild réussi dans un déploiement, les rebuilds
+suivants partent jusqu'à trois de front entre eux. La chaîne de build est alors
+saine, et la première nuit où tout le parc a l'âge, un par un, un job enchaîné
+tiendrait le verrou des heures. Une montée attend toujours son éclaireur, seule.
 
 **[fait]** Sans sauvegarde, et sans toucher à celle que le lock consigne. Même
 version de l'outil, même commit : rien ne migre, et une sauvegarde ne
 protégerait de rien. Pire, elle remplacerait dans le lock le point de
 restauration d'avant la dernière montée, celui dont on a besoin quand une
-migration a mal tourné.
+migration a mal tourné. La variable de version n'est jamais écrite : si elle ne
+vaut plus la version du build en service, le rebuild ne part pas.
 
 **[fait]** Sans délai de décantation, et c'est une exception assumée. Chaque
 déploiement de l'outil prend déjà l'alias de JDK courant sans aucune
 décantation, et le JDK passe d'abord par le robot d'Heroku puis par la fusion
-manuelle de Scalingo. L'éclaireur, les vagues et la fenêtre de garde
-s'appliquent comme à tout déploiement.
+manuelle de Scalingo. La fenêtre de garde s'applique comme à tout déploiement.
 
 **[fait]** Un rebuild raté met l'application en quarantaine, marquée `rebuild`,
 et suspend les rebuilds par âge sur tout le parc tant qu'elle y reste. La cause
 probable est commune, un JDK ou une tête de buildpack défectueux, et aucun des
 deux n'est dans le manifeste. Sans cette suspension, une quarantaine n'arrêtant
 pas la vague, chaque application vieillie aurait cassé sur la même cause sans
-que rien ne permette de freiner. La suspension joue dès l'application suivante
-du même passage. Les rebuilds déjà partis dans le même lot, trois au plus, vont
-à leur terme.
+que rien ne permette de freiner. La suspension se lit dans le lock : elle joue
+dès le lancement suivant, dans le même passage comme dans une reprise. Les
+rebuilds déjà partis, trois au plus, vont à leur terme.
+
+**[fait]** Un rebuild dont le verdict se perd, borne d'attente dépassée ou
+lecture refusée par le proxy, met aussi l'application en quarantaine `rebuild`,
+au motif `rebuild sans verdict`. Sans elle, un build raté que personne n'a vu
+ferait prendre l'application pour jamais déployée au passage suivant, donc
+sauvegardée, et le point de restauration d'avant la dernière montée serait
+remplacé. Le relevé lève cette quarantaine quand Scalingo conclut le même
+déploiement en succès, et la confirme en échec sinon.
 
 **[fait]** La suspension ne tombe qu'au premier déploiement réussi de
 l'application : par `--rebuild --app` une fois la cause levée, ou par une montée
 de version. Un nouvel échec sur cette application, montée ou `--force`, garde la
 marque : il ne dit pas que la cause est levée. Une entrée orpheline du lock ou
 une application en pause ne suspend rien, aucun déploiement ne venant jamais
-lever sa quarantaine.
+lever sa quarantaine. `--rebuild --app` ne lève pas la quarantaine d'une montée
+ratée, dont la cible n'est pas le build en service : ce serait monter sans
+sauvegarde. Elle se lève par `--force --app`.
 
 **[fait]** `--rebuild --app` refait le build d'une application conforme sans
 attendre, sans sauvegarde, par exemple quand le tableau de bord la dit `rebuild
@@ -931,7 +961,9 @@ utile`. Il relève d'abord l'application, comme `--reconcile` : sans ce relevé,
 un lock en retard sur le réel ferait redescendre la version de l'outil, sans
 sauvegarde, sur une base déjà migrée. Il exige `--app`, comme `--force`. Il
 passe outre l'âge, la plage horaire et la suspension, puisque c'est une décision
-humaine. Il lève une quarantaine de rebuild par la même branche sans sauvegarde,
+humaine, mais pas la confirmation du build en service. Il est refusé avec
+`--force`, qui sauvegarde et redéploie. Sous `--async`, la reprise du relais le
+mène à son terme. Il lève une quarantaine de rebuild par la même branche sans sauvegarde,
 là où `--force` sauvegarderait et remplacerait le point de restauration. Sur une
 application en écart, c'est un déploiement ordinaire. Une application en pause
 n'est jamais rebuildée.
@@ -1341,11 +1373,13 @@ donc à lever une quarantaine, même si l'outil est à terre derrière son port 
 répond.
 
 **Personne n'expose la version du binaire en service.** La variable dit la
-version du prochain build. Une variable changée à la main sans déploiement fait
-donc refuser une cible que l'application servait déjà. Le refus est assumé : les
-deux cas se résolvent du même geste, regarder pourquoi le réel et le manifeste ne
-disent pas la même chose, et le refus ne déploie rien tandis que l'erreur inverse
-met l'application à terre.
+version du prochain build. Le relevé ne la reprend que si un déploiement a suivi
+celui que le lock connaît : une montée dont la variable est posée et dont le
+déploiement n'est jamais parti passait sinon pour faite. Un déploiement fait hors
+du watcher, lui, est cru sur la variable lue au relevé : si elle a encore bougé
+entre ce build et le relevé, sans nouveau build, un rebuild par âge construirait
+la nouvelle version sans sauvegarde. Il faut pour cela un déploiement hors du
+watcher puis une édition de variable sans build, sur une application gérée.
 
 **Après un échec de montée, le retour arrière demande `--force`.** Si l'échec a
 été suivi d'un redéploiement réussi de la même cible, hors du watcher, le lock la
