@@ -226,6 +226,19 @@ application échoue au lieu d'annoncer un lock amorcé.
 que celle qu'il sait lire : un moteur plus ancien réécrirait le lock sans les
 champs qu'il ne connaît pas, et les perdrait.
 
+**[fait]** Version 2 : le lock porte aussi l'opération en vol de chaque
+application (`inflight` : étape, identifiants Scalingo, cible, début de l'étape,
+mode du passage qui l'a lancée) et le déploiement en cours sur le parc
+(`rollout`). Un moteur en version 1 les effacerait en réécrivant le lock, puis
+relancerait ce qui tourne déjà : il refuse donc un lock en version 2. Le lock
+n'est écrit en version 2 que tant qu'il porte un tel état. Au repos, il repasse
+en version 1, sans clé `rollout` : un retour arrière de l'outil, ou un appelant
+resté épinglé plus bas, continuent de le lire.
+
+**[fait]** Écrit à chaque passage et non à la fin du job. Un job coupé en pleine
+vague laisse à `commit-lock` ce qui est en vol, que le passage suivant reprend
+au lieu de tout relancer.
+
 **[fait]** Le lock revient dans le dépôt même quand une partie des applications
 a échoué. Un push refusé, parce qu'une fusion est arrivée pendant la
 convergence, est rejoué par-dessus après `pull --rebase`, trois tentatives au
@@ -356,6 +369,16 @@ des workflows appelants (gestionnaire `github-actions`) et tag des presets
 (gestionnaire `renovate-config`), avancés ensemble dans une pull request
 `scalingo-watcher`, dès la release, jamais fusionnée seule. Les
 workflows appelants sont épinglés par sha avec la version en commentaire.
+
+**[fait]** Cette pull request attend toujours une fusion humaine, quelle que
+soit la politique du manifeste. `defaults.policy` règle les versions des outils
+déployés, jamais celle de scalingo-watcher. Une version de l'outil s'exécute
+avec les secrets du parc (accès à Scalingo ou clé du proxy, jeton Tchap). Une
+release fautive, fusionnée seule, agirait sur tout le parc dès le passage
+suivant. La relecture du CHANGELOG dans la pull request est donc le seul point
+d'arrêt. Pour la même raison, aucun délai de décantation ne s'y applique : un
+parc doit pouvoir prendre un correctif de l'outil dès sa publication, et les
+cinq jours du preset `base` restent réservés aux versions des outils déployés.
 
 **[fait]** Le consommateur n'active que `custom.regex`, `github-actions` et
 `renovate-config`. Le fuseau reste dans sa configuration : les presets ne
@@ -516,15 +539,21 @@ a répondu sur son port. Metabase ouvre Jetty avant de migrer sa base, donc le
 port répond en quelques secondes, Scalingo conclut, puis la migration tourne. Si
 elle échoue, le processus sort en code 1 alors que le lock porte déjà `deployed`
 et que l'éclaireur a donné son feu vert aux suivantes, parties à trois de front.
-Pendant la fenêtre, les événements de l'application sont relus toutes les dix
-secondes, et un `crash`, un `repeated_crash` ou un `restart` de raison
-`unexpected_failure` met l'application en quarantaine comme un échec de
-déploiement : le lock ne porte pas la nouvelle version, et l'échec sur
-l'éclaireur arrête la vague.
+La fenêtre se lit après coup, au premier passage qui suit sa fin. Un `crash`,
+un `repeated_crash` ou un `restart` de raison `unexpected_failure` daté dans la
+fenêtre met l'application en quarantaine comme un échec de déploiement : le lock
+ne porte pas la nouvelle version, et l'échec sur l'éclaireur arrête la vague.
 
-**[fait]** Seuls comptent les événements apparus après le déploiement. Ceux déjà
-là sont relevés d'abord et écartés, ce qui évite de comparer notre horloge à
-celle de la plateforme.
+**[fait]** Seuls comptent les événements datés entre la fin du déploiement et la
+fin du délai de démarrage qui suit la fenêtre. La fin du déploiement
+(`finished_at`) et la date d'un événement (`created_at`) viennent toutes deux de
+la plateforme : la garde ne compare jamais l'horloge du runner à celle de
+Scalingo, sinon pour décider qu'il est temps de conclure, avec quinze secondes de
+marge. Le passage qui conclut peut donc venir des heures plus tard sans que la
+garde perde quoi que ce soit, et une panne du lendemain n'est pas imputée au
+déploiement. Les événements se lisent par pages de cent jusqu'à dépasser la fin
+du déploiement : une boucle de crash remplit vite une page, et s'arrêter à la
+première aurait laissé passer le crash qui l'a ouverte.
 
 **[fait]** Le contrôle ne connaît rien de l'outil déployé : aucun marqueur, aucun
 chemin HTTP, rien que deux routes de la plateforme, `events` et `ps`. Il ne
@@ -576,6 +605,89 @@ des blobs.
 
 **[fait]** Relevé des buildpacks réellement utilisés après un déploiement réussi,
 consigné dans le lock à titre d'observation.
+
+**[fait]** Chaque étape est lancée, consignée dans le lock, puis relue au passage
+suivant, jamais attendue sur place : sauvegarde demandée ou rattachée, puis
+variable et déploiement, puis verdict de la fenêtre de garde. Sans option, la
+commande enchaîne elle-même les passages toutes les dix secondes jusqu'à la fin
+du déploiement, comme avant. Avec `--async`, elle fait un passage et rend la
+main : le job ne paie plus l'attente de Scalingo. Mesuré du 2026-10-22 au
+2026-11-18 sur les deux parcs, 83 à 84 % des minutes de CI facturées partaient
+dans les seuls runs qui déployaient. Un éclaireur y attendait en moyenne 4,7 min
+de sauvegarde, 5,6 min de build et 2,8 min de fenêtre de garde, et quatorze
+sauvegardes restées en `scheduled` côté Scalingo y ont brûlé trente minutes
+chacune.
+
+**[fait]** `--resume` fait avancer le déploiement en cours sans jamais en ouvrir
+un. C'est le passage que relance le relais. Seul un passage ordinaire (cron,
+fusion du manifeste, lancement manuel) ouvre un déploiement : un échec de
+l'éclaireur ne se rejoue donc sur l'application suivante qu'au passage ordinaire
+d'après, comme avant, et non à chaque ping.
+
+**[fait]** Un déploiement s'étale sur autant de passages qu'il faut, avec les
+mêmes règles qu'un passage unique : l'éclaireur passe seul, puis trois
+applications au plus sont en vol en même temps. Son empreinte résume la portée
+(`--app`), le forçage et les cibles des applications hors pause au moment de son
+ouverture. Un passage ordinaire qui demande la même chose poursuit le
+déploiement ouvert. Un manifeste qui a changé en ouvre un autre, avec son propre
+éclaireur, comme un nouveau passage le faisait. Une application traitée dans un
+déploiement n'y est pas relancée : une interruption se retente au déploiement
+suivant.
+
+**[fait]** Les bornes d'attente dépendent du mode du passage qui a lancé
+l'opération, pas de celui qui la relit. En passage enchaîné, trente minutes pour
+une sauvegarde et vingt pour un déploiement, comme avant. En `--async`, attendre
+ne coûte plus de minutes de CI : six heures pour une sauvegarde et deux pour un
+déploiement, au-delà desquelles l'application est interrompue, sans
+quarantaine. Un passage enchaîné n'attend que ce qu'il a lancé lui-même : une
+opération lancée en `--async` est relue à chacun de ses passages, mais jamais
+attendue des heures sous un job.
+
+**[fait]** Tant que rien n'est écrit sur l'application, le manifeste reprend la
+main. Une application mise en pause, ou ramenée à une autre cible, pendant que
+sa sauvegarde tourne, est abandonnée avant la variable et le déploiement : rien
+n'est déployé sur une cible que plus personne ne demande. Une fois le
+déploiement lancé, il est mené à son verdict.
+
+**[fait]** Une reprise poursuit le déploiement tel qu'il a été ouvert. Si le
+manifeste a changé depuis, elle ne lance plus rien et le dit : la nouvelle cible
+attend le passage ordinaire suivant, qui lui désigne son propre éclaireur.
+L'éclaireur d'un déploiement attend en outre que plus rien ne soit en vol, y
+compris les opérations d'un déploiement précédent : deux applications ne
+portent jamais en même temps une cible sans verdict.
+
+**[fait]** Une écriture qui échoue pendant une opération en vol interrompt
+l'application, comme avant. Une demande de déploiement acceptée par Scalingo
+dont la réponse s'est perdue, rejouée comme une lecture, empilerait un
+déploiement par passage.
+
+**[fait]** Après la fin du build, la fenêtre de garde a sa propre échéance pour
+les lectures qui échouent, comptée depuis la fin du déploiement : un jour pour
+une opération lancée en `--async`, la borne habituelle en passage enchaîné. Un
+passage qui conclut tard, faute de ping, ne perd pas le verdict à la première
+erreur passagère.
+
+**[fait]** Ce qu'une reprise n'a pas mené à bien, interruption ou rejet, est gardé
+dans le déploiement en cours (`rollout.notes`). La reprise ne réécrit pas le
+tableau de bord, mais le passage qui le réécrit, à la fermeture ou au passage
+ordinaire suivant, le reprend avec le reste : la notification part comme avant.
+
+**[fait]** Une lecture qui échoue pendant une opération en vol laisse
+l'application en vol jusqu'à la borne de l'étape. Un 502 passager ne doit pas
+abandonner un déploiement que Scalingo mènera à son terme sans nous. Un refus du
+proxy, lui, interrompt tout de suite : il ne passera pas tout seul.
+
+**[fait]** Avant de lancer un déploiement, le moteur vérifie qu'aucun ne tourne
+déjà sur l'application. Un passage parti d'un lock périmé ne sait pas qu'il a
+déjà lancé ce déploiement, Scalingo si : l'application est alors laissée en
+l'état au lieu d'empiler un second build derrière le premier.
+
+**[fait]** Le dépôt du parc est récupéré à la tête de sa branche et non au commit
+de l'événement. Un passage mis en file derrière un autre garde le sha de sa
+création, et relirait un lock d'avant ce que le précédent a lancé.
+
+**[fait]** Le relevé de `--reconcile` passe son tour sur une application en vol :
+il écraserait ce qu'il faut relire pour conclure l'opération.
 
 **[fait]** Un statut d'application illisible interdit le déploiement au lieu de
 l'autoriser. La lecture avalait auparavant son erreur et rendait `null`, ce qui
@@ -648,9 +760,11 @@ repart d'elle-même, sans intervention.
 cible courante, pas celles déjà levées par un changement de cible.
 
 **[fait]** Réconciliation périodique (`--reconcile`), demandée à l'heure. GitHub
-ne garantit pas ses crons et en saute une partie : mesuré sur deux jours, les
-passages réels s'espacent de trois à six heures et demie. La cadence déclarée est
-donc un plancher de demande, pas une promesse de délai.
+ne garantit pas ses crons et en saute une partie. Mesuré sur deux parcs du
+15 octobre au 19 novembre 2026, hors une période que l'API des runs ne liste
+plus, l'écart entre deux déclenchements du cron a une médiane de six à sept
+heures, un 90e centile de huit à neuf heures et un maximum de 11 heures. La
+cadence déclarée est donc un plancher de demande, pas une promesse de délai.
 Elle relève l'état réel de chaque application, signale ce qui a bougé hors du
 watcher, met le lock en accord avec le parc, puis laisse l'application converger.
 Elle existe parce que Renovate fusionne le manifeste et s'arrête là : il ne
@@ -660,6 +774,40 @@ repasse jamais sur une application restée en arrière après un échec.
 réconciliation tout de suite, au lieu d'attendre le prochain créneau. Le filtre
 sur le manifeste évite la boucle : le commit de lock que la réconciliation
 produit ne la redéclenche pas.
+
+**[fait]** Battement vers une veille de silence (secret `HEARTBEAT_URL`), à
+partir de la 2.0.0. Aucune version 1.x ne le porte. Les
+notifications partent du job de réconciliation. Un job refusé pour facturation
+ne démarre plus et ne prévient personne. Après chaque passage planifié dont le
+tableau de bord a été publié, `reconcile` envoie un GET à chaque URL du secret.
+Le service de veille alerte quand les battements cessent, quelle qu'en soit la
+cause : facturation, cron arrêté, workflow cassé, panne de GitHub Actions.
+
+Seule la première tentative d'un passage planifié bat. Un lancement à la main,
+ou la relance d'un run planifié vieux de plusieurs jours, masquerait un cron
+arrêté, par exemple quand le compte de son auteur est suspendu.
+
+Un battement refusé donne un avertissement sans faire échouer le job. Les
+redirections sont suivies jusqu'au service. Un `Retry-After` du service ne
+retient pas le job plus de 30 secondes par URL. Seul un code HTTP final en 2xx
+compte comme reçu. curl 8.18, celui d'`ubuntu-latest`, sort en succès quand il
+renonce à réessayer devant un `Retry-After` plus long que cette borne.
+
+Seul l'hôte de l'URL est affiché, sans identifiants ni requête. Le reste peut
+porter le secret du service, et le runner ne masque que la valeur entière du
+secret. curl part avec `-g`. Sans lui, il développe `[]` et `{}` en plusieurs
+URL et affiche l'URL entière sur un motif invalide. Une URL dont l'hôte n'a pas
+une forme valide n'est pas envoyée et donne un avertissement, car l'hôte lu par
+l'étape et celui lu par curl n'y sont plus les mêmes. La mise en place de
+référence, un check pulse updown.io de 24 heures, est dans le README.
+
+Le battement remplace une sentinelle qui lirait l'état des parcs depuis GitHub.
+Logée dans un autre parc, elle demandait un jeton approuvé par chaque
+organisation, et une cause commune aux deux parcs l'arrêtait en même temps
+qu'eux.
+Logée dans le dépôt public de l'outil, elle aurait exposé les parcs dans ses
+logs. L'API des runs ne convient pas non plus. Elle a cessé de lister près de
+deux semaines de runs d'un parc qui tournait.
 
 **[fait]** La quarantaine survit au relevé, sinon chaque passage la lèverait et
 la même cible serait retentée indéfiniment. Elle tombe en revanche si
@@ -789,6 +937,137 @@ application en écart, c'est un déploiement ordinaire. Une application en pause
 n'est jamais rebuildée.
 
 ---
+
+### Relais et notifiers
+
+**[fait]** Un relais (`relay/relay.ts`) relance la reprise d'un déploiement
+asynchrone sans attendre le cron. Chaque application porte un notifier webhook
+Scalingo qui poste la fin de ses déploiements et de ses sauvegardes sur
+`POST /<RELAY_SECRET>`. Le relais en tire un `workflow_dispatch` du dépôt du
+parc, avec l'input `resume`. Vérifié par essai réel le 2026-11-19 : le webhook
+part à la fin du déploiement, réussi comme en échec, et à la fin d'une
+sauvegarde, manuelle comprise, une seule fois par événement et une fraction de
+seconde après la fin côté Scalingo.
+
+**[fait]** Une fin de déploiement réussie n'est relayée qu'après `RELAY_DELAY`
+secondes, 150 par défaut, à régler sur la plus grande fenêtre de garde du parc
+plus une marge. Relancée plus tôt, la reprise trouverait la fenêtre en cours et
+ne conclurait rien. Un échec et une sauvegarde sont relayés aussitôt. Une rafale
+donne au plus un dispatch par `RELAY_MIN_INTERVAL` secondes, 60 par défaut, et
+aucun ne part avant l'instant demandé par l'évènement qu'il sert.
+
+**[fait]** Par défaut, le groupe de concurrence `scalingo-apply` ne garde qu'un
+passage en attente : un nouveau run annule celui qui attendait. Un dispatch de
+reprise annulerait ainsi un passage ordinaire en attente, seul à pouvoir ouvrir
+un déploiement. Le verrou `scalingo-apply` pose donc `queue: max`, au niveau du
+job qui le déclare, donc chez l'appelant du parc : jusqu'à cent passages
+attendent leur tour, aucun n'est remplacé. En défense, le
+relais liste aussi les runs en attente du dépôt avant chaque dispatch et
+s'abstient si l'un d'eux vient d'un workflow du groupe (`RELAY_GROUP_WORKFLOWS`,
+par défaut `RELAY_WORKFLOW` et `apply.yml`). Ce run fera avancer tout ce qui est
+en vol. Si la liste est illisible, le dispatch part quand même : un run de trop
+coûte moins qu'un ping perdu. Le verrou étant posé au niveau du job, GitHub
+n'affiche peut-être pas un tel run comme `pending` : c'est `queue: max` qui
+garantit qu'aucun passage n'est perdu.
+
+**[fait]** Les sauvegardes périodiques de Scalingo (`backup_method` à `periodic`)
+sont ignorées par défaut. Chaque application en produit une par nuit, et chacune
+coûterait un run inutile. `RELAY_PERIODIC_BACKUPS=relay` les relaie quand même.
+Si le moteur s'est rattaché à une sauvegarde périodique en cours, cas rare, la
+reprise attend alors le cron.
+
+**[fait]** Un dispatch en échec après ses trois essais courts (erreur réseau, 5xx
+ou 429) est reprogrammé dans le même plan, avec le même écart minimal et le même
+regroupement. L'attente est de 30 s, puis double à chaque échec, plafonnée à
+10 min, jusqu'à 30 min après le premier échec. Un en-tête `Retry-After` fixe
+l'attente minimale. Les autres 4xx sont définitifs.
+
+**[fait]** À l'arrêt, le relais ferme son serveur et attend jusqu'à 2 s les
+requêtes en cours avant de compter ce qui reste dû. Un dispatch encore prévu part
+alors immédiatement. Un événement reçu pendant l'arrêt en déclenche un aussitôt,
+au lieu d'être planifié puis perdu. L'arrêt tient en 27 s, sous les 30 s que
+Scalingo laisse avant SIGKILL.
+
+**[fait]** `/healthz` rend 503 avec le seul code HTTP de GitHub, jamais son
+message, quand le dernier dispatch a pris 401, 403, 404 ou 422 : jeton expiré ou
+sans droit, workflow introuvable, input `resume` non déclaré. Il rend 200 sinon.
+
+**[fait]** Le relais ne croit jamais un ping : il ne fait que réveiller le parc,
+qui relit tout sur Scalingo. L'URL d'un notifier est probablement lisible par
+un collaborateur de l'application, puisque l'activité porte la configuration
+des notifiers. Une URL qui fuit permet donc au pire de consommer des minutes de
+CI, un run par `RELAY_MIN_INTERVAL` : le secret se change en régénérant les
+notifiers.
+
+**[fait]** Le relais n'a aucune dépendance et aucun accès à Scalingo. Il se
+déploie par défaut comme application Scalingo dans le compte du parc, depuis ce
+dépôt avec `PROJECT_DIR=relay`, ou ailleurs avec `relay/compose.yaml`, derrière
+un proxy TLS : le secret passe dans le chemin, et la commande des notifiers
+refuse une adresse en http. Son jeton
+GitHub, un fine-grained PAT limité au dépôt du parc, n'a besoin que de la
+permission Actions en écriture : il déclenche des runs, il ne pousse pas de
+code, contrairement à `repository_dispatch` qui exigerait Contents en écriture.
+Son journal ne porte ni le secret, ni le jeton, ni rien du corps reçu hors le
+type, le statut et l'application.
+
+**[fait]** `node src/notifiers.ts` pose sur chaque application du manifeste qui
+n'est pas en pause un notifier Scalingo nommé `scalingo-watcher`, sur la
+plateforme webhook et les seuls événements `app_deployed`,
+`database_backup_succeeded` et `database_backup_failed`. La commande se lance en
+local par un administrateur, jamais en CI : les blobs du proxy ne gagnent aucun
+droit d'écriture. Elle lit `SCALINGO_API_TOKEN` et `RELAY_URL` dans
+l'environnement, jamais en argument, puisque l'adresse du relais porte son
+secret. Elle exige une adresse de la forme `https://<relais>/<RELAY_SECRET>` : un
+seul segment de chemin d'au moins 32 caractères pris dans `[A-Za-z0-9._~-]`,
+sans identifiants, paramètre de requête ni fragment. Elle refuse toute autre
+adresse sans la citer et n'en affiche que l'hôte. Une erreur de Scalingo qui
+reprend l'adresse est masquée avant d'être tronquée. Elle crée,
+modifie champ par champ ou laisse en l'état, ne touche jamais les autres
+notifiers de l'application, écarte en le disant une application dont le compte
+n'est pas propriétaire, et accepte `--dry-run`, `--app` et `--remove`.
+
+**[fait]** Seul un notifier webhook nommé `scalingo-watcher` est celui du watcher.
+Un notifier de ce nom sur une autre plateforme met l'application en échec sans
+aucune écriture : la sortie donne son id et la commande pour le retirer ou le
+renommer à la main. `--remove` le laisse en place et le signale. Deux notifiers
+webhook de ce nom mettent l'application en échec, avec leurs ids et
+`scalingo --region <région> --app <app> notifiers-remove <id>`. Après chaque
+création ou modification, la commande relit le notifier rendu par Scalingo et
+compte tout écart restant comme un échec.
+
+**[fait]** Mise en route sur un parc, à partir de la v2, dans cet ordre :
+déployer le relais et poser ses variables, poser les notifiers avec l'URL du
+relais, puis adapter l'appelant de `actions/reconcile` repris du starter. Son
+`workflow_dispatch` déclare un input booléen `resume`, que le relais pose à
+`true`. Son job ajoute `queue: max` au verrou `scalingo-apply`, et passe à
+l'action `async: "true"` et `resume` tel qu'il arrive. Sans relais, ne pas
+activer `async` : le cron seul ferait durer un déploiement des jours.
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      resume:
+        description: Reprise d'un deploiement en cours, posee par le relais
+        type: boolean
+        default: false
+  # cron et push sur le manifeste comme dans le starter
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: scalingo-apply
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: incubateur-ademe/scalingo-watcher/actions/reconcile@v2
+        with:
+          dry-run: "false"
+          async: "true"
+          resume: ${{ inputs.resume == true }}
+          # secrets passes comme dans le starter
+```
 
 ## 6. Sécurité
 
@@ -930,6 +1209,19 @@ lignes de support long qui régressent, l'arrondi du seuil, la distinction des
 raisons d'un verdict absent, le sens du rapprochement numérique, et la fin de la
 ligne en service dans le constat.
 
+**[fait]** Le battement est exercé par le script même de son étape, contre un
+serveur local : l'URL atteinte entière, identifiants, chemin et requête jamais
+affichés, plusieurs URL séparées par des blancs ou des fins de ligne Windows, le
+secret absent, un refus qui avertit sans faire échouer le job, une redirection
+suivie, un `Retry-After` d'une heure, des crochets et des accolades envoyés
+tels quels, des URL mal formées non envoyées. Un faux curl qui sort en 0, comme
+curl 8.18, rejoue un 204, un 503, un 429, un 301 et un 000 : seul le 204 est
+reçu, quelle que soit la version de curl du poste. Son câblage est vérifié sur
+le YAML, et sa condition comparée à l'identique. La condition et les gardes du
+script (hôte seul, identifiants, refus sans échec, redirection, `Retry-After`,
+code 2xx, `-g`, forme de l'hôte, fins de ligne Windows) ont chacune été cassées
+pour vérifier que la suite échoue.
+
 **[fait]** Les tests ont été vérifiés en cassant volontairement chacun des
 invariants, pour s'assurer qu'ils échouent quand ils le doivent.
 
@@ -1020,10 +1312,27 @@ surveillés par précaution : s'ils n'existaient pas sous ce nom, la fenêtre
 retomberait sur le seul `restart` et sur l'état des conteneurs, et jamais sur un
 refus à tort.
 
-**La fenêtre se paie en temps de passage.** L'éclaireur est déployé seul, donc sa
-fenêtre s'ajoute entière, puis une fenêtre par vague de trois. Six applications à
-rattraper avec une fenêtre de dix minutes coûtent une demi-heure, sous un verrou
-que la réconciliation suivante attend sans annuler celle qui tourne.
+**La fenêtre se paie en temps de passage, sauf en `--async`.** En passage
+enchaîné, l'éclaireur est déployé seul, donc sa fenêtre s'ajoute entière, puis
+une fenêtre par vague de trois. Six applications à rattraper avec une fenêtre de
+dix minutes coûtent une demi-heure de job, sous un verrou que la réconciliation
+suivante attend sans annuler celle qui tourne. En `--async`, la fenêtre ne coûte
+rien au job, seulement du délai entre deux passages.
+
+**Sans relais, l'asynchrone est lent.** Le cron horaire, exécuté en pratique
+toutes les trois à six heures, fait alors avancer chaque étape. Un déploiement
+de douze applications demande une dizaine de passages, soit un à trois jours. Le
+parc reste correct, il devient lent : `async` n'est donc pas le défaut.
+
+**L'état des conteneurs est celui du moment où le passage conclut.** Relu des
+heures plus tard, faute de ping, il peut porter une panne postérieure à la
+fenêtre, attribuée alors au déploiement. Les événements, eux, ne comptent que
+dans la fenêtre et le délai de démarrage qui la suit.
+
+**Les montées de base attendent encore sur place.** `applyDatabases` n'est pas
+passé à l'asynchrone : une montée de base reste attendue jusqu'à trente minutes
+par le passage ordinaire qui la lance. Elles sont rares et décidées en pull
+request.
 
 **Un déploiement fait hors du watcher est cru sur la parole de Scalingo.** La
 fenêtre de garde ne tourne que sur les déploiements du moteur. Le relevé, lui, ne
@@ -1096,7 +1405,15 @@ information non dérivable : elle vit dans les modules d'outil du moteur, dans
 **GitHub coupe les crons d'un dépôt public sans activité depuis 60 jours.** Un
 parc stable dont le lock ne bouge plus et sans pull request Renovate perd sa
 réconciliation planifiée sans prévenir. Un lancement manuel ou toute activité
-sur le dépôt la rétablit.
+sur le dépôt la rétablit. Avec une veille de silence, l'arrêt est signalé au
+bout de sa période.
+
+**Le battement dit qu'un parc a été regardé, pas qu'il va bien.** L'état reste
+au tableau de bord et dans ses notifications. Sans service de veille configuré,
+rien ne surveille le silence. Un service de veille en panne, ou un canal
+d'alerte mort, n'alerte pas non plus. Un parc ne bat qu'une fois migré en
+2.0.0, avec `HEARTBEAT_URL` passé à `reconcile`. Mappé dans un appelant 1.x, le
+secret fait refuser l'appel par GitHub, et chaque passage échoue au démarrage.
 
 **Workflows réutilisables indisponibles sur GitHub Enterprise Server.** Le job
 appelé récupère l'outil par `job.workflow_repository` et `job.workflow_sha`, que
@@ -1625,9 +1942,12 @@ seule l'issue est tenue à jour.
 **[fait]** Une notification qui échoue n'échoue pas la convergence. Elle est
 signalée en avertissement du job, l'issue restant de toute façon à jour.
 
-**[à faire]** Notifications Scalingo elles-mêmes, pour les évènements que le
-watcher ne voit pas : crash d'une application, dépassement de quota. Le provider
-Terraform de Scalingo a une ressource dédiée, plutôt que de réécrire l'alerting.
+**[fait]** Notifications Scalingo de fin de déploiement et de sauvegarde, vers
+le relais : voir « Relais et notifiers » plus haut.
+
+**[à faire]** Notifications Scalingo pour les évènements que le watcher ne voit
+pas : crash d'une application, dépassement de quota. Le provider Terraform de
+Scalingo a une ressource dédiée, plutôt que de réécrire l'alerting.
 
 ---
 
@@ -1643,6 +1963,10 @@ branches de proposition sont des inputs.
 **[à faire]** Appelant de `propose-security.yml` dans le dépôt starter. Le
 workflow voyage avec l'outil dès maintenant, mais le starter ne pourra l'épingler
 qu'une fois cette version publiée, comme pour tout ce que l'outil ajoute.
+
+**[à faire]** `HEARTBEAT_URL` mappé dans l'appelant `reconcile.yml` du starter,
+et la veille de silence dans sa checklist d'installation. Le starter ne pourra
+le faire qu'avec sa migration en 2.0.0.
 
 **[fait]** Le job appelé récupère le dépôt consommateur, puis l'outil au sha du
 workflow appelé, et installe Node et pnpm aux versions déclarées par l'outil
@@ -1711,6 +2035,14 @@ suit.
 
 Le corps ne porte que l'état du parc. Le vocabulaire des colonnes et la méthode
 des relevés vivent ici, et le rapport y renvoie par un lien au tag qui tourne.
+
+Une section « Déploiement en cours » liste les applications en vol, l'étape
+qu'elles attendent et depuis quand, et la raison d'un déploiement arrêté. Elle
+précède le marqueur : un déploiement qui avance n'est pas un changement d'état,
+et le tableau le dit sans faire sonner l'équipe à chaque étape. Une reprise
+(`--resume`) ne relève ni les avis, ni les bases, ni les échéances : réécrire le
+tableau sans eux ferait retomber le marqueur sur `sain`. Elle ne le réécrit donc
+qu'à la fermeture du déploiement, avec tout le reste.
 
 ### États du tableau des applications
 

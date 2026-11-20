@@ -68,7 +68,8 @@ la racine de l'outil :
 | `propose-security` | `src/apply.ts --propose-security` | Monte les versions que les avis de l'amont couvrent, dans le manifeste |
 | `init` | `src/init.ts` | Écrit un premier manifeste depuis l'état réel |
 | `fgp:blobs` | `src/fgp-blobs.ts` | Génère `fgp.json` pour le proxy FGP |
-| `test` | `test/test.ts` | Tests hors ligne |
+| `notifiers` | `src/notifiers.ts` | Pose les notifiers Scalingo qui appellent le relais |
+| `test` | `test/test.ts`, `test/relay.test.ts`, `test/notifiers.test.ts` | Tests hors ligne |
 | `typecheck` | `tsc --noEmit` | Vérification des types |
 
 `pnpm init`, `pnpm audit` et `pnpm prune` sont des commandes de pnpm, qui
@@ -102,7 +103,10 @@ Par commande :
   build d'une app conforme, sans sauvegarde, exige `--app`), `--reconcile`, `--prune`,
   `--validate`, `--adopt`
   (amorce le lock depuis l'état réel, sans déployer), `--propose-db`,
-  `--propose-security`.
+  `--propose-security`, `--async` (un passage puis rend la main, l'état en vol
+  dans le lock), `--resume` (fait avancer le déploiement en cours sans en ouvrir).
+- `notifiers.ts` : `--dry-run`, `--app <fragment>`, `--remove`. Lit
+  `SCALINGO_API_TOKEN` et `RELAY_URL` dans l'environnement.
 - `audit.ts` : `--app <fragment>`, `--region <nom>` (répétable, prime sur les
   régions du manifeste), `--json` (inventaire complet sur la sortie standard),
   `--no-build-log`.
@@ -152,6 +156,7 @@ Inputs :
 | `fgp-path` | tous sauf `propose-security` | `fgp.json` |
 | `dry_run` | `reconcile`, `apply` | `false` pour `reconcile`, `true` pour `apply` |
 | `app`, `force` | `apply` | `""`, `false` |
+| `async`, `resume` | `reconcile`, `apply` | `false`, `false` (voir [Relais et notifiers](FEATURES.md#relais-et-notifiers)) |
 | `dashboard-label`, `dashboard-title` | `reconcile`, `apply` | `etat-parc`, `Parc Scalingo : etat de la convergence` |
 | `matrix-homeserver`, `matrix-room-id` | `reconcile`, `apply` | `""` (notification Matrix désactivée) |
 | `lock-commit-message` | `reconcile`, `apply` | `chore(lock): etat du parc apres reconciliation` (ou `apres deploiement`) |
@@ -161,7 +166,8 @@ Inputs :
 Secrets, tous facultatifs : `SCALINGO_API_TOKEN` ou `FGP_KEY` pour l'accès,
 `TEAMS_WEBHOOK`, `SLACK_WEBHOOK` et `MATRIX_ACCESS_TOKEN` pour les
 notifications, `PUSH_TOKEN` pour pousser le lock
-et ouvrir les pull requests sur une branche protégée. Les secrets d'accès et
+et ouvrir les pull requests sur une branche protégée, `HEARTBEAT_URL` pour la
+veille de silence (`reconcile` seulement, à partir de la 2.0.0). Les secrets d'accès et
 `PUSH_TOKEN` ont leur place dans l'environment, réservé à `main` par sa
 politique de branches.
 
@@ -204,6 +210,32 @@ jobs:
 ```
 
 Les quatre appelants complets sont dans le [template](https://github.com/incubateur-ademe/scalingo-parc-template/tree/main/.github/workflows).
+
+### Veille de silence
+
+Les notifications partent du job de réconciliation. Un job qui ne démarre plus,
+pour un refus de facturation ou un cron arrêté, ne prévient donc personne.
+Après chaque passage planifié dont le tableau de bord a été publié, `reconcile`
+envoie un GET à `HEARTBEAT_URL`. Un lancement à la main ou une relance ne bat
+pas. Un service de veille extérieur à GitHub alerte
+quand ces battements cessent. Aucune donnée du parc ne part avec.
+
+Mise en place de référence, un check par parc :
+
+1. Créer un check pulse [updown.io](https://updown.io/doc/how-pulse-cron-monitoring-works)
+   avec une période de 24 heures. Sur un mois de mesure, les déclenchements du
+   cron se sont espacés de 11 heures au plus.
+2. Ranger son URL dans le secret `HEARTBEAT_URL` et la passer à `reconcile`,
+   une fois le parc migré en 2.0.0. Aucune version 1.x ne porte le battement.
+   Mappé dans un appelant 1.x, le secret fait refuser l'appel par GitHub, et
+   chaque passage échoue au démarrage.
+3. Déclarer deux destinataires indépendants chez le service, une adresse
+   partagée et un salon. Un workflow Teams sans co-propriétaire ou un bot Tchap
+   non renouvelé cessent d'envoyer sans prévenir.
+
+Tout service qui alerte sur l'absence d'un GET convient. Plusieurs URL séparées
+par des blancs battent chacune, pour doubler le service. Sans secret, le résumé
+du run le dit.
 
 ## Actions composites
 

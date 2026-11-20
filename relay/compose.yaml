@@ -1,0 +1,18 @@
+# Pour heberger le relais ailleurs que sur Scalingo.
+#
+# Les variables viennent du fichier .env pose a cote de ce fichier, et de lui
+# seul : lues dans le shell, un GITHUB_TOKEN personnel exporte, ou le
+# GITHUB_REPOSITORY qu'un runner GitHub Actions pose, partiraient a la place
+# des valeurs du relais. Le relais sert en HTTP clair et le secret voyage dans
+# le chemin : il se publie derriere un proxy qui termine le TLS.
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3000:3000"
+    # L'arret demande jusqu'a 27 s (requetes en cours, lecture des runs en
+    # attente, dispatch et ses retentatives), quand Docker n'en laisse que 10
+    # par defaut avant SIGKILL.
+    stop_grace_period: 30s

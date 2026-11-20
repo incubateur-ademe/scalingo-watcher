@@ -29,11 +29,22 @@
  * journal du build annonce ; a defaut il n'en annonce qu'un, celui du lock du
  * gabarit, et la chaine vide simule un journal qui n'en nomme aucun.
  *
- * Un deploiement est accepte et conclu du premier coup, au statut de REAL.
+ * Un deploiement est accepte et conclu du premier coup, au statut de REAL, et
+ * fini a DONE, bien avant le passage : sa fenetre de garde est donc ecoulee.
  * CRASH=1 fait apparaitre un redemarrage en erreur dans les evenements de l'app
- * a partir du deuxieme releve suivant le deploiement, soit pendant la fenetre
- * de garde et non avant, ce qui est le scenario que la fenetre existe pour
- * attraper. CRASH_AFTER le fait apparaitre a partir d'un autre releve.
+ * a la fin du deploiement, soit dans la fenetre de garde, ce qui est le
+ * scenario que la fenetre existe pour attraper. CRASH_LATE=1 le date d'un jour
+ * plus tard, hors de la fenetre et du delai de demarrage.
+ * DEPLOY_STATUS remplace ce statut a la relecture du deploiement lance, pour
+ * un build qui n'est pas encore conclu.
+ * Une sauvegarde demandee prend l'identifiant bkp-neuve, que la liste des
+ * sauvegardes rend toujours, au statut BACKUP_STATUS, `done` a defaut : un
+ * statut en vol fait se rattacher au lieu de demander.
+ * FINISHED_AGO donne en minutes la fin du deploiement relu, comptee depuis
+ * maintenant, au lieu de DONE. EVENTS_FAIL=1 fait rendre 502 aux evenements,
+ * comme une lecture passagere ratee.
+ * DEPLOY_POST_FAIL=1 fait rendre 504 a la demande de deploiement, comme une
+ * reponse perdue dont on ne sait pas si la plateforme l'a prise en compte.
  * STOPPED=1 eteint l'app une fois son deploiement declenche.
  * PS_DENIED=1 fait refuser la lecture des conteneurs, comme un fgp.json qui
  * precede cette route.
@@ -56,7 +67,11 @@
  *
  * NOW fige l'horloge du moteur, pour la plage horaire des rebuilds.
  * AFTER_STATUS (app -> statut) donne le statut d'un deploiement que le passage
- * declenche, celui de REAL a defaut. JVM_DOWNLOAD remplace l'URL de jvm-common
+ * declenche, celui de REAL a defaut. TRIGGERED, liste d'apps separees par des
+ * virgules, dit que leur deploiement relu est celui qu'un passage precedent a
+ * lance : son journal et son statut sont ceux d'apres. DEPLOYMENTS
+ * (region/app -> liste de { id, status, git_ref?, created_at? }, du plus recent
+ * au plus ancien) remplace la liste des deploiements de l'app. JVM_DOWNLOAD remplace l'URL de jvm-common
  * dans le journal, JVM_BRANCH y ajoute un `Using branch:`, JDK_LINE remplace la
  * ligne d'installation du JDK, et la vide la retire. STACK_NAME nomme la pile
  * de chaque app, scalingo-24 a defaut ; INVENTORY_20 est l'inventaire de
@@ -100,10 +115,19 @@ const RECENT = new Date(Date.now() - 3_600_000).toISOString();
 const JVM_URL = "https://github.com/Scalingo/buildpack-jvm-common.git";
 const BEFORE = "2026-09-01T00:00:00Z";
 const LATER = "2026-10-01T00:05:00Z";
-let eventReads = 0;
+const DONE = "2026-10-01T00:01:00Z";
+const NEXT_DAY = "2026-10-02T00:01:00Z";
 let deployTriggered = false;
 const triggered = new Set<string>();
 const afterStatus = JSON.parse(process.env.AFTER_STATUS ?? "{}") as Record<string, string>;
+const deploymentLists = JSON.parse(process.env.DEPLOYMENTS ?? "{}") as Record<
+  string,
+  Array<{ id: string; status: string; git_ref?: string | null; created_at?: string }>
+>;
+// Un build lance par un passage precedent, conclu par celui-ci : le journal et
+// le statut relus sont deja ceux du build lance.
+const launchedBefore = new Set((process.env.TRIGGERED ?? "").split(",").filter((a) => a.length > 0));
+const launched = (app: string): boolean => triggered.has(app) || launchedBefore.has(app);
 
 globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
   const u = String(url);
@@ -189,7 +213,18 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
     const state = real[`${region}/${app}`];
     if (!state) return json({ error: "appel imprevu" }, 500);
     if (route === "/variables") return json({ variables: [{ id: "var-1", name: "METABASE_VERSION", value: state.version }] });
-    if (route === "/deployments?per_page=1") {
+    if ((r = /^\/deployments\?per_page=(\d+)$/.exec(route))) {
+      const listed = deploymentLists[`${region}/${app}`];
+      if (listed) {
+        return json({
+          deployments: listed.slice(0, Number(r[1])).map((d) => ({
+            created_at: process.env.DEPLOYED_AT ?? RECENT,
+            git_ref: state.sha,
+            ...(process.env.STACK_IMAGE ? { stack_base_image: process.env.STACK_IMAGE } : {}),
+            ...d,
+          })),
+        });
+      }
       return json({
         deployments: [
           {
@@ -203,18 +238,21 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
       });
     }
     if (route === `/deployments/dep-${app}`) {
+      const status = process.env.DEPLOY_STATUS ?? (launched(app) ? afterStatus[app] : undefined) ?? state.status ?? "success";
+      const finished = process.env.FINISHED_AGO ? new Date(Date.now() - Number(process.env.FINISHED_AGO) * 60_000).toISOString() : DONE;
       return json({
         deployment: {
           id: `dep-${app}`,
-          status: (triggered.has(app) ? afterStatus[app] : undefined) ?? state.status ?? "success",
+          status,
           created_at: AT,
+          finished_at: finished,
           ...(process.env.STACK_IMAGE_AFTER ? { stack_base_image: process.env.STACK_IMAGE_AFTER } : {}),
         },
       });
     }
     if (route === `/deployments/dep-${app}/output`) {
       if (process.env.LOG_OUTAGE) return json({ error: "injoignable" }, 503);
-      const jdk = deployTriggered && process.env.JDK_AFTER ? process.env.JDK_AFTER : process.env.JDK;
+      const jdk = launched(app) && process.env.JDK_AFTER ? process.env.JDK_AFTER : process.env.JDK;
       const jvm = jdk
         ? [
             `-----> Downloading Buildpack: ${process.env.JVM_DOWNLOAD ?? JVM_URL}`,
@@ -236,12 +274,13 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
         ],
       });
     }
-    if (route === "/events?from=1") {
-      if (deployTriggered) eventReads++;
-      const fallen = (process.env.CRASH || process.env.CRASH_AFTER) && eventReads > Number(process.env.CRASH_AFTER ?? 1);
+    if (route.startsWith("/events?")) {
+      if (process.env.EVENTS_FAIL) return json({ error: "bad gateway" }, 502);
+      const crashAt = process.env.CRASH_LATE ? NEXT_DAY : DONE;
+      const fallen = deployTriggered && (process.env.CRASH || process.env.CRASH_LATE);
       return json({
         events: [
-          ...(fallen ? [{ id: "ev-crash", type: "restart", created_at: AT, type_data: { reason: "unexpected_failure" } }] : []),
+          ...(fallen ? [{ id: "ev-crash", type: "restart", created_at: crashAt, type_data: { reason: "unexpected_failure" } }] : []),
           // Deja la avant la fenetre : un releve qui le compterait refuserait
           // tous les deploiements.
           { id: "ev-deploiement", type: "deployment", created_at: AT },
@@ -255,11 +294,16 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
     const [, region, app, route] = r;
     if (!real[`${region}/${app}`]) return json({ error: "appel imprevu" }, 500);
     if (route === "/deployments") {
+      if (process.env.DEPLOY_POST_FAIL) return json({ error: "gateway timeout" }, 504);
       deployTriggered = true;
       triggered.add(app);
       return json({ deployment: { id: `dep-${app}` } });
     }
     if (/^\/variables(\/.+)?$/.test(route)) return json({ variable: { id: "var-1" } });
+  }
+  if (/\/api\/databases\/[^/]+\/backups$/.test(u)) {
+    if (m === "POST") return json({ database_backup: { id: "bkp-neuve", status: "scheduled", created_at: AT } });
+    return json({ database_backups: [{ id: "bkp-neuve", status: process.env.BACKUP_STATUS ?? "done", created_at: AT }] });
   }
   if (m === "GET" && (r = /\/api\/databases\/([^/~]+)~([^/]+)$/.exec(u))) {
     const v = versions[`${r[1]}/${r[2]}`];

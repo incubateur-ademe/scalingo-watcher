@@ -1,0 +1,5 @@
+# Le contexte de build est ce dossier, ou vit aussi le .env du compose : seuls
+# les deux fichiers de l'image y entrent.
+*
+!package.json
+!relay.ts
