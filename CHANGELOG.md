@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.7.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.6.0...v1.7.0) (2026-11-20)
+
+
+### Nouveautés
+
+* **apply:** un deploiement avance par passages, sans tenir la CI ([#58](https://github.com/incubateur-ademe/scalingo-watcher/issues/58)) ([ecbb713](https://github.com/incubateur-ademe/scalingo-watcher/commit/ecbb71341a27061e1e7816416c14dcbcc1b479cd))
+* **reconcile:** battre aupres d'une veille de silence apres chaque passage planifie ([#57](https://github.com/incubateur-ademe/scalingo-watcher/issues/57)) ([11083a0](https://github.com/incubateur-ademe/scalingo-watcher/commit/11083a01e6fb0819840397c292f33d4a543c3cbf))
+
+
+### Corrections
+
+* **deps:** bump pnpm/action-setup from 6.1.0 to 6.1.1 in /actions/setup in the actions group across 1 directory ([#55](https://github.com/incubateur-ademe/scalingo-watcher/issues/55)) ([6384ac4](https://github.com/incubateur-ademe/scalingo-watcher/commit/6384ac4f4cf022ecbb4c1ce124125467d832d5d6))
+
+
+### Documentation
+
+* **features:** expliquer pourquoi une montée de l'outil n'est jamais fusionnée seule ([#53](https://github.com/incubateur-ademe/scalingo-watcher/issues/53)) ([9eb4fc9](https://github.com/incubateur-ademe/scalingo-watcher/commit/9eb4fc9d5e2a55f9a8ae2d17fdc52e0a28134a1e))
+
 ## [1.6.0](https://github.com/incubateur-ademe/scalingo-watcher/compare/v1.5.0...v1.6.0) (2026-11-10)
 
 
