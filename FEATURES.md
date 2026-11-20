@@ -193,9 +193,12 @@ les autres applications correctement consignées.
 `build` : l'identifiant de ce déploiement, la version de l'outil avec laquelle il
 a été fait, l'image de pile lue sur lui, et les runtimes lus dans son journal,
 `null` quand le journal n'a pas pu être lu. La version est exacte quand le moteur
-a conclu le build. Le relevé la lit sur la variable quand ce build est le dernier
-déploiement, et la laisse à `null` derrière un échec, où la variable porte déjà
-la cible de l'échec. Un build raté n'y entre jamais. Scalingo garde alors les conteneurs précédents, mais
+a conclu le build. Le relevé la lit sur la variable seulement pour un build
+apparu depuis le lock et resté le dernier déploiement. Il la laisse à `null`
+derrière un échec, où la variable porte déjà la cible de l'échec, et pour un
+build que le lock connaissait sans sa version : un moteur plus ancien recopiait
+la variable sans condition, et une montée dont le déploiement n'était jamais
+parti y passait pour faite. Un build raté n'y entre jamais. Scalingo garde alors les conteneurs précédents, mais
 le journal annonce déjà le nouveau JDK et le déploiement porte déjà la nouvelle
 pile : les consigner ferait passer pour à jour une application qui tourne
 l'ancien build.
@@ -499,10 +502,14 @@ démarrer. C'est arrivé le 2026-10-30, et seule une fusion dans la fenêtre l'a
 deux gestes : aligner le manifeste sur ce qui tourne, ou restaurer la base puis
 forcer la descente par `--force --app`.
 
-**[fait]** Ce contrôle ne s'applique qu'à une version qu'un déploiement réussi
-accompagne dans le lock. Après un échec, la variable porte déjà la cible ratée
-sans que le binaire ait changé : refuser le retour en arrière serait refuser la
-seule réaction sensée.
+**[fait]** Ce contrôle juge la version en service : celle du build en service
+quand le lock la connaît, sinon celle que porte la variable, à condition qu'un
+déploiement réussi l'accompagne. Après un échec, la variable porte déjà la cible
+ratée sans que le binaire ait changé : refuser le retour en arrière serait
+refuser la seule réaction sensée. Le build en service, lui, n'a pas bougé. Un
+rebuild raté ne désarme donc pas le contrôle : une cible antérieure au binaire
+qui tourne reste refusée, au lieu de partir en première prise en charge avec
+une sauvegarde qui remplacerait le point de restauration.
 
 **[fait]** La comparaison est purement numérique, sans égard pour les lignes de
 publication. Une descente de majeure est donc refusée comme une autre, et chez
@@ -898,7 +905,10 @@ build en service, le dernier déploiement réussi, est celui que le lock décrit
 au même commit et à la même version, et que la variable de version n'a pas bougé
 depuis. Le lock seul ne le prouve pas : il peut dater d'avant un déploiement fait
 hors du watcher. Un build en service que le lock ne connaît pas encore attend le
-relevé suivant. Un build dont le `git_ref` n'est pas un sha n'est jamais refait,
+relevé suivant. Un build dont la version n'est pas attestée n'est pas refait par
+âge, et une échéance le dit : c'est le cas de toute application après la montée
+vers cette version de l'outil, jusqu'à son prochain déploiement par l'outil, ou
+un `--force --app`, qui sauvegarde. Un build dont le `git_ref` n'est pas un sha n'est jamais refait,
 et l'application reste conforme. Une application en pause est relevée mais
 jamais rebuildée.
 
@@ -910,7 +920,8 @@ comprise. Il ne part jamais à côté d'une montée qui attend son éclaireur.
 **[fait]** Un rebuild ne tient pas lieu d'éclaireur. Refaire un build à
 l'identique ne dit rien d'une version nouvelle : compté comme éclaireur, il
 laisserait partir de front derrière lui des montées qu'aucune application n'a
-validées. L'application suivante prend le rôle.
+validées. L'application suivante prend le rôle, et le plan ne fait pas d'un
+rebuild l'éclaireur de la vague qu'il annonce.
 
 **[fait]** Après un premier rebuild réussi dans un déploiement, les rebuilds
 suivants partent jusqu'à trois de front entre eux. La chaîne de build est alors
@@ -943,8 +954,10 @@ lecture refusée par le proxy, met aussi l'application en quarantaine `rebuild`,
 au motif `rebuild sans verdict`. Sans elle, un build raté que personne n'a vu
 ferait prendre l'application pour jamais déployée au passage suivant, donc
 sauvegardée, et le point de restauration d'avant la dernière montée serait
-remplacé. Le relevé lève cette quarantaine quand Scalingo conclut le même
-déploiement en succès, et la confirme en échec sinon.
+remplacé. Quand Scalingo conclut le même déploiement en succès, le relevé relit
+sa fenêtre de garde après coup et ne lève la quarantaine que si elle n'a rien
+vu. Un statut `success` ne dit pas que l'outil tient. La quarantaine est
+confirmée sinon.
 
 **[fait]** La suspension ne tombe qu'au premier déploiement réussi de
 l'application : par `--rebuild --app` une fois la cause levée, ou par une montée
@@ -953,7 +966,9 @@ marque : il ne dit pas que la cause est levée. Une entrée orpheline du lock ou
 une application en pause ne suspend rien, aucun déploiement ne venant jamais
 lever sa quarantaine. `--rebuild --app` ne lève pas la quarantaine d'une montée
 ratée, dont la cible n'est pas le build en service : ce serait monter sans
-sauvegarde. Elle se lève par `--force --app`.
+sauvegarde. Elle se lève par `--force --app`. Le tableau de bord conseille
+`--rebuild --app` pour une quarantaine qui suspend les rebuilds. `--force`
+sauvegarderait et remplacerait le point de restauration.
 
 **[fait]** `--rebuild --app` refait le build d'une application conforme sans
 attendre, sans sauvegarde, par exemple quand le tableau de bord la dit `rebuild
@@ -1375,10 +1390,12 @@ répond.
 **Personne n'expose la version du binaire en service.** La variable dit la
 version du prochain build. Le relevé ne la reprend que si un déploiement a suivi
 celui que le lock connaît : une montée dont la variable est posée et dont le
-déploiement n'est jamais parti passait sinon pour faite. Un déploiement fait hors
-du watcher, lui, est cru sur la variable lue au relevé : si elle a encore bougé
-entre ce build et le relevé, sans nouveau build, un rebuild par âge construirait
-la nouvelle version sans sauvegarde. Il faut pour cela un déploiement hors du
+déploiement n'est jamais parti passait sinon pour faite. Une variable changée sans
+build compte comme dérive, avec une échéance qui avertit qu'un build fait hors de
+l'outil construirait cette version sans sauvegarde. Un déploiement fait hors du
+watcher, lui, est cru sur la variable lue au relevé. Si cette variable a encore
+bougé entre ce build et le relevé, sans nouveau build, un rebuild par âge
+construirait la nouvelle version sans sauvegarde. Il faut pour cela un déploiement hors du
 watcher puis une édition de variable sans build, sur une application gérée.
 
 **Après un échec de montée, le retour arrière demande `--force`.** Si l'échec a

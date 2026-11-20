@@ -1000,6 +1000,10 @@ type Deployment = {
   stack_base_image?: string;
 };
 
+// Apps dont la variable de version a bouge sans build depuis le lock : le releve
+// garde la version servie, et le compte en derive.
+const unbuiltVariables = new Set<string>();
+
 /** Deploiements les plus recents d'une app, du plus recent au plus ancien, quel qu'en soit le statut. */
 async function recentDeployments(entry: AppRef, count: number): Promise<Deployment[]> {
   const { deployments } = await reqApi<{ deployments: Deployment[] }>(
@@ -1116,20 +1120,32 @@ async function adoptApp(
   const unbuilt = Boolean(known?.deployment && last?.id === known.deployment.id && known.tool.version !== declared);
   const version = unbuilt ? known!.tool.version : declared;
   if (unbuilt) {
-    emit(`    ${entry.tool.env} porte ${declared ?? "rien"}, qu'aucun build n'a servi depuis ${last!.id} : ${known!.tool.version ?? "non epinglee"} gardee`);
+    const kept = known!.tool.version ?? "non epinglee";
+    emit(`    ${entry.tool.env} porte ${declared ?? "rien"}, qu'aucun build n'a servi depuis ${last!.id} : ${kept} gardee`);
+    unbuiltVariables.add(keyOf(entry));
+    warn(
+      keyOf(entry),
+      `${entry.tool.env} porte ${declared ?? "rien"} sans build depuis ${last!.id}, ${kept} en service : ` +
+        `un build fait hors de l'outil construirait ${declared ?? "sans version"} sans sauvegarde. ` +
+        `Remettre ${entry.tool.env} a ${kept}, ou laisser l'outil deployer la cible.`,
+    );
   }
 
   const output = last ? await readBuildOutput(entry, last.id) : null;
   const served = inService(recent);
   const servedOutput = !served ? null : served.id === last?.id ? output : await readBuildOutput(entry, served.id);
-  // La version d'un build n'est sure que si le moteur l'a consigne, ou si c'est
-  // le dernier deploiement : derriere un echec, la variable porte la cible de
-  // l'echec et non celle du build qui tourne.
+  // La version d'un build n'est sure que si le moteur l'a consignee, ou si ce
+  // build est apparu depuis le lock et reste le dernier deploiement : la
+  // variable lue alors est celle qu'il a servie. Derriere un echec, elle porte
+  // la cible de l'echec. Et un build que le lock connaissait deja sans sa
+  // version a pu etre releve par un moteur qui recopiait la variable sans
+  // condition : une montee dont le deploiement n'etait jamais parti y passait
+  // pour faite, et un rebuild la construirait sans sauvegarde.
   const servedVersion = !served
     ? null
     : known?.build?.deployment === served.id
       ? (known.build.version ?? null)
-      : served.id === last?.id
+      : served.id === last?.id && known?.deployment?.id !== served.id
         ? version
         : null;
   return {
@@ -1356,6 +1372,31 @@ export const targetReached = (
 
 /** Motif de la quarantaine d'un rebuild parti dont le verdict s'est perdu. */
 export const LOST_VERDICT = "rebuild sans verdict";
+
+/**
+ * Quarantaine d'un verdict perdu, une fois le deploiement conclu en succes par
+ * Scalingo : levee si la fenetre de garde, relue apres coup, n'a rien vu,
+ * confirmee sinon. Un statut `success` ne dit pas que l'outil tient : sans cette
+ * relecture, un JDK qui fait boucler l'app au demarrage levait la suspension.
+ */
+async function lostVerdictSettled(
+  entry: AppEntry,
+  manifest: Manifest,
+  quarantine: NonNullable<LockEntry["quarantine"]>,
+): Promise<LockEntry["quarantine"]> {
+  try {
+    const dep = await readDeployment(entry, quarantine.deploymentId!);
+    const window = settleOf(entry, manifest.defaults).window;
+    const verdict = await settleVerdict(entry, window, { created_at: dep.created_at, finished_at: dep.finished_at ?? dep.created_at });
+    if ("waiting" in verdict) return quarantine;
+    if (verdict.failure) return { ...quarantine, reason: `${verdict.failure}, constate au releve` };
+    log(`  ${keyOf(entry)} : ${quarantine.deploymentId} conclu en succes, fenetre de garde relue sans incident, quarantaine levee`);
+    return null;
+  } catch (e) {
+    log(`  ${keyOf(entry)} : verdict de ${quarantine.deploymentId} toujours illisible (${(e as Error).message.slice(0, 160)}), quarantaine maintenue`);
+    return quarantine;
+  }
+}
 
 /**
  * Quarantaine qui survit a un releve. Elle tombe quand la cible est atteinte,
@@ -1662,9 +1703,9 @@ export function rebuildSuspendedBy(lock: Lock, apps: readonly AppEntry[]): strin
  * Pourquoi refaire a l'identique le build d'une app conforme (`due`), pourquoi
  * pas encore alors qu'il a l'age (`later`), ou null.
  *
- * --rebuild passe outre l'age, la plage et la suspension. Ni l'un ni l'autre ne
- * suffit a lancer : le lancement confirme encore sur Scalingo que le build en
- * service est celui que le lock decrit.
+ * --rebuild passe outre l'age, la plage et la suspension. Un plan `due` ne
+ * suffit pas a lancer : le lancement confirme encore sur Scalingo que le build
+ * en service est celui que le lock decrit.
  */
 export function rebuildPlan(
   current: LockEntry,
@@ -1679,6 +1720,7 @@ export function rebuildPlan(
   if (days === null) return null;
   const age = `build du ${at!.slice(0, 10)}, vieux de ${days} jours`;
   if (!current.build) return { later: `${age}, build en service pas encore releve` };
+  if (current.build.version === null) return { later: `${age}, version du build en service non attestee` };
   if (suspendedBy) return { later: `${age}, rebuilds par age suspendus` };
   if (!inRebuildWindow(now)) {
     return { later: `${age}, refait entre ${REBUILD_HOURS_UTC.from} h et ${REBUILD_HOURS_UTC.to} h UTC` };
@@ -1753,6 +1795,13 @@ async function launchApp(
     });
     if (!plan || "later" in plan) {
       emit(`  ${key} : deja conforme${plan ? `, ${plan.later}` : ""}`);
+      if (plan && current.build?.version === null) {
+        warn(
+          key,
+          `build de plus de ${REBUILD_AFTER_DAYS} jours dont la version n'est pas attestee : aucun rebuild par age. ` +
+            `Le prochain deploiement par l'outil l'atteste, ou --force --app, avec sauvegarde.`,
+        );
+      }
       return "up-to-date";
     }
     rebuild = plan.due;
@@ -1872,14 +1921,20 @@ async function launchApp(
   // dit reellement en service : apres un echec, la variable porte la nouvelle
   // valeur sans que le binaire ait change, et refuser le retour en arriere
   // serait precisement refuser la seule reaction sensee.
-  if (!OPT.force && everDeployed && targetGoesBack(current!.tool.version, target.version)) {
-    // "la variable porte" et non "l'app tourne" : c'est tout ce qu'on sait. La
-    // variable dit la version du prochain build, et personne n'expose celle du
-    // binaire en service. Une variable changee a la main sans deploiement fait
-    // donc refuser une cible que l'app servait deja, et c'est assume : les deux
-    // cas se resolvent du meme geste, regarder pourquoi le reel et le manifeste
-    // ne disent pas la meme chose.
-    const was = `${entry.tool.env} porte ${current!.tool.version}`;
+  // La version servie est celle du build en service quand le lock la connait :
+  // apres un echec, montee ou rebuild, la variable porte la cible ratee et le
+  // dernier deploiement n'est plus un succes, mais l'ancien binaire tourne
+  // toujours sur sa base.
+  const running = current?.build?.version ?? (everDeployed ? current!.tool.version : null);
+  const runningSaid =
+    current?.build?.version && current.build.version !== current.tool.version
+      ? `le build en service est en ${running}`
+      : `${entry.tool.env} porte ${running}`;
+  if (!OPT.force && running !== null && targetGoesBack(running, target.version)) {
+    // Sans build consigne, "la variable porte" et non "l'app tourne" : c'est
+    // tout ce qu'on sait. La variable dit la version du prochain build, et
+    // personne n'expose celle du binaire en service.
+    const was = runningSaid;
     emit(`    DESCENTE DE VERSION : ${was}, le manifeste demande ${target.version}`);
     emit(`    aligne le manifeste sur ce qui tourne, ou restaure la base avant de forcer la descente`);
     note(
@@ -1893,8 +1948,8 @@ async function launchApp(
   // Le controle precedent se tait face a une version qui ne se compare pas.
   // Le 2026-11-04, une variable a `latest` a laisse passer v0.64.4.3 sur une base
   // que `latest`, alors v0.65.2, avait deja migree, et l'app n'a plus demarre.
-  if (!OPT.force && everDeployed && runningVersionUnknown(current!.tool.version, target.version)) {
-    const was = `${entry.tool.env} porte ${current!.tool.version}`;
+  if (!OPT.force && running !== null && runningVersionUnknown(running, target.version)) {
+    const was = runningSaid;
     emit(`    VERSION EN SERVICE INCONNUE : ${was}, qui ne designe aucune version, le manifeste demande ${target.version}`);
     emit(`    releve la version qui tourne dans le journal de demarrage de l'outil avant de forcer`);
     note(
@@ -2873,7 +2928,14 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
         `  > ${q.reason.split("\n")[0].slice(0, 300)}`,
       );
     }
-    lines.push("", "Corriger le manifeste, ou relancer avec `--force` une fois la cause levee.", "");
+    lines.push("", "Corriger le manifeste, ou relancer avec `--force` une fois la cause levee.");
+    if (quarantined.some(([, v]) => v!.quarantine!.rebuild)) {
+      lines.push(
+        "Une quarantaine qui suspend les rebuilds se lève par `--rebuild --app`, sans sauvegarde, quand sa cible est le build en service. " +
+          "`--force` sauvegarderait et remplacerait le point de restauration d'avant la dernière montée.",
+      );
+    }
+    lines.push("");
   }
 
   if (warnings.length > 0) {
@@ -4451,7 +4513,18 @@ async function main() {
       // adoptApp ne releve pas les sauvegardes, qui ne se lisent pas sur l'app :
       // les ecraser par null faisait perdre le point de restauration, c'est-a-dire
       // ce dont on a besoin precisement quand une migration a mal tourne.
-      lock.apps[key] = afterSurvey(real, known, keptQuarantine(real, targetOf(entry), known?.quarantine ?? null));
+      const lost =
+        known?.quarantine?.reason === LOST_VERDICT &&
+        real.deployment?.id === known.quarantine.deploymentId &&
+        real.deployment.status === "success";
+      const quarantine = lost
+        ? await lostVerdictSettled(entry, manifest, known!.quarantine!)
+        : keptQuarantine(real, targetOf(entry), known?.quarantine ?? null);
+      lock.apps[key] = afterSurvey(real, known, quarantine);
+      if (unbuiltVariables.has(key)) {
+        drifts++;
+        log(`  ${key} : DERIVE, ${entry.tool.env} changee sans build, version servie gardee au lock`);
+      }
     }
     // Sans cette precision, "Aucune derive." precedait la derive d'une app en
     // pause, annoncee juste apres dans l'application.
@@ -4496,7 +4569,8 @@ async function main() {
     for (; i < targets.length && !scoutDone; i++) {
       const outcome = await launchApp(targets[i], manifest, lock, token, log);
       tally[outcome]++;
-      if (outcome === "planned") scoutDone = true;
+      // Un rebuild planifie n'est pas l'eclaireur : il ne validera aucune montee.
+      if (outcome === "planned" && !atRestOnTarget(targets[i], lock)) scoutDone = true;
     }
     const rest = targets.slice(i);
     if (rest.length > 0) {
@@ -4660,6 +4734,9 @@ async function main() {
     log(`\n${stuck.length} app(s) en quarantaine :`);
     for (const [k, v] of stuck) log(`  ${k} : ${v.quarantine!.reason} (cible ${v.quarantine!.target.version})`);
     log(`Corriger la cible au manifeste, ou relancer avec --force une fois la cause levee.`);
+    if (stuck.some(([, v]) => v.quarantine!.rebuild)) {
+      log(`Une quarantaine qui suspend les rebuilds se leve par --rebuild --app, sans sauvegarde, quand sa cible est le build en service.`);
+    }
   }
 
   if (!OPT.dryRun) await writeIncident(lock, targets);

@@ -5453,6 +5453,162 @@ try {
     return [out.status, /choisis l'un des deux/.test(out.output), out.calls];
   })();
   check("--rebuild --force est refuse avant tout appel", rebuildForce, [1, true, []]);
+
+  const monte = (manifeste: string, app: string, version = "v0.63.19") => {
+    const start = manifeste.indexOf(`  - app: ${app}\n`);
+    const at = manifeste.indexOf("version: v0.63.18", manifeste.indexOf("tool:", start));
+    return manifeste.slice(0, at) + `version: ${version}` + manifeste.slice(at + "version: v0.63.18".length);
+  };
+  const enVolDe = (lock: { apps: Record<string, { inflight?: unknown }> }) => Object.keys(lock.apps).filter((k) => lock.apps[k].inflight).sort();
+
+  const [, avecMontee] = enSuite(monte(sansAttenteAlpha, "gamma-metabase"), null, [
+    { args: ["--reconcile", "--async"], env: nuitVieille },
+    { args: ["--reconcile", "--async", "--resume"], env: { ...nuitVieille, TRIGGERED: "alpha-metabase" } },
+  ]);
+  check(
+    "apres un rebuild reussi, aucun rebuild ne part a cote d'une montee eclaireur en vol",
+    [/Rebuild reussi/.test(avecMontee.out.output), avecMontee.lock.apps[APP_GAMMA].inflight?.step, avecMontee.lock.apps[APP_GAMMA].inflight?.rebuild ?? null, avecMontee.lock.apps[APP_DELTA].inflight ?? null, lances(avecMontee.out.calls)],
+    [true, "backup", null, null, []],
+  );
+  const [, monteeDerriere] = enSuite(monte(sansAttenteAlpha, "delta-metabase"), null, [
+    { args: ["--reconcile", "--async"], env: nuitVieille },
+    { args: ["--reconcile", "--async", "--resume"], env: { ...nuitVieille, TRIGGERED: "alpha-metabase" } },
+  ]);
+  check(
+    "apres un rebuild reussi, une montee attend son eclaireur et ne part pas a cote d'un rebuild en vol",
+    [monteeDerriere.lock.apps[APP_GAMMA].inflight?.rebuild, monteeDerriere.lock.apps[APP_DELTA].inflight ?? null, lances(monteeDerriere.out.calls)],
+    [true, null, ["gamma-metabase"]],
+  );
+
+  const clone = (nom: string) =>
+    `\n  - app: ${nom}\n    region: osc-secnum-fr1\n    backup: not-available\n    source:\n      repo: exemple/metabase-scalingo\n      branch: main\n` +
+    `      # renovate: datasource=git-refs depName=exemple/metabase-scalingo\n      sha: ${"a".repeat(40)}\n    tool:\n      env: METABASE_VERSION\n` +
+    `      # renovate: datasource=github-releases depName=metabase/metabase\n      version: v0.63.18\n`;
+  const cinq = { ...nuitVieille, REAL: JSON.stringify({ ...JSON.parse(TROIS_RELEVABLES), "osc-secnum-fr1/epsilon-metabase": { version: "v0.63.18", sha: "a".repeat(40) }, "osc-secnum-fr1/zeta-metabase": { version: "v0.63.18", sha: "a".repeat(40) } }) };
+  const [, plafond] = enSuite(sansAttenteAlpha.trimEnd() + "\n" + clone("epsilon-metabase") + clone("zeta-metabase"), null, [
+    { args: ["--reconcile", "--async"], env: cinq },
+    { args: ["--reconcile", "--async", "--resume"], env: { ...cinq, TRIGGERED: "alpha-metabase" } },
+  ]);
+  check("les rebuilds de front ne depassent jamais trois en vol", [enVolDe(plafond.lock).length, lances(plafond.out.calls).length], [3, 3]);
+
+  const [, , eclaireurRate] = enSuite(sansAttenteAlpha, null, [
+    { args: ["--reconcile", "--async"], env: nuitVieille },
+    { args: ["--reconcile", "--async", "--resume"], env: { ...nuitVieille, TRIGGERED: "alpha-metabase" } },
+    {
+      args: ["--reconcile", "--async", "--resume"],
+      env: { ...nuitVieille, TRIGGERED: "alpha-metabase,gamma-metabase,delta-metabase", AFTER_STATUS: JSON.stringify({ "gamma-metabase": "build-error" }) },
+    },
+  ]);
+  check(
+    "l'echec de l'eclaireur rebuild arrete la vague, meme quand un autre rebuild est parti de front",
+    /echec sur l'eclaireur osc-secnum-fr1\/gamma-metabase/.test(eclaireurRate.out.output),
+    true,
+  );
+
+  const gammaEnVol = lockAvec((_, apps) => {
+    apps[APP_GAMMA].inflight = {
+      target: { sha: "b".repeat(40), version: "v0.63.18" },
+      step: "deploy",
+      since: new Date(Date.now() - 60_000).toISOString(),
+      rollout: "2026-11-01T00:00:00.000Z",
+      async: true,
+      backups: [],
+      deployment: { id: "dep-gamma-metabase", at: new Date(Date.now() - 60_000).toISOString() },
+    };
+  });
+  const [retenu, mene] = enSuite(sansAttenteAlpha, gammaEnVol, [
+    { args: ["--rebuild", "--app", "alpha", "--async"], env: { REAL: TROIS_RELEVABLES, DEPLOY_STATUS: "building" } },
+    { args: ["--reconcile", "--async", "--resume"], env: { REAL: TROIS_RELEVABLES } },
+  ]);
+  check(
+    "une reprise mene le --rebuild --app qu'un vol precedent avait retenu",
+    [lances(retenu.out.calls), retenu.lock.rollout?.rebuild ?? null, lances(mene.out.calls), mene.lock.apps[RT].inflight?.rebuild ?? null, sauvegardes(mene.out.calls)],
+    [[], true, ["alpha-metabase"], true, 0],
+  );
+
+  check(
+    "--rebuild --app sur une app en ecart est une montee ordinaire, avec sauvegarde, meme sous une ancienne quarantaine de rebuild",
+    (() => {
+      const b = sandbox();
+      writeFileSync(join(b.fleet, "manifest.yaml"), monte(sansAttenteAlpha, "alpha-metabase"));
+      writeFileSync(join(b.fleet, "lock.json"), lockAvec((alpha) => {
+        alpha.quarantine = { target: { sha: "a".repeat(40), version: "v0.63.18" }, reason: "build-error", at: "2026-11-18T03:00:00.000Z", deploymentId: "dep-rate", rebuild: true };
+      }));
+      const out = run(b, "apply.ts", ["--rebuild", "--app", "alpha", ...FLEET, "--out-dir", "../sortie"], { ...ENV_RT, REAL: TROIS_RELEVABLES });
+      return [lances(out.calls), /montee ratee/.test(out.output), sauvegardes(out.calls) > 0, loadLock(join(b.fleet, "lock.json")).apps[RT].tool.version];
+    })(),
+    [["alpha-metabase"], false, true, "v0.63.19"],
+  );
+
+  const [monteePerdue] = enSuite(sansAttenteAlpha, lockAvec((alpha) => {
+    alpha.inflight = { ...(JSON.parse(enVolDepuisHier).apps[RT].inflight as Record<string, unknown>), rebuild: undefined };
+  }), [{ args: ["--reconcile"], env: { NOW: NUIT, DEPLOY_STATUS: "building", REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40) } }) } }]);
+  check(
+    "une montee dont le verdict se perd est interrompue sans quarantaine, et ne suspend aucun rebuild",
+    [/INTERROMPU/.test(monteePerdue.out.output), monteePerdue.lock.apps[RT].inflight ?? null, monteePerdue.lock.apps[RT].quarantine],
+    [true, null, null],
+  );
+
+  const [, verdictRelu] = enSuite(fixtureSrc, enVolDepuisHier, [
+    { args: ["--reconcile"], env: { NOW: NUIT, DEPLOY_STATUS: "building", REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40) } }) } },
+    { args: ["--reconcile"], env: { NOW: NUIT, TRIGGERED: "alpha-metabase", CRASH: "1", REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40) } }) } },
+  ]);
+  check(
+    "un verdict perdu ne se leve pas sur le seul statut : la fenetre de garde relue confirme le crash",
+    [verdictRelu.lock.apps[RT].quarantine?.rebuild, /constate au releve$/.test(verdictRelu.lock.apps[RT].quarantine?.reason ?? ""), lances(verdictRelu.out.calls)],
+    [true, true, []],
+  );
+
+  const herite = passage(
+    ["--reconcile"],
+    { NOW: NUIT, DEPLOYED_AT: avant(NUIT, 10) },
+    lockAvec((alpha) => {
+      alpha.deployment = { id: "dep-alpha-metabase", status: "success", at: avant(NUIT, 10) };
+    }),
+  );
+  check(
+    "un lock d'avant ce champ n'atteste pas la version du build : aucun rebuild sans sauvegarde, une echeance le dit",
+    [herite.deployments, herite.backups, herite.entry.build?.version, /version n'est pas attestee : aucun rebuild par age/.test(herite.out.output)],
+    [0, 0, null, true],
+  );
+
+  const descenteApresRate = (() => {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), monte(sansAttenteAlpha, "alpha-metabase", "v0.63.17"));
+    writeFileSync(join(b.fleet, "lock.json"), lockAvec((alpha) => {
+      alpha.backup = { id: "bkp-42", at: "2026-11-01T03:00:00.000Z" };
+      alpha.deployment = { id: "dep-alpha-metabase", status: "build-error", at: avant(NUIT, 1) };
+      alpha.build = { deployment: "dep-ancien", version: "v0.63.18", stack: "scalingo/scalingo-24:v10", runtimes: JDK_LU };
+      alpha.quarantine = { target: { sha: "a".repeat(40), version: "v0.63.18" }, reason: "build-error", at: "2026-11-18T03:00:00.000Z", deploymentId: "dep-alpha-metabase", rebuild: true };
+    }));
+    const out = run(b, "apply.ts", ["--reconcile", ...FLEET, "--out-dir", "../sortie"], {
+      ...ENV_RT,
+      REAL: JSON.stringify({ [RT]: { version: "v0.63.18", sha: "a".repeat(40), status: "build-error" } }),
+      DEPLOYMENTS: JSON.stringify({ [RT]: [{ id: "dep-alpha-metabase", status: "build-error" }, { id: "dep-ancien", status: "success" }] }),
+    });
+    return [lances(out.calls), sauvegardes(out.calls), /DESCENTE DE VERSION : METABASE_VERSION porte v0\.63\.18, le manifeste demande v0\.63\.17/.test(out.output)];
+  })();
+  check("apres un rebuild rate, le controle de descente juge le build en service, pas le dernier deploiement", descenteApresRate, [[], 0, true]);
+
+  check(
+    "une variable changee sans build est une derive, et une echeance le dit",
+    [/DERIVE, METABASE_VERSION changee sans build/.test(variableBougee.out.output), /un build fait hors de l'outil construirait v0\.63\.19 sans sauvegarde/.test(variableBougee.out.output)],
+    [true, true],
+  );
+
+  const planAvecMontees = (() => {
+    const b = sandbox();
+    writeFileSync(join(b.fleet, "manifest.yaml"), monte(monte(sansAttenteAlpha, "gamma-metabase"), "delta-metabase"));
+    const out = run(b, "apply.ts", ["--reconcile", "--dry-run", ...FLEET, "--out-dir", "../sortie"], { ...ENV_RT, ...nuitVieille });
+    return [/rebuild a l'identique/.test(out.output), /1 app\(s\) restantes, menees 3 de front/.test(out.output)];
+  })();
+  check("en plan, un rebuild ne tient pas lieu d'eclaireur : la premiere montee le reste", planAvecMontees, [true, true]);
+
+  check(
+    "le tableau de bord conseille --rebuild --app pour une quarantaine qui suspend les rebuilds",
+    /se lève par `--rebuild --app`, sans sauvegarde, quand sa cible est le build en service/.test(monteeRateeLevee.incident),
+    true,
+  );
 } finally {
   for (const root of sandboxes) rmSync(root, { recursive: true, force: true });
 }

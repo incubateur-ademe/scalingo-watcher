@@ -277,7 +277,7 @@ globalThis.fetch = (async (url: string | URL, init: RequestInit = {}) => {
     if (route.startsWith("/events?")) {
       if (process.env.EVENTS_FAIL) return json({ error: "bad gateway" }, 502);
       const crashAt = process.env.CRASH_LATE ? NEXT_DAY : DONE;
-      const fallen = deployTriggered && (process.env.CRASH || process.env.CRASH_LATE);
+      const fallen = (deployTriggered || launchedBefore.has(app)) && (process.env.CRASH || process.env.CRASH_LATE);
       return json({
         events: [
           ...(fallen ? [{ id: "ev-crash", type: "restart", created_at: crashAt, type_data: { reason: "unexpected_failure" } }] : []),
