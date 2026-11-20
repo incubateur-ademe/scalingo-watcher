@@ -68,7 +68,8 @@ la racine de l'outil :
 | `propose-security` | `src/apply.ts --propose-security` | Monte les versions que les avis de l'amont couvrent, dans le manifeste |
 | `init` | `src/init.ts` | Écrit un premier manifeste depuis l'état réel |
 | `fgp:blobs` | `src/fgp-blobs.ts` | Génère `fgp.json` pour le proxy FGP |
-| `test` | `test/test.ts` | Tests hors ligne |
+| `notifiers` | `src/notifiers.ts` | Pose les notifiers Scalingo qui appellent le relais |
+| `test` | `test/test.ts`, `test/relay.test.ts`, `test/notifiers.test.ts` | Tests hors ligne |
 | `typecheck` | `tsc --noEmit` | Vérification des types |
 
 `pnpm init`, `pnpm audit` et `pnpm prune` sont des commandes de pnpm, qui
@@ -100,7 +101,10 @@ Par commande :
 - `apply.ts` : `--dry-run`, `--app <fragment>`, `--force` (redéploie une app
   conforme, exige `--app`), `--reconcile`, `--prune`, `--validate`, `--adopt`
   (amorce le lock depuis l'état réel, sans déployer), `--propose-db`,
-  `--propose-security`.
+  `--propose-security`, `--async` (un passage puis rend la main, l'état en vol
+  dans le lock), `--resume` (fait avancer le déploiement en cours sans en ouvrir).
+- `notifiers.ts` : `--dry-run`, `--app <fragment>`, `--remove`. Lit
+  `SCALINGO_API_TOKEN` et `RELAY_URL` dans l'environnement.
 - `audit.ts` : `--app <fragment>`, `--region <nom>` (répétable, prime sur les
   régions du manifeste), `--json` (inventaire complet sur la sortie standard),
   `--no-build-log`.
@@ -150,6 +154,7 @@ Inputs :
 | `fgp-path` | tous sauf `propose-security` | `fgp.json` |
 | `dry_run` | `reconcile`, `apply` | `false` pour `reconcile`, `true` pour `apply` |
 | `app`, `force` | `apply` | `""`, `false` |
+| `async`, `resume` | `reconcile`, `apply` | `false`, `false` (voir [Relais et notifiers](FEATURES.md#relais-et-notifiers)) |
 | `dashboard-label`, `dashboard-title` | `reconcile`, `apply` | `etat-parc`, `Parc Scalingo : etat de la convergence` |
 | `matrix-homeserver`, `matrix-room-id` | `reconcile`, `apply` | `""` (notification Matrix désactivée) |
 | `lock-commit-message` | `reconcile`, `apply` | `chore(lock): etat du parc apres reconciliation` (ou `apres deploiement`) |

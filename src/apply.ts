@@ -11,9 +11,16 @@
  *
  * Requiert SCALINGO_API_TOKEN.
  *
+ *   node src/apply.ts --async      un passage puis rend la main, l'etat en vol dans le lock
+ *   node src/apply.ts --resume     fait avancer ce qui est en vol, sans ouvrir de deploiement
+ *
  * Deroulement pour chaque app ayant un ecart avec le manifest :
  *   sauvegarde de la base -> ecriture de la variable de version -> deploiement
- *   -> attente du statut final -> ecriture du lock.
+ *   -> fenetre de garde -> ecriture du lock.
+ *
+ * Chaque etape est lancee puis relue au passage suivant, jamais attendue sur
+ * place : l'etape en cours vit dans le lock. Sans --async, la commande enchaine
+ * elle-meme les passages jusqu'a la fin du deploiement, comme avant.
  *
  * La premiere app effectivement deployee sert d'eclaireur : si elle echoue, la
  * vague s'arrete. Si elle est seulement interrompue, la suivante reprend le
@@ -24,6 +31,7 @@
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { createHash } from "node:crypto";
 import { isMap, isScalar, isSeq, parse, parseDocument, type Document, type ToStringOptions } from "yaml";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { accessModes, flagValue, outFile, readFgpFile, resolvePaths, shown, toolRef, type Fgp, type Paths } from "./options.ts";
@@ -83,16 +91,68 @@ type LockEntry = {
   deployment: { id: string; status: string; at: string } | null;
   backup: { id: string; at: string } | null;
   quarantine: { target: Target; reason: string; at: string; deploymentId: string | null } | null;
+  inflight?: Inflight | null;
+};
+
+/**
+ * Operation lancee sur une app et pas encore conclue. Le passage qui l'a lancee
+ * a pu rendre la main : seul le lock garde la trace de ce qu'il faut relire.
+ *
+ * `since` date le debut de l'etape en cours, pour borner l'attente. `rollout`
+ * rattache l'operation au deploiement qui l'a lancee : un eclaireur n'a de
+ * verdict que pour le sien. `async` fige le mode du passage qui l'a lancee : sa
+ * borne d'attente est la sienne, quel que soit le passage qui la relit.
+ */
+type Inflight = {
+  target: Target;
+  step: "backup" | "deploy";
+  since: string;
+  rollout: string;
+  async: boolean;
+  backups: Array<{ addon: string; id: string }>;
+  deployment: { id: string; at: string } | null;
+};
+
+/**
+ * Deploiement en cours sur le parc : ce qu'un passage unique faisait de bout en
+ * bout, etale sur autant de passages qu'il faut.
+ *
+ * Seul un passage ordinaire en ouvre un, jamais une reprise : un echec de
+ * l'eclaireur ne doit pas se rejouer sur l'app suivante a chaque ping, mais au
+ * passage ordinaire suivant, comme avant. `fingerprint` resume les cibles et la
+ * portee au moment de l'ouverture : un manifeste qui change en ouvre un autre,
+ * avec son propre eclaireur. `settled` retient les apps deja traitees, qu'un
+ * passage ulterieur ne doit pas relancer. `notes` garde ce qui n'a pas abouti :
+ * une reprise ne reecrit pas le tableau de bord, et l'interruption qu'elle
+ * constate doit encore y figurer a la fermeture.
+ */
+type Rollout = {
+  id: string;
+  fingerprint: string;
+  filter: string | null;
+  force: boolean;
+  scout: string | null;
+  scoutPassed: boolean;
+  interruptedScouts: number;
+  stopped: string | null;
+  settled: string[];
+  notes?: Array<{ key: string; detail: string }>;
 };
 
 // generatedAt date le dernier changement d'etat, pas la derniere verification :
 // une reconciliation qui ne constate rien ne doit pas produire de diff. Sinon le
 // cron bidouillait un horodatage toutes les deux heures et le depot se
 // remplissait de commits vides de sens.
-type Lock = { version: number; generatedAt: string | null; apps: Record<string, LockEntry> };
+type Lock = { version: number; generatedAt: string | null; apps: Record<string, LockEntry>; rollout?: Rollout | null };
 
 const DEPLOY_TIMEOUT_MS = 20 * 60 * 1000;
 const BACKUP_TIMEOUT_MS = 30 * 60 * 1000;
+// En --async, attendre ne coute plus de minutes de CI : les bornes ne servent
+// plus qu'a ne pas laisser une app en vol pour toujours. Le 2026-11-18, des
+// sauvegardes sont restees en `scheduled` pres de deux heures cote Scalingo.
+const DEPLOY_ASYNC_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+const BACKUP_ASYNC_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+const SETTLE_ASYNC_TOLERANCE_MS = 24 * 60 * 60 * 1000;
 const POLL_INTERVAL_MS = 10_000;
 // Fenetre de garde d'une app qui n'en declare aucune. Le 2026-11-04, Metabase a
 // refuse de demarrer sur une base deja migree par une version superieure, en
@@ -225,6 +285,8 @@ const OPT = {
   proposeDb: argv.includes("--propose-db"),
   proposeSecurity: argv.includes("--propose-security"),
   validateOnly: argv.includes("--validate"),
+  async: argv.includes("--async"),
+  resume: argv.includes("--resume"),
   // Lu en tete de main(), comme les chemins : le module est aussi importe par
   // d'autres commandes, dont les options ne le concernent pas.
   appFilter: null as string | null,
@@ -456,18 +518,18 @@ export async function findDatabaseAddons(entry: AppRef) {
   );
 }
 
-async function runBackup(
+async function startBackups(
   entry: AppEntry,
   emit: (line: string) => void = () => {},
-): Promise<{ id: string; at: string }> {
+): Promise<Array<{ addon: string; id: string }>> {
   const addons = await findDatabaseAddons(entry);
   if (addons.length === 0) throw new Error("aucun addon de base de donnees trouve alors que backup=required");
 
   // Une app peut avoir plusieurs bases ; n'en sauvegarder qu'une donnerait un
   // filet partiel tout en affichant un succes.
-  const done: Array<{ id: string; at: string }> = [];
-  for (const addon of addons) done.push(await backupAddon(entry, addon.id, emit));
-  return done[0];
+  const started: Array<{ addon: string; id: string }> = [];
+  for (const addon of addons) started.push({ addon: addon.id, id: await beginBackup(entry, addon.id, emit) });
+  return started;
 }
 
 /**
@@ -510,19 +572,73 @@ export async function backupAddon(
   // Delais ouverts pour que l'abandon soit exerce sans attendre une demi-heure.
   { timeoutMs = BACKUP_TIMEOUT_MS, pollMs = POLL_INTERVAL_MS } = {},
 ): Promise<{ id: string; at: string }> {
+  const auth = await dbAuthFor(entry, addonId);
+  const id = await beginBackup(entry, addonId, emit, auth);
+
+  // Ce qui a ete lu, et rien de plus : la boucle ne distingue pas une
+  // sauvegarde qui progresse d'une entree absente de la liste ou d'un statut
+  // hors du jeu connu. Les 8 et 9 novembre 2026, trois passages ont annonce
+  // « toujours en cours » sur des sauvegardes que la plateforme donnait
+  // terminees, et le message ne laissait aucune prise pour trancher.
+  const start = Date.now();
+  const deadline = start + timeoutMs;
+  let reads = 0;
+  for (;;) {
+    const b = await readBackup(entry, addonId, id, auth);
+    reads++;
+    if (b?.status === "done") return { id, at: b.created_at };
+    if (b?.status === "error") throw new Error(`sauvegarde ${id} en erreur`);
+    if (Date.now() > deadline) {
+      const seen = b ? `${b.status}, en vol depuis ${elapsedSince(b.created_at)}` : "absente de la liste";
+      throw new Error(
+        `sauvegarde ${id} non conclue apres ${elapsed(Date.now() - start)}, statut relu ${reads} fois, dernier : ${seen}`,
+      );
+    }
+    await sleep(pollMs);
+  }
+}
+
+type BackupRow = { id: string; status: string; created_at: string };
+
+type DbAuth = { token: string; headers: Record<string, string> };
+
+async function listBackups(entry: AppRef, addonId: string, auth?: DbAuth): Promise<BackupRow[]> {
+  const dbAuth = auth ?? (await dbAuthFor(entry, addonId));
+  const { database_backups } = await req<{ database_backups: BackupRow[] }>(
+    `${dbApiHost(entry.region)}/api/databases/${addonId}/backups`,
+    dbAuth.token,
+    { headers: dbAuth.headers },
+  );
+  return database_backups;
+}
+
+/** Une sauvegarde telle que la liste la rend, ou null si elle n'y figure pas. */
+async function readBackup(entry: AppRef, addonId: string, id: string, auth?: DbAuth): Promise<BackupRow | null> {
+  return (await listBackups(entry, addonId, auth)).find((x) => x.id === id) ?? null;
+}
+
+/**
+ * Demande une sauvegarde, ou se rattache a celle qui tourne deja, et rend son
+ * identifiant sans attendre qu'elle se conclue.
+ */
+async function beginBackup(
+  entry: AppEntry,
+  addonId: string,
+  emit: (line: string) => void = () => {},
+  auth?: DbAuth,
+): Promise<string> {
   const backupsUrl = `${dbApiHost(entry.region)}/api/databases/${addonId}/backups`;
 
-  const dbAuth = await dbAuthFor(entry, addonId);
+  const dbAuth = auth ?? (await dbAuthFor(entry, addonId));
   const dbToken = dbAuth.token;
 
-  const listBackups = async () => {
-    const { database_backups } = await req<{
-      database_backups: Array<{ id: string; status: string; created_at: string }>;
-    }>(backupsUrl, dbToken, { headers: dbAuth.headers });
+  const listed = async () => {
+    const { database_backups } = await req<{ database_backups: BackupRow[] }>(backupsUrl, dbToken, {
+      headers: dbAuth.headers,
+    });
     return database_backups;
   };
-  const inFlight = (backups: Array<{ id: string; status: string; created_at: string }>) =>
-    backups.find((b) => BACKUP_IN_FLIGHT.test(b.status)) ?? null;
+  const inFlight = (backups: BackupRow[]) => backups.find((b) => BACKUP_IN_FLIGHT.test(b.status)) ?? null;
 
   // L'age de la sauvegarde adoptee est le premier chiffre qui dit si l'attente
   // a un sens : une sauvegarde en vol depuis des heures n'aboutira pas dans la
@@ -535,11 +651,11 @@ export async function backupAddon(
   // Se rattacher a une sauvegarde deja lancee plutot que d'en demander une
   // seconde, que db-api refuserait de toute facon.
   //
-  // Le watcher ne garde aucune memoire d'un passage a l'autre : une sauvegarde
-  // qui deborde du delai devient orpheline, et le passage suivant en redemande
-  // une, prend un 400, et echoue en quelques secondes. Le blocage se
-  // reconduisait ainsi a chaque passage. Le 2026-09-23, une sauvegarde de
-  // 40 Mo a mis plus d'une heure cote Scalingo et a fige le parc entier.
+  // Le 2026-09-23, une sauvegarde de 40 Mo a mis plus d'une heure cote
+  // Scalingo, et chaque passage qui en redemandait une prenait un 400 et
+  // echouait en quelques secondes : le blocage se reconduisait. Le lock garde
+  // desormais l'identifiant en vol, mais un passage parti d'un lock perime, ou
+  // une sauvegarde periodique de la plateforme, retombent encore ici.
   const requestBackup = async (): Promise<string> => {
     try {
       const created = await req<{ database_backup: { id: string } }>(backupsUrl, dbToken, {
@@ -555,46 +671,28 @@ export async function backupAddon(
       if (refusal.status !== 400 || !/a backup is running/i.test(refusal.body ?? "")) throw e;
       // Pas BACKUP_IN_FLIGHT ici : db-api vient d'affirmer qu'une sauvegarde
       // tourne, un statut qu'on n'aurait pas prevu ne doit pas le contredire.
-      // La selection s'aligne sur la boucle d'attente, qui raisonne a l'envers.
-      const concurrent = (await listBackups()).find((b) => b.status !== "done" && b.status !== "error");
+      // La selection s'aligne sur la relecture, qui raisonne a l'envers.
+      const concurrent = (await listed()).find((b) => b.status !== "done" && b.status !== "error");
       if (!concurrent) throw e;
       return attach(concurrent);
     }
   };
 
-  const existing = inFlight(await listBackups());
+  const existing = inFlight(await listed());
   const id = existing ? attach(existing) : await requestBackup();
-
-  // Ce qui a ete lu, et rien de plus : la boucle ne distingue pas une
-  // sauvegarde qui progresse d'une entree absente de la liste ou d'un statut
-  // hors du jeu connu. Les 8 et 9 novembre 2026, trois passages ont annonce
-  // « toujours en cours » sur des sauvegardes que la plateforme donnait
-  // terminees, et le message ne laissait aucune prise pour trancher.
-  const start = Date.now();
-  const deadline = start + timeoutMs;
-  let reads = 0;
-  for (;;) {
-    const b = (await listBackups()).find((x) => x.id === id);
-    reads++;
-    if (b?.status === "done") return { id, at: b.created_at };
-    if (b?.status === "error") throw new Error(`sauvegarde ${id} en erreur`);
-    if (Date.now() > deadline) {
-      const seen = b ? `${b.status}, en vol depuis ${elapsedSince(b.created_at)}` : "absente de la liste";
-      throw new Error(
-        `sauvegarde ${id} non conclue apres ${elapsed(Date.now() - start)}, statut relu ${reads} fois, dernier : ${seen}`,
-      );
-    }
-    await sleep(pollMs);
-  }
+  return id;
 }
 
 // ---------------------------------------------------------------- deploiement
 
 const TERMINAL = /^(success|build-error|crashed-error|timeout-error|hook-error|aborted)$/;
 
-async function deploy(entry: AppEntry, target: Target) {
+type DeploymentState = { id: string; status: string; created_at: string; finished_at?: string | null };
+
+/** Lance le deploiement de la cible et rend son identifiant, sans l'attendre. */
+async function startDeploy(entry: AppEntry, target: Target): Promise<{ id: string; at: string }> {
   const sourceUrl = `https://github.com/${entry.source.repo}/archive/${target.sha}.tar.gz`;
-  const created = await reqApi<{ deployment: { id: string } }>(
+  const { deployment: made } = await reqApi<{ deployment: { id: string; created_at?: string } }>(
     `${apiHost(entry.region)}/v1/apps/${entry.app}/deployments`,
     entry.region,
     {
@@ -604,23 +702,15 @@ async function deploy(entry: AppEntry, target: Target) {
       }),
     },
   );
-  const id = created.deployment.id;
+  return { id: made.id, at: made.created_at ?? new Date().toISOString() };
+}
 
-  const deadline = Date.now() + DEPLOY_TIMEOUT_MS;
-  for (;;) {
-    const { deployment } = await reqApi<{
-      deployment: { id: string; status: string; created_at: string };
-    }>(`${apiHost(entry.region)}/v1/apps/${entry.app}/deployments/${id}`, entry.region);
-    if (TERMINAL.test(deployment.status)) {
-      return { id, status: deployment.status, at: deployment.created_at };
-    }
-    if (Date.now() > deadline) {
-      throw new Error(
-        `deploiement ${id} toujours en cours apres ${DEPLOY_TIMEOUT_MS / 60000} min, statut non conclu`,
-      );
-    }
-    await sleep(POLL_INTERVAL_MS);
-  }
+async function readDeployment(entry: AppEntry, id: string): Promise<DeploymentState> {
+  const { deployment } = await reqApi<{ deployment: DeploymentState }>(
+    `${apiHost(entry.region)}/v1/apps/${entry.app}/deployments/${id}`,
+    entry.region,
+  );
+  return deployment;
 }
 
 // ---------------------------------------------------------------- fenetre de garde
@@ -632,8 +722,12 @@ async function deploy(entry: AppEntry, target: Target) {
 // sortir en code 1. D'ici la, le lock porte deja "deployed" et l'eclaireur a
 // donne son feu vert aux suivantes, qui partent a trois de front.
 //
-// La fenetre de garde relit donc les evenements de l'app pendant le temps
-// declare, a la recherche d'un redemarrage que personne n'a demande.
+// La fenetre de garde relit donc les evenements de l'app sur le temps declare
+// apres la fin du deploiement, a la recherche d'un redemarrage que personne n'a
+// demande. Elle se lit apres coup, au premier passage qui suit la fin de la
+// fenetre : les evenements et la fin du deploiement portent tous deux
+// l'horloge de la plateforme, et le passage qui conclut peut venir des heures
+// plus tard sans que la garde perde quoi que ce soit.
 //
 // Deux chemins ecartes. Une sonde sur l'app elle-meme : derriere un
 // oauth2-proxy, c'est le wrapper qui prend $PORT, et sa disponibilite ne dit
@@ -646,15 +740,26 @@ async function deploy(entry: AppEntry, target: Target) {
 // fini de demarrer, mais qu'il n'est pas tombe dans le temps qu'on lui a laisse.
 //
 // Elle s'applique d'office, DEFAULT_SETTLE_WINDOW a defaut de declaration, et se
-// conclut sur l'etat des conteneurs : chacun doit etre `running`, avec une
-// attente bornee. Le statut de l'app ne suffit pas pour ca, il vaut `running`
-// des qu'un seul conteneur tourne. Une fenetre declaree nulle ne retire que
-// l'attente, pas ce dernier controle.
+// conclut sur l'etat des conteneurs : chacun doit etre `running`, dans un delai
+// borne apres la fenetre. Le statut de l'app ne suffit pas pour ca, il vaut
+// `running` des qu'un seul conteneur tourne. Une fenetre declaree nulle ne
+// retire que l'attente, pas ce dernier controle.
+//
+// L'etat des conteneurs est celui du moment ou le passage conclut. Relu des
+// heures plus tard, faute de ping, il peut porter une panne posterieure a la
+// fenetre : elle est alors attribuee au deploiement. Les evenements, eux, ne
+// comptent que dans la fenetre et le delai de demarrage qui la suit.
 
 const CRASH_EVENTS = new Set(["crash", "repeated_crash"]);
 const BROKEN = new Set(["crashed", "stopped"]);
-type AppEvent = { id: string; type: string; type_data?: { reason?: string } };
+type AppEvent = { id: string; type: string; created_at?: string; type_data?: { reason?: string } };
 type Container = { type: string; type_index?: number; state: string; created_at?: string; deleted_at?: string | null };
+
+// Ecart tolere entre l'horloge du runner et celle de la plateforme : la fin de
+// la fenetre se lit sur la seconde, le passage qui conclut sur la premiere.
+const CLOCK_MARGIN_MS = 15_000;
+const EVENTS_PAGE = 100;
+const EVENTS_MAX_PAGES = 10;
 
 /** Fenetre de garde d'une app : la sienne, sinon celle des defauts, sinon celle du moteur. */
 export const settleOf = (entry: Pick<AppEntry, "settle">, defaults: Manifest["defaults"]): Settle =>
@@ -664,17 +769,27 @@ export const settleOf = (entry: Pick<AppEntry, "settle">, defaults: Manifest["de
 const unexpectedRestart = (e: AppEvent) =>
   CRASH_EVENTS.has(e.type) || (e.type === "restart" && e.type_data?.reason === "unexpected_failure");
 
-async function readEvents(entry: AppEntry): Promise<AppEvent[]> {
-  // `from` compte en heures, une au minimum. La premiere page suffit : un
-  // redemarrage qui vient de se produire y figure en tete.
-  const { events } = await reqApi<{ events?: AppEvent[] }>(
-    `${apiHost(entry.region)}/v1/apps/${entry.app}/events?from=1`,
-    entry.region,
-  );
-  // Une forme inattendue doit se dire : une liste vide ferait passer la fenetre
-  // pour une surveillance alors qu'elle ne regarderait rien.
-  if (!Array.isArray(events)) throw new Error(`reponse sans liste d'evenements sur ${keyOf(entry)}`);
-  return events;
+/**
+ * Evenements de l'app, du plus recent au plus ancien, jusqu'a depasser `since`.
+ * Une boucle de crash remplit vite une page : s'arreter a la premiere aurait
+ * laisse passer le crash qui l'a ouverte.
+ */
+async function readEventsSince(entry: AppEntry, since: string): Promise<AppEvent[]> {
+  const from = Date.parse(since);
+  const out: AppEvent[] = [];
+  for (let page = 1; page <= EVENTS_MAX_PAGES; page++) {
+    const { events } = await reqApi<{ events?: AppEvent[] }>(
+      `${apiHost(entry.region)}/v1/apps/${entry.app}/events?per_page=${EVENTS_PAGE}&page=${page}`,
+      entry.region,
+    );
+    // Une forme inattendue doit se dire : une liste vide ferait passer la fenetre
+    // pour une surveillance alors qu'elle ne regarderait rien.
+    if (!Array.isArray(events)) throw new Error(`reponse sans liste d'evenements sur ${keyOf(entry)}`);
+    out.push(...events);
+    const oldest = events.at(-1)?.created_at;
+    if (events.length < EVENTS_PAGE || (oldest && Date.parse(oldest) < from)) return out;
+  }
+  throw new Error(`plus de ${EVENTS_MAX_PAGES * EVENTS_PAGE} evenements depuis ${since} sur ${keyOf(entry)}, fenetre de garde illisible`);
 }
 
 /**
@@ -695,38 +810,37 @@ async function readContainers(entry: AppEntry, since: string | null): Promise<Co
 
 const containerName = (c: Container) => `${c.type}-${c.type_index ?? "?"}`;
 
+type SettleVerdict = { waiting: string } | { failure: string | null };
+
 /**
- * Raison de refuser le deploiement, ou null si rien ne s'est manifeste.
- *
- * Les evenements deja la ne comptent pas : seuls comptent ceux qui apparaissent
- * ensuite, ce qui evite de comparer notre horloge a celle de la plateforme.
+ * Verdict de la fenetre de garde d'un deploiement reussi : `failure` porte la
+ * raison de le refuser, ou null s'il tient. `waiting` tant que la fenetre court,
+ * ou que les conteneurs demarrent encore dans le delai qu'on leur laisse.
  *
  * Une lecture impossible leve plutot que de rendre un echec : le moteur
  * distingue le rejet, qui met en quarantaine, de l'interruption, qui laisse le
  * lock en l'etat. C'est par la qu'arrive le refus du proxy quand fgp.json
  * precede ce champ, et son message renvoie a la regeneration des blobs.
  */
-async function settleOut(
+async function settleVerdict(
   entry: AppEntry,
   window: number,
-  deployedAt: string,
-  emit: (line: string) => void,
-): Promise<string | null> {
-  emit(`    fenetre de garde, ${window} s, puis etat des conteneurs...`);
-  const seen = new Set((await readEvents(entry)).map((e) => e.id));
-  const fallen = async () => {
-    const fresh = (await readEvents(entry)).filter((e) => !seen.has(e.id));
-    for (const e of fresh) seen.add(e.id);
-    const restart = fresh.find(unexpectedRestart);
-    return restart ? `redemarrage en erreur pendant la fenetre de garde (${restart.type})` : null;
-  };
-  const deadline = Date.now() + window * 1000;
-  for (;;) {
-    await sleep(Math.min(POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())));
-    const failure = await fallen();
-    if (failure) return failure;
-    if (Date.now() >= deadline) break;
+  dep: { created_at: string; finished_at: string },
+  now = Date.now(),
+): Promise<SettleVerdict> {
+  const end = Date.parse(dep.finished_at);
+  const windowEnd = end + window * 1000;
+  if (now < windowEnd + CLOCK_MARGIN_MS) {
+    return { waiting: `fenetre de garde jusqu'a ${new Date(windowEnd).toISOString().slice(11, 19)} UTC` };
   }
+  const startupEnd = windowEnd + STARTUP_TIMEOUT_MS;
+
+  const restart = (await readEventsSince(entry, dep.finished_at)).find((e) => {
+    const at = Date.parse(e.created_at ?? "");
+    return at >= end && at <= startupEnd && unexpectedRestart(e);
+  });
+  if (restart) return { failure: `redemarrage en erreur pendant la fenetre de garde (${restart.type})` };
+
   // Le statut d'app ne suffirait pas a lui seul : la plateforme ne marque
   // `crashed` qu'au treizieme crash consecutif, soit plusieurs heures, et l'app
   // se lit `running` pendant toute la boucle. Il attrape en revanche une app
@@ -738,28 +852,20 @@ async function settleOut(
   // fenetre, pour une raison etrangere au deploiement.
   const state = await readAppStatus(entry);
   if ("unreadable" in state) throw new Error(`statut illisible apres la fenetre de garde : ${state.unreadable}`);
-  if (BROKEN.has(state.status)) return `app "${state.status}" au bout de la fenetre de garde`;
+  if (BROKEN.has(state.status)) return { failure: `app "${state.status}" au bout de la fenetre de garde` };
 
   // Un conteneur qui n'est pas encore `running` laisse attendre, un conteneur
-  // `crashed` conclut tout de suite, et les evenements restent relus entre deux
-  // releves : une boucle de crash se voit la plutot qu'au bout du delai.
-  // `stopped` attend aussi : rien ne dit que la plateforme pose `deleted_at` sur
-  // l'ancienne formation avant de la marquer eteinte.
-  const giveUpAt = Date.now() + STARTUP_TIMEOUT_MS;
-  for (;;) {
-    const containers = await readContainers(entry, deployedAt);
-    const broken = containers.find((c) => c.state === "crashed");
-    if (broken) return `conteneur ${containerName(broken)} "${broken.state}" apres le deploiement`;
-    const waiting = containers.filter((c) => c.state !== "running");
-    if (containers.length > 0 && waiting.length === 0) return null;
-    if (Date.now() >= giveUpAt) {
-      const detail = containers.length === 0 ? "aucun conteneur" : waiting.map((c) => `${containerName(c)} "${c.state}"`).join(", ");
-      return `conteneurs non demarres au bout de ${STARTUP_TIMEOUT_MS / 60_000} min (${detail})`;
-    }
-    await sleep(POLL_INTERVAL_MS);
-    const failure = await fallen();
-    if (failure) return failure;
-  }
+  // `crashed` conclut tout de suite. `stopped` attend aussi : rien ne dit que la
+  // plateforme pose `deleted_at` sur l'ancienne formation avant de la marquer
+  // eteinte.
+  const containers = await readContainers(entry, dep.created_at);
+  const broken = containers.find((c) => c.state === "crashed");
+  if (broken) return { failure: `conteneur ${containerName(broken)} "${broken.state}" apres le deploiement` };
+  const waiting = containers.filter((c) => c.state !== "running");
+  if (containers.length > 0 && waiting.length === 0) return { failure: null };
+  if (now < startupEnd) return { waiting: "conteneurs en cours de demarrage" };
+  const detail = containers.length === 0 ? "aucun conteneur" : waiting.map((c) => `${containerName(c)} "${c.state}"`).join(", ");
+  return { failure: `conteneurs non demarres au bout de ${STARTUP_TIMEOUT_MS / 60_000} min (${detail})` };
 }
 
 /**
@@ -1140,7 +1246,9 @@ type Outcome =
   // qui seule justifie d'arreter la vague.
   | "rejected"
   | "paused"
-  | "skipped-state";
+  | "skipped-state"
+  // Lance et consigne en vol : le verdict viendra d'un passage suivant.
+  | "started";
 
 /**
  * Statuts Scalingo sur lesquels on ne deploie pas.
@@ -1271,7 +1379,7 @@ async function warnDeprecatedStack(entry: AppEntry, stackId: string): Promise<vo
   );
 }
 
-async function applyApp(
+async function launchApp(
   entry: AppEntry,
   manifest: Manifest,
   lock: Lock,
@@ -1282,6 +1390,14 @@ async function applyApp(
   const current = lock.apps[key];
   const sameRepo = current?.source.repo === entry.source.repo;
   const target = targetOf(entry);
+
+  // Un passage ne lance jamais une app en vol, il la fait avancer. Seul le plan
+  // passe ici sans l'avoir avancee : il doit dire qu'elle est en cours, et non
+  // annoncer un deploiement deja parti.
+  if (current?.inflight) {
+    emit(`  ${key} : ${flightLabel(current.inflight)}, conclue par un passage suivant`);
+    return "skipped-state";
+  }
 
   // La pause est une decision, pas un constat : elle vaut meme si l'app tourne.
   if (entry.paused) return observePaused(entry, lock, token, emit);
@@ -1470,33 +1586,169 @@ async function applyApp(
   if (OPT.dryRun) return "planned";
 
   const backupMode: Backup = entry.backup ?? manifest.defaults.backup ?? "required";
-  const settle = settleOf(entry, manifest.defaults);
-  let backup: LockEntry["backup"] = current?.backup ?? null;
 
   try {
     // Les routes de la fenetre de garde sont lues avant toute ecriture. Un
     // fgp.json qui ne les couvre pas laissait deployer, puis interrompait : l'app
     // tournait la cible sans controle, et le releve suivant la consignait.
-    await readEvents(entry);
+    await readEventsSince(entry, new Date().toISOString());
     await readContainers(entry, null);
 
-    if (backupMode === "required") {
-      emit(`    sauvegarde de la base...`);
-      backup = await runBackup(entry, emit);
-      emit(`    sauvegarde ${backup.id} disponible`);
-    } else {
-      emit(`    sauvegarde non disponible sur cette app, deploiement non sauvegarde`);
+    // Un passage parti d'un lock perime ne sait pas qu'il a deja lance ce
+    // deploiement. Scalingo, lui, le sait : un second lance par-dessus partirait
+    // en file derriere le premier, sauvegarde comprise.
+    const last = await lastDeployment(entry);
+    if (last && !TERMINAL.test(last.status)) {
+      emit(`    deploiement ${last.id} deja en cours sur Scalingo (${last.status}), rien n'est lance`);
+      return "skipped-state";
     }
 
-    const varState = await setVariable(entry, entry.tool.env, target.version);
-    if (varState !== "unchanged") emit(`    ${entry.tool.env} ${varState === "created" ? "creee" : "mise a jour"}`);
+    const rollout = lock.rollout?.id ?? "";
+    const since = new Date().toISOString();
+    if (backupMode === "required") {
+      emit(`    sauvegarde de la base...`);
+      const backups = await startBackups(entry, emit);
+      lock.apps[key] = { ...(current ?? blankEntry(entry)), inflight: { target, step: "backup", since, rollout, async: OPT.async, backups, deployment: null } };
+      return "started";
+    }
+    emit(`    sauvegarde non disponible sur cette app, deploiement non sauvegarde`);
+    lock.apps[key] = { ...(current ?? blankEntry(entry)), inflight: { target, step: "deploy", since, rollout, async: OPT.async, backups: [], deployment: null } };
+    await deployNow(entry, lock, emit);
+    return "started";
+  } catch (e) {
+    // Volontairement sans quarantaine ni ecriture de version : on ne sait pas ou
+    // l'operation s'est arretee, donc le lock reste sur ce qu'il savait.
+    if (current) lock.apps[key] = current;
+    else delete lock.apps[key];
+    emit(`    INTERROMPU : ${(e as Error).message}`);
+    note(key, `interrompu : ${(e as Error).message.slice(0, 240)}`);
+    return "error";
+  }
+}
 
-    emit(`    deploiement...`);
-    const dep = await deploy(entry, target);
+/** Entree de lock d'une app jamais deployee par le watcher, le temps de son premier deploiement. */
+const blankEntry = (entry: AppEntry): LockEntry => ({
+  source: { repo: entry.source.repo, sha: "" },
+  tool: { env: entry.tool.env, version: null },
+  buildpacks: [],
+  deployment: null,
+  backup: null,
+  quarantine: null,
+});
+
+/** Pose la variable de version et lance le deploiement de l'operation en vol. */
+async function deployNow(entry: AppEntry, lock: Lock, emit: (line: string) => void): Promise<void> {
+  const key = keyOf(entry);
+  const flight = lock.apps[key].inflight!;
+  const varState = await setVariable(entry, entry.tool.env, flight.target.version);
+  if (varState !== "unchanged") emit(`    ${entry.tool.env} ${varState === "created" ? "creee" : "mise a jour"}`);
+  emit(`    deploiement...`);
+  const deployment = await startDeploy(entry, flight.target);
+  flight.step = "deploy";
+  flight.since = new Date().toISOString();
+  flight.deployment = deployment;
+}
+
+/** Retire l'operation en vol, et l'entree elle-meme si elle n'existait que pour elle. */
+function dropFlight(lock: Lock, key: string): void {
+  const entry = lock.apps[key];
+  if (!entry) return;
+  delete entry.inflight;
+  if (entry.source.sha === "" && !entry.deployment && !entry.quarantine && !entry.backup) delete lock.apps[key];
+}
+
+/** Ce qu'une app en vol attend, pour le journal et le tableau de bord. */
+export function flightLabel(flight: Pick<Inflight, "step" | "since" | "target">, now = Date.now()): string {
+  const what = flight.step === "backup" ? "sauvegarde" : "deploiement";
+  return `${what} en cours depuis ${elapsedSince(flight.since, now)}, cible ${flight.target.version} @ ${flight.target.sha.slice(0, 7)}`;
+}
+
+/**
+ * Relit l'operation en vol d'une app et la fait avancer d'une etape.
+ *
+ * `waiting` tant que rien n'est conclu. Une lecture qui echoue laisse l'app en
+ * vol, jusqu'a la borne de l'etape : un 502 passager ne doit pas abandonner un
+ * deploiement en cours, que Scalingo menera a son terme sans nous. Un refus du
+ * proxy, lui, ne passera pas tout seul.
+ */
+async function advanceApp(
+  entry: AppEntry,
+  manifest: Manifest,
+  lock: Lock,
+  emit: (line: string) => void,
+): Promise<Outcome | "waiting"> {
+  const key = keyOf(entry);
+  const current = lock.apps[key];
+  const flight = current.inflight!;
+  // Un lock ecrit avant ce champ n'a pu etre lance que par ce mode-ci.
+  const launchedAsync = flight.async ?? OPT.async;
+  const bound = flight.step === "backup"
+    ? (launchedAsync ? BACKUP_ASYNC_TIMEOUT_MS : BACKUP_TIMEOUT_MS)
+    : (launchedAsync ? DEPLOY_ASYNC_TIMEOUT_MS : DEPLOY_TIMEOUT_MS);
+  const age = Date.now() - Date.parse(flight.since);
+  const giveUp = (message: string) => Object.assign(new Error(message), { giveUp: true });
+  // Apres la fin du build, la garde a sa propre echeance : un passage qui conclut
+  // tard, faute de ping, ne doit pas perdre le verdict a la premiere lecture ratee.
+  let settleDeadline: number | null = null;
+
+  // Tant que rien n'est ecrit sur l'app, le manifeste reprend la main : une app
+  // mise en pause, ou ramenee a une autre cible pendant sa sauvegarde, n'est pas
+  // deployee sur une cible que plus personne ne demande.
+  if (flight.step === "backup" && (entry.paused || !sameTarget(targetOf(entry), flight.target))) {
+    const why = entry.paused ? "app mise en pause" : `le manifeste demande desormais ${entry.tool.version} @ ${entry.source.sha.slice(0, 7)}`;
+    dropFlight(lock, key);
+    emit(`    abandonnee avant toute ecriture : ${why}`);
+    return "skipped-state";
+  }
+
+  try {
+    if (flight.step === "backup") {
+      const states: Array<BackupRow | null> = [];
+      for (const b of flight.backups) states.push(await readBackup(entry, b.addon, b.id));
+      const failed = flight.backups.find((_, i) => states[i]?.status === "error");
+      if (failed) throw giveUp(`sauvegarde ${failed.id} en erreur`);
+      const pending = flight.backups.findIndex((_, i) => states[i]?.status !== "done");
+      if (pending >= 0) {
+        if (age <= bound) return "waiting";
+        const b = states[pending];
+        const seen = b ? `${b.status}, en vol depuis ${elapsedSince(b.created_at)}` : "absente de la liste";
+        throw giveUp(`sauvegarde ${flight.backups[pending].id} non conclue apres ${elapsed(age)}, dernier statut : ${seen}`);
+      }
+      current.backup = { id: flight.backups[0].id, at: states[0]!.created_at };
+      emit(`    sauvegarde ${flight.backups[0].id} disponible`);
+      // Une ecriture ratee ne se rejoue pas comme une lecture : un POST accepte
+      // dont la reponse s'est perdue empilerait un deploiement par passage.
+      try {
+        await deployNow(entry, lock, emit);
+      } catch (e) {
+        throw giveUp((e as Error).message);
+      }
+      return "waiting";
+    }
+
+    const dep = await readDeployment(entry, flight.deployment!.id);
+    if (!TERMINAL.test(dep.status)) {
+      if (age <= bound) return "waiting";
+      throw giveUp(`deploiement ${dep.id} toujours en cours apres ${elapsed(age)}, statut non conclu (${dep.status})`);
+    }
 
     // Le statut de Scalingo ne dit qu'une chose : le conteneur a repondu. La
     // fenetre de garde verifie qu'il tient.
-    let failure = dep.status !== "success" ? dep.status : await settleOut(entry, settle.window, dep.at, emit);
+    let failure: string | null = dep.status !== "success" ? dep.status : null;
+    if (!failure) {
+      const window = settleOf(entry, manifest.defaults).window;
+      const finishedAt = dep.finished_at ?? dep.created_at;
+      // Le build fini, attendre en --async ne coute plus rien : seule une lecture
+      // qui reste impossible un jour durant interrompt l'app. Un passage enchaine
+      // garde sa borne, il attend sous un job.
+      settleDeadline = Date.parse(finishedAt) + window * 1000 + STARTUP_TIMEOUT_MS + (launchedAsync ? SETTLE_ASYNC_TOLERANCE_MS : bound);
+      const verdict = await settleVerdict(entry, window, { created_at: dep.created_at, finished_at: finishedAt });
+      if ("waiting" in verdict) {
+        emit(`    ${verdict.waiting}`);
+        return "waiting";
+      }
+      failure = verdict.failure;
+    }
 
     // Le controle prealable ne voit qu'un buildpack que `.buildpacks` nomme.
     // Celui-ci mesure au lieu de deduire, et attrape donc aussi un retrait venu
@@ -1504,20 +1756,14 @@ async function applyApp(
     // parseur n'a pas su lire. L'instance a deja tourne un moment sans ce que
     // le buildpack apportait : c'est le prix d'un controle qui mesure.
     const buildpacks = failure ? [] : await readBuildpacks(entry, dep.id);
-    failure ??= buildpacksLost(current?.buildpacks ?? [], buildpacks);
+    failure ??= buildpacksLost(current.buildpacks, buildpacks);
 
     if (failure) {
+      dropFlight(lock, key);
       lock.apps[key] = {
-        ...(current ?? {
-          source: { repo: entry.source.repo, sha: "" },
-          tool: { env: entry.tool.env, version: null },
-          buildpacks: [],
-          deployment: null,
-          backup: null,
-          quarantine: null,
-        }),
-        backup,
-        quarantine: { target, reason: failure, at: new Date().toISOString(), deploymentId: dep.id },
+        ...(lock.apps[key] ?? blankEntry(entry)),
+        backup: current.backup,
+        quarantine: { target: flight.target, reason: failure, at: new Date().toISOString(), deploymentId: dep.id },
       };
       emit(`    ECHEC (${failure}), mise en quarantaine`);
       note(key, `deploiement en echec (${failure}), mise en quarantaine.`);
@@ -1533,28 +1779,240 @@ async function applyApp(
     // fenetre de garde passait ici avec un releve vide parce que personne ne
     // l'avait lu, et l'echeance annoncait un journal illisible qui n'avait
     // jamais ete ouvert.
-    const known = buildpacks.length > 0 ? buildpacks : (current?.buildpacks ?? []);
+    const known = buildpacks.length > 0 ? buildpacks : current.buildpacks;
     if (buildpacks.length === 0 && known.length > 0) {
       warn(key, `journal du build illisible, releve de buildpacks du deploiement precedent conserve`);
     }
 
     lock.apps[key] = {
-      source: { repo: entry.source.repo, sha: target.sha },
-      tool: { env: entry.tool.env, version: entry.tool.version },
+      source: { repo: entry.source.repo, sha: flight.target.sha },
+      tool: { env: entry.tool.env, version: flight.target.version },
       buildpacks: known,
-      deployment: { id: dep.id, status: dep.status, at: dep.at },
-      backup,
+      deployment: { id: dep.id, status: dep.status, at: dep.created_at },
+      backup: current.backup,
       quarantine: null,
     };
     emit(`    succes`);
     return "deployed";
   } catch (e) {
+    const err = e as Error & { giveUp?: boolean; outOfScope?: boolean };
+    const patient = settleDeadline !== null ? Date.now() <= settleDeadline : age <= bound;
+    if (!err.giveUp && !err.outOfScope && patient) {
+      emit(`    lecture impossible, l'app reste en vol : ${err.message.slice(0, 240)}`);
+      return "waiting";
+    }
     // Volontairement sans quarantaine ni ecriture de version : on ne sait pas ou
     // l'operation s'est arretee, donc le lock reste sur ce qu'il savait.
-    if (current) lock.apps[key] = { ...current, backup };
-    emit(`    INTERROMPU : ${(e as Error).message}`);
-    note(key, `interrompu : ${(e as Error).message.slice(0, 240)}`);
+    dropFlight(lock, key);
+    emit(`    INTERROMPU : ${err.message}`);
+    note(key, `interrompu : ${err.message.slice(0, 240)}`);
     return "error";
+  }
+}
+
+// ---------------------------------------------------------------- deploiement en cours
+
+/** Ce que l'eclaireur d'un deploiement a etabli jusqu'ici. */
+export type ScoutState = Pick<Rollout, "scout" | "scoutPassed" | "interruptedScouts" | "stopped">;
+
+/**
+ * Ce que l'issue d'une app change au role d'eclaireur, tant qu'aucun n'est passe.
+ *
+ * L'eclaireur passe seul et bloque la suite en cas d'echec : rien ne sert de
+ * mener six deploiements de front si la cible elle-meme est mauvaise. Une fois
+ * qu'une app est passee, les autres sont independantes et peuvent avancer
+ * ensemble, leurs bases etant separees et leur ordre sans importance.
+ *
+ * Une interruption ne dit rien de la cible, contrairement a un echec. Les
+ * confondre laissait une base lente sur la premiere app figer tout le parc,
+ * alors que les bases des suivantes n'ont rien a voir avec elle : l'app
+ * suivante reprend donc le role. Passe deux interruptions d'affilee, ce n'est
+ * plus une app qui est en cause mais l'acces a Scalingo, et continuer brulerait
+ * le delai de chacune des suivantes pour le redecouvrir.
+ */
+export function scoutAfter(state: ScoutState, key: string, outcome: Outcome): ScoutState {
+  if (state.scoutPassed || state.stopped) return state;
+  switch (outcome) {
+    case "deployed":
+      return { ...state, scout: key, scoutPassed: true, interruptedScouts: 0 };
+    case "failed":
+      return { ...state, scout: key, stopped: `echec sur l'eclaireur ${key}` };
+    case "error": {
+      const interruptedScouts = state.interruptedScouts + 1;
+      return {
+        ...state,
+        scout: null,
+        interruptedScouts,
+        stopped:
+          interruptedScouts >= MAX_INTERRUPTED_SCOUTS
+            ? `${interruptedScouts} eclaireurs interrompus d'affilee, acces a Scalingo en cause`
+            : null,
+      };
+    }
+    case "started":
+      return { ...state, scout: key };
+    // Une lecture qui passe ne dit pas qu'une ecriture passerait.
+    case "paused":
+      return state;
+    // Une app menee a son terme prouve que Scalingo repond, et rompt la serie.
+    default:
+      return { ...state, interruptedScouts: 0 };
+  }
+}
+
+/**
+ * Empreinte de ce qu'un passage ordinaire demande : la portee, le forcage et
+ * les cibles des apps hors pause. Deux passages qui demandent la meme chose
+ * poursuivent le meme deploiement ; un manifeste qui a change en ouvre un autre,
+ * avec son propre eclaireur, comme un nouveau passage le faisait.
+ */
+export function rolloutFingerprint(apps: readonly AppEntry[], filter: string | null, force: boolean): string {
+  const scope = apps
+    .filter((e) => !e.paused && (!filter || e.app.includes(filter)))
+    .map((e) => [keyOf(e), e.source.sha, e.tool.version]);
+  return createHash("sha256").update(JSON.stringify([filter, force, scope])).digest("hex").slice(0, 16);
+}
+
+const rolloutScope = (manifest: Manifest, rollout: Rollout) =>
+  manifest.apps.filter((e) => !rollout.filter || e.app.includes(rollout.filter));
+
+const inFlight = (lock: Lock) => Object.entries(lock.apps).filter(([, v]) => v.inflight);
+
+// Ce que les passages d'un deploiement referme pendant ce run n'ont pas mene a
+// bien, a reporter au tableau de bord avec ce que ce run a constate lui-meme.
+const closedNotes: Array<{ key: string; detail: string }> = [];
+const sameNote = (a: { key: string; detail: string }, b: { key: string; detail: string }) => a.key === b.key && a.detail === b.detail;
+
+/** Ajoute a `into` ce qui n'y figure pas encore. */
+function mergeNotes(into: Array<{ key: string; detail: string }>, from: ReadonlyArray<{ key: string; detail: string }>): void {
+  for (const n of from) if (!into.some((m) => sameNote(m, n))) into.push(n);
+}
+
+type PassTally = Record<Outcome, number>;
+
+/**
+ * Un passage : fait avancer ce qui est en vol, ouvre au besoin un deploiement,
+ * lance ce que le budget permet, et referme le deploiement quand il ne reste
+ * rien. Rend vrai si un deploiement s'est referme pendant le passage.
+ *
+ * Une reprise (`resume`) n'ouvre jamais de deploiement : elle mene a son terme
+ * celui qui est ouvert, sans plus. Un eclaireur en echec ne se rejoue donc sur
+ * l'app suivante qu'au passage ordinaire d'apres, comme avant, et non a chaque
+ * ping.
+ */
+async function runPass(
+  manifest: Manifest,
+  lock: Lock,
+  token: string,
+  tally: PassTally,
+  resume: boolean,
+): Promise<boolean> {
+  const flying = inFlight(lock);
+  if (flying.length > 0) log(`EN COURS\n`);
+  for (const [key, held] of flying) {
+    const entry = manifest.apps.find((e) => keyOf(e) === key);
+    const flight = held.inflight!;
+    if (!entry) {
+      log(`  ${key} : en vol mais absente du manifeste, abandonnee sans verdict`);
+      dropFlight(lock, key);
+      continue;
+    }
+    const lines = [`  ${key} : ${flightLabel(flight)}`];
+    const outcome = await advanceApp(entry, manifest, lock, (l) => lines.push(l));
+    log(lines.join("\n"));
+    if (outcome === "waiting") continue;
+    tally[outcome]++;
+    const rollout = lock.rollout;
+    if (rollout && flight.rollout === rollout.id) {
+      if (!rollout.settled.includes(key)) rollout.settled.push(key);
+      if (rollout.scout === key) settleScout(rollout, key, outcome);
+    }
+  }
+
+  if (!resume) {
+    const fingerprint = rolloutFingerprint(manifest.apps, OPT.appFilter, OPT.force);
+    const open = lock.rollout;
+    const ownFlights = open ? inFlight(lock).some(([, v]) => v.inflight!.rollout === open.id) : false;
+    if (!open || open.fingerprint !== fingerprint || (open.stopped && !ownFlights)) {
+      if (open && open.fingerprint !== fingerprint && !open.stopped) {
+        log(`\nLe manifeste ou la portee ont change depuis l'ouverture du deploiement en cours : un nouveau prend la suite, avec son eclaireur.`);
+      }
+      lock.rollout = {
+        id: new Date().toISOString(),
+        fingerprint,
+        filter: OPT.appFilter,
+        force: OPT.force,
+        scout: null,
+        scoutPassed: false,
+        interruptedScouts: 0,
+        stopped: null,
+        settled: [],
+      };
+    }
+  }
+
+  const rollout = lock.rollout;
+  // Une reprise poursuit le deploiement tel qu'il a ete ouvert. Un manifeste
+  // qui a change depuis demande un nouvel eclaireur, que seul un passage
+  // ordinaire designe : la reprise ne lance alors plus rien.
+  const drifted = rollout !== null && rollout !== undefined && resume &&
+    rolloutFingerprint(manifest.apps, rollout.filter, rollout.force) !== rollout.fingerprint;
+  if (drifted) log(`\nLe manifeste a change depuis l'ouverture du deploiement : la suite attend le prochain passage ordinaire.`);
+  if (rollout && !rollout.stopped && !drifted) {
+    // Le forcage vaut pour le deploiement qui l'a demande, et pour lui seul :
+    // une reprise relancee par un ping ne porte aucune option.
+    OPT.force = rollout.force;
+    let header = false;
+    for (const entry of rolloutScope(manifest, rollout)) {
+      const key = keyOf(entry);
+      if (lock.apps[key]?.inflight || rollout.settled.includes(key)) continue;
+      if (rollout.stopped) break;
+      // L'eclaireur passe seul, y compris face aux operations d'un deploiement
+      // precedent encore en vol : sinon deux apps porteraient une cible sans
+      // verdict, et le plafond de trois de front sauterait.
+      if (!rollout.scoutPassed) {
+        if (inFlight(lock).length > 0) break;
+      } else if (inFlight(lock).length >= DEPLOY_CONCURRENCY) break;
+
+      if (!header) {
+        log(`\nAPPLICATION`);
+        log(rollout.scoutPassed ? `eclaireur passe, ${DEPLOY_CONCURRENCY} de front au plus\n` : `eclaireur a designer, une app a la fois\n`);
+        header = true;
+      }
+      const lines: string[] = [];
+      const outcome = await launchApp(entry, manifest, lock, token, (l) => lines.push(l));
+      log(lines.join("\n"));
+      tally[outcome]++;
+      if (outcome !== "started") rollout.settled.push(key);
+      if (!rollout.scoutPassed) settleScout(rollout, key, outcome);
+    }
+  }
+
+  if (!lock.rollout) return false;
+  const open = lock.rollout;
+  const ownFlights = inFlight(lock).some(([, v]) => v.inflight!.rollout === open.id);
+  const remaining = open.stopped
+    ? []
+    : rolloutScope(manifest, open).filter((e) => !open.settled.includes(keyOf(e)) && !lock.apps[keyOf(e)]?.inflight);
+  if (ownFlights || remaining.length > 0) return false;
+  log(open.stopped ? `\nDeploiement arrete : ${open.stopped}.` : `\nDeploiement termine.`);
+  closedNotes.push(...(open.notes ?? []));
+  lock.rollout = null;
+  return true;
+}
+
+/** Applique au deploiement en cours le verdict d'eclaireur d'une app, et le dit. */
+function settleScout(rollout: Rollout, key: string, outcome: Outcome): void {
+  const before = rollout.interruptedScouts;
+  Object.assign(rollout, scoutAfter(rollout, key, outcome));
+  if (outcome === "failed") log(`\nEchec sur l'eclaireur, la vague s'arrete ici.`);
+  if (outcome === "deployed") log(`\nEclaireur passe, les suivantes avancent ${DEPLOY_CONCURRENCY} de front.`);
+  if (outcome === "error" && rollout.interruptedScouts > before) {
+    log(
+      rollout.stopped
+        ? `\n${rollout.interruptedScouts} eclaireurs interrompus d'affilee, acces a Scalingo en cause, la vague s'arrete ici.`
+        : `\nOperation interrompue sur ${key}, l'app suivante prend le role d'eclaireur.`,
+    );
   }
 }
 
@@ -1883,6 +2341,17 @@ async function writeIncident(lock: Lock, targets: AppEntry[]): Promise<void> {
     }
   }
   lines.push("");
+
+  // Hors du marqueur : un deploiement qui avance n'est pas un changement d'etat,
+  // et le tableau le dit sans faire sonner l'equipe a chaque etape.
+  const flying = Object.entries(lock.apps).filter(([, v]) => v.inflight);
+  if (flying.length > 0 || lock.rollout) {
+    lines.push("## Déploiement en cours", "");
+    if (lock.rollout?.stopped) lines.push(`Arrêté : ${lock.rollout.stopped}.`, "");
+    if (flying.length === 0) lines.push("Aucune application en vol.");
+    for (const [key, v] of flying) lines.push(`- **${key}** : ${flightLabel(v.inflight!)}`);
+    lines.push("");
+  }
 
   // Au tag qui tourne, sans verifier qu'il existe : contrairement au $schema
   // qu'init ecrit une fois chez le parc, ce rapport est reecrit a chaque
@@ -3076,7 +3545,9 @@ export function appsReadByRenovate(source: string): Record<"source" | "tool", { 
 }
 
 /** Version du format de lock que ce moteur sait lire et reecrire. */
-const LOCK_VERSION = 1;
+// 2 : operations en vol et deploiement en cours. Un moteur en version 1 les
+// effacerait en reecrivant le lock, et relancerait ce qui tourne deja.
+const LOCK_VERSION = 2;
 
 export function loadLock(file: string): Lock {
   if (!existsSync(file)) return { version: LOCK_VERSION, generatedAt: null, apps: {} };
@@ -3095,9 +3566,18 @@ export function loadLock(file: string): Lock {
   return lock;
 }
 
+/** Ce qui, dans le lock, est un etat : generatedAt n'en fait pas partie. */
+const lockState = (lock: Lock) => JSON.stringify([lock.apps, lock.rollout ?? null]);
+
 function saveLock(lock: Lock, before: string): boolean {
-  if (JSON.stringify(lock.apps) === before) return false;
+  if (lockState(lock) === before) return false;
   lock.generatedAt = new Date().toISOString();
+  // La version 2 ne vaut que pour un lock qui porte de quoi la justifier : au
+  // repos, il reste lisible par un moteur en version 1, et un retour arriere
+  // de l'outil ou un appelant reste epingle plus bas continuent de marcher.
+  const holdsFlight = Boolean(lock.rollout) || Object.values(lock.apps).some((v) => v.inflight);
+  lock.version = holdsFlight ? LOCK_VERSION : 1;
+  if (!lock.rollout) delete lock.rollout;
   writeFileSync(paths.lock, JSON.stringify(lock, null, 2) + "\n");
   return true;
 }
@@ -3174,7 +3654,7 @@ async function main() {
   }
 
   const lock = loadLock(paths.lock);
-  const lockBefore = JSON.stringify(lock.apps);
+  const lockBefore = lockState(lock);
 
   // Retirer une entree n'est pas anodin : on perd l'historique de deploiement,
   // la derniere sauvegarde et l'eventuelle quarantaine de l'app. Une app sortie
@@ -3250,7 +3730,7 @@ async function main() {
   // parc, puisqu'une variable peut avoir ete changee a la main. La
   // reconciliation traite les deux : elle releve le reel, signale ce qui a
   // bouge hors du watcher, puis laisse l'application converger.
-  if (OPT.reconcile && (token || fgp)) {
+  if (OPT.reconcile && !OPT.resume && (token || fgp)) {
     log("RELEVE DE L'ETAT REEL\n");
     let drifts = 0;
     for (const entry of targets) {
@@ -3258,6 +3738,12 @@ async function main() {
       if (entry.paused) continue;
       const key = keyOf(entry);
       const known = lock.apps[key];
+      // Une app en vol est au milieu d'un changement : le releve ecraserait ce
+      // qu'il faut relire pour le conclure.
+      if (known?.inflight) {
+        log(`  ${key} : en vol, releve differe a la fin de l'operation`);
+        continue;
+      }
       let real: LockEntry;
       try {
         // Le repli sur le sha du lock, et non sur celui du manifeste : quand le
@@ -3295,9 +3781,6 @@ async function main() {
     log(drifts === 0 ? `\nAucune derive${scope}.${pausedNote}\n` : `\n${drifts} derive(s) relevee(s)${scope}.${pausedNote}\n`);
   }
 
-  log(OPT.dryRun ? "PLAN (aucune ecriture)" : "APPLICATION");
-  log(`${targets.length} app(s), dans l'ordre du manifest\n`);
-
   const tally: Record<Outcome, number> = {
     "up-to-date": 0,
     "quarantined-skip": 0,
@@ -3308,84 +3791,93 @@ async function main() {
     rejected: 0,
     paused: 0,
     "skipped-state": 0,
+    started: 0,
   };
 
-  // L'eclaireur est la premiere app REELLEMENT deployee, pas la premiere du
-  // manifest : si les trois premieres sont deja conformes, c'est la quatrieme
-  // qui essuie les platres et dont l'echec doit arreter la vague.
-  // L'eclaireur passe seul et bloque la suite en cas d'echec : rien ne sert de
-  // mener six deploiements de front si la cible elle-meme est mauvaise. Une fois
-  // qu'une app est passee, les autres sont independantes et peuvent avancer
-  // ensemble, leurs bases etant separees et leur ordre sans importance.
-  let scoutDone = false;
-  let stopped = false;
-  let interruptedScouts = 0;
-  let i = 0;
-
-  for (; i < targets.length && !scoutDone && !stopped; i++) {
-    const outcome = await applyApp(targets[i], manifest, lock, token, log);
-    tally[outcome]++;
-    // en plan, une app retenue joue le meme role pour que la structure de la
-    // vague soit visible sans rien deployer
-    if (outcome === "deployed" || (OPT.dryRun && outcome === "planned")) scoutDone = true;
-    if (outcome === "failed") {
-      log(`\nEchec sur l'eclaireur, la vague s'arrete ici.`);
-      stopped = true;
-    } else if (outcome !== "error" && outcome !== "paused") {
-      // Une app menee a son terme prouve que Scalingo repond, et rompt la serie.
-      // `paused` ne prouve rien : une lecture qui passe ne dit pas qu'une
-      // ecriture passerait.
-      interruptedScouts = 0;
-    } else if (outcome === "error") {
-      // Une interruption ne dit rien de la cible, le type Outcome le pose deja.
-      // L'eclaireur s'arretait pourtant dessus comme sur un echec : une base
-      // lente sur la premiere app du manifeste figeait tout le parc, alors que
-      // les bases des suivantes n'ont rien a voir avec elle. L'app suivante
-      // reprend donc le role.
-      interruptedScouts++;
-      if (interruptedScouts >= MAX_INTERRUPTED_SCOUTS) {
-        log(
-          `\n${interruptedScouts} eclaireurs interrompus d'affilee, acces a Scalingo en cause, la vague s'arrete ici.`,
-        );
-        stopped = true;
-      } else {
-        log(
-          `\nOperation interrompue sur ${keyOf(targets[i])}, l'app suivante prend le role d'eclaireur.`,
-        );
-      }
+  let closed = false;
+  let lockChanged = false;
+  if (OPT.dryRun) {
+    log("PLAN (aucune ecriture)");
+    log(`${targets.length} app(s), dans l'ordre du manifest\n`);
+    // L'eclaireur est la premiere app REELLEMENT deployee, pas la premiere du
+    // manifest. En plan, une app retenue joue ce role pour que la structure de
+    // la vague soit visible sans rien deployer.
+    let i = 0;
+    let scoutDone = false;
+    for (; i < targets.length && !scoutDone; i++) {
+      const outcome = await launchApp(targets[i], manifest, lock, token, log);
+      tally[outcome]++;
+      if (outcome === "planned") scoutDone = true;
     }
+    const rest = targets.slice(i);
+    if (rest.length > 0) {
+      if (scoutDone) log(`\n${rest.length} app(s) restantes, menees ${DEPLOY_CONCURRENCY} de front.\n`);
+      const outcomes = await pool(rest, DEPLOY_CONCURRENCY, async (entry) => {
+        // La sortie est accumulee puis rendue d'un bloc : entrelacee, elle
+        // deviendrait illisible des deux apps.
+        const lines: string[] = [];
+        const outcome = await launchApp(entry, manifest, lock, token, (l) => lines.push(l));
+        log(lines.join("\n"));
+        return outcome;
+      });
+      for (const o of outcomes) tally[o]++;
+    }
+  } else {
+    // Le lock est ecrit a chaque passage et non a la fin : un job coupe en
+    // pleine vague laisse ainsi a commit-lock ce qui est en vol, que le passage
+    // suivant reprendra au lieu de tout relancer.
+    let written = lockBefore;
+    let resume = OPT.resume;
+    for (;;) {
+      closed = (await runPass(manifest, lock, token, tally, resume)) || closed;
+      if (lock.rollout) {
+        lock.rollout.notes ??= [];
+        mergeNotes(lock.rollout.notes, problems);
+      }
+      if (saveLock(lock, written)) {
+        written = lockState(lock);
+        lockChanged = true;
+      }
+      resume = true;
+      // Un passage enchaine attend ce qu'il a lance lui-meme. Une operation
+      // lancee en --async a une borne de plusieurs heures : l'attendre ici
+      // brulerait des minutes de CI pour rien, un passage --async la conclura.
+      if (OPT.async || !inFlight(lock).some(([, v]) => !v.inflight!.async)) break;
+      await sleep(POLL_INTERVAL_MS);
+    }
+    log(lockChanged ? `\n${shown(paths.lock)} mis a jour` : `\n${shown(paths.lock)} inchange`);
   }
 
-  const rest = stopped ? [] : targets.slice(i);
-  if (stopped) {
-    const remaining = targets.length - i;
-    if (remaining > 0) log(`Les ${remaining} app(s) suivantes n'ont pas ete touchees.`);
-  } else if (rest.length > 0) {
-    if (scoutDone) log(`\n${rest.length} app(s) restantes, menees ${DEPLOY_CONCURRENCY} de front.\n`);
-    const outcomes = await pool(rest, DEPLOY_CONCURRENCY, async (entry) => {
-      // La sortie est accumulee puis rendue d'un bloc : entrelacee, elle
-      // deviendrait illisible des deux apps.
-      const lines: string[] = [];
-      const outcome = await applyApp(entry, manifest, lock, token, (l) => lines.push(l));
-      log(lines.join("\n"));
-      return outcome;
-    });
-    for (const o of outcomes) tally[o]++;
-  }
-
-  if (!OPT.dryRun) {
-    log(saveLock(lock, lockBefore) ? `\n${shown(paths.lock)} mis a jour` : `\n${shown(paths.lock)} inchange`);
-  }
-
+  const flying = inFlight(lock);
   log("");
   log(
     `conformes ${tally["up-to-date"]}  deployees ${tally.deployed}  echecs ${tally.failed}  ` +
       `interrompues ${tally.error}  quarantaine ${tally["quarantined-skip"]}  ` +
       `rejetees ${tally.rejected}  en pause ${tally.paused}  ` +
-      `non deployables ${tally["skipped-state"]}  planifiees ${tally.planned}`,
+      `non deployables ${tally["skipped-state"]}  planifiees ${tally.planned}  ` +
+      `lancees ${tally.started}  en vol ${flying.length}`,
   );
+  if (flying.length > 0) {
+    log(`\n${flying.length} app(s) en vol, conclues par un passage suivant :`);
+    for (const [key, v] of flying) log(`  ${key} : ${flightLabel(v.inflight!)}`);
+  }
 
-  await applyDatabases(targets, token);
+  // Une reprise ne fait qu'avancer un deploiement : elle ne releve ni les avis,
+  // ni les bases, ni les echeances. Reecrire le tableau de bord sans eux
+  // ferait retomber son marqueur sur "sain" et sonner l'equipe a tort. Elle ne
+  // le reecrit donc qu'a la fermeture du deploiement, avec tout le reste.
+  if (OPT.resume && !closed) {
+    log(`\nReprise : audits et tableau de bord a la fin du deploiement.`);
+    if (tally.failed > 0 || tally.error > 0) process.exit(1);
+    return;
+  }
+
+  // Le tableau de bord dit aussi ce que les reprises de ce deploiement n'ont
+  // pas mene a bien : elles ne l'ont pas reecrit elles-memes.
+  mergeNotes(problems, closedNotes);
+  if (lock.rollout?.notes) mergeNotes(problems, lock.rollout.notes);
+
+  if (!OPT.resume) await applyDatabases(targets, token);
 
   await checkExploited(targets, lock);
   await checkAdvisories(targets, lock);

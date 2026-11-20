@@ -3,3 +3,5 @@ node_modules/
 .starter/
 inventory.json
 
+# Configuration locale du relais : elle porte le jeton GitHub.
+.env
