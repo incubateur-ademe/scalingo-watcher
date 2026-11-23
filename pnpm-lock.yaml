@@ -16,8 +16,8 @@ importers:
         version: 2.9.1
     devDependencies:
       '@tsconfig/node26':
-        specifier: ^26.0.1
-        version: 26.0.1
+        specifier: ^26.0.2
+        version: 26.0.2
       '@types/node':
         specifier: ^26.6.6
         version: 26.6.6
@@ -27,8 +27,8 @@ importers:
 
 packages:
 
-  '@tsconfig/node26@26.0.1':
-    resolution: {integrity: sha512-NQT8JUFDKeAIWpR1dakeF534msQAsoSLr1WpKdRDt3sCvk2fsFK3EVKUBG5xKYVamiRO6yTfniiyvCaqOGgn/g==}
+  '@tsconfig/node26@26.0.2':
+    resolution: {integrity: sha512-RIBSoNGQxUQ8r4hSrEzS6TrUneoKaCuX6BjL4zF3wqttGq2w06zCea4d8P1gRvM/HZyDT1FQJ8trZSyy/63oMg==}
 
   '@types/node@26.6.6':
     resolution: {integrity: sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog==}
@@ -184,7 +184,7 @@ packages:
 
 snapshots:
 
-  '@tsconfig/node26@26.0.1': {}
+  '@tsconfig/node26@26.0.2': {}
 
   '@types/node@26.6.6':
     dependencies:
