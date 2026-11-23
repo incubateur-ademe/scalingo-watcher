@@ -32,7 +32,7 @@
     "node": ">=26"
   },
   "devDependencies": {
-    "@tsconfig/node26": "^26.0.1",
+    "@tsconfig/node26": "^26.0.2",
     "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
   }
